@@ -745,6 +745,10 @@ class MainViewModel(
     ensureRuntime().clearCronJobDetail()
   }
 
+  fun dismissCronActionNotice(id: String) {
+    ensureRuntime().dismissCronActionNotice(id)
+  }
+
   fun runCronJob(id: String) {
     ensureRuntime().runCronJob(id)
   }
