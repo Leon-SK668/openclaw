@@ -105,6 +105,40 @@ describe("memory embedding cache", () => {
     }
   });
 
+  it("ignores malformed cached embedding vectors during readback", () => {
+    const db = createDb();
+    try {
+      db.prepare(
+        `INSERT INTO memory_embedding_cache (
+          provider, model, provider_key, hash, embedding, dims, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run("openai", "text-embedding-3-small", "provider-key", "bad", '["not-a-number"]', 1, 123);
+
+      const cached = loadMemoryEmbeddingCache({
+        db,
+        enabled: true,
+        providerIdentities: [
+          {
+            provider: "openai",
+            model: "text-embedding-3-small",
+            providerKey: "provider-key",
+          },
+        ],
+        hashes: ["bad"],
+      });
+      const plan = collectMemoryCachedEmbeddings({
+        chunks: [{ hash: "bad" }],
+        cached,
+      });
+
+      expect(cached.has("bad")).toBe(false);
+      expect(plan.embeddings).toEqual([[]]);
+      expect(plan.missing).toEqual([{ index: 0, chunk: { hash: "bad" } }]);
+    } finally {
+      db.close();
+    }
+  });
+
   it("reuses cached embeddings on forced reindex instead of scheduling new embeds", () => {
     const cached = new Map<string, number[]>([
       ["alpha", [0.1, 0.2]],

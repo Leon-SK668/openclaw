@@ -52,7 +52,10 @@ export function loadMemoryEmbeddingCache(params: {
         .all(...baseParams, ...batch) as Array<{ hash: string; embedding: string }>;
       for (const row of rows) {
         if (!out.has(row.hash)) {
-          out.set(row.hash, parseEmbedding(row.embedding));
+          const embedding = parseEmbedding(row.embedding);
+          if (embedding.length > 0) {
+            out.set(row.hash, embedding);
+          }
         }
       }
     }

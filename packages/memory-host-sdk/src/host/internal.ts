@@ -511,8 +511,11 @@ export function remapChunkLines(chunks: MemoryChunk[], lineMap: number[] | undef
 
 export function parseEmbedding(raw: string): number[] {
   try {
-    const parsed = JSON.parse(raw) as number[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) &&
+      parsed.every((value): value is number => typeof value === "number" && Number.isFinite(value))
+      ? parsed
+      : [];
   } catch {
     return [];
   }
