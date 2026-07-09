@@ -1,8 +1,12 @@
 // Memory Host SDK tests cover embeddings remote client behavior.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveRemoteEmbeddingBearerClient } from "./embeddings-remote-client.js";
 
 describe("resolveRemoteEmbeddingBearerClient", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("uses configured OpenAI provider baseUrl for memory embeddings", async () => {
     const client = await resolveRemoteEmbeddingBearerClient({
       provider: "openai",
@@ -26,6 +30,26 @@ describe("resolveRemoteEmbeddingBearerClient", () => {
     });
 
     expect(client.baseUrl).toBe("https://proxy.example.test/openai/v1");
+  });
+
+  it("rejects unresolved env SecretRefs instead of using them as bearer tokens", async () => {
+    vi.stubEnv("MEMORY_EMBEDDING_API_KEY", "");
+
+    await expect(
+      resolveRemoteEmbeddingBearerClient({
+        provider: "openai",
+        defaultBaseUrl: "https://api.openai.com/v1",
+        options: {
+          config: { models: {} } as never,
+          model: "text-embedding-3-small",
+          remote: {
+            apiKey: "${MEMORY_EMBEDDING_API_KEY}",
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'agents.*.memorySearch.remote.apiKey: unresolved SecretRef "env:default:MEMORY_EMBEDDING_API_KEY"',
+    );
   });
 
   it("adds OpenClaw attribution to native OpenAI embedding requests", async () => {

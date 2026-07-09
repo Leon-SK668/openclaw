@@ -147,15 +147,11 @@ export function normalizeResolvedSecretInputString(params: {
   value: unknown;
   path: string;
 }): string | undefined {
-  const normalized = normalizeSecretInputString(params.value);
-  if (normalized) {
-    return normalized;
-  }
   const ref = resolveSecretInputRef(params.value);
-  if (!ref) {
-    return undefined;
+  if (ref) {
+    throw createUnresolvedSecretInputError({ path: params.path, ref });
   }
-  throw createUnresolvedSecretInputError({ path: params.path, ref });
+  return normalizeSecretInputString(params.value);
 }
 
 /** Normalize env-provided secret values before use. */
