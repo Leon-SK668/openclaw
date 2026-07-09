@@ -11,9 +11,11 @@ import { resolveCdpControlPolicy } from "../cdp-reachability-policy.js";
 import { withCdpSocket } from "../cdp.helpers.js";
 import { getChromeWebSocketUrl } from "../chrome.js";
 import { toBrowserErrorResponse } from "../errors.js";
+import { assertBrowserNavigationAllowed } from "../navigation-guard.js";
 import { getPwAiModule } from "../pw-ai-module.js";
 import type { BrowserRouteContext } from "../server-context.js";
 import type { ProfileContext } from "../server-context.js";
+import { browserNavigationPolicyForProfile } from "./agent.shared.js";
 import { readRouteTimerTimeoutMs } from "./route-numeric.js";
 import type { BrowserRouteRegistrar } from "./types.js";
 import {
@@ -185,6 +187,13 @@ export function registerBrowserPermissionRoutes(
       }
 
       try {
+        const navigationPolicy = browserNavigationPolicyForProfile(ctx, profileCtx);
+        if (navigationPolicy.ssrfPolicy) {
+          await assertBrowserNavigationAllowed({
+            url: origin,
+            ...navigationPolicy,
+          });
+        }
         await profileCtx.ensureBrowserAvailable();
         const cdpPolicy = resolveCdpControlPolicy(
           profileCtx.profile,
