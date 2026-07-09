@@ -5,6 +5,7 @@ import {
   PAIRING_SETUP_BOOTSTRAP_PROFILE,
   isPairingSetupBootstrapProfile,
   normalizeDeviceBootstrapHandoffProfile,
+  normalizeDeviceBootstrapProfile,
   resolveBootstrapProfileScopesForRole,
   resolveBootstrapProfileScopesForRoles,
 } from "./device-bootstrap-profile.js";
@@ -62,12 +63,23 @@ describe("device bootstrap profile", () => {
           "operator.talk.secrets",
           "operator.write",
         ],
-        purpose: " control-ui ",
+        purpose: "control-ui",
       }),
     ).toEqual({
       roles: ["node", "operator"],
       scopes: ["operator.approvals", "operator.read", "operator.talk.secrets", "operator.write"],
       purpose: "control-ui",
+    });
+  });
+
+  test("drops unknown bootstrap purpose codes", () => {
+    expect(
+      normalizeDeviceBootstrapProfile(
+        JSON.parse('{"roles":["operator"],"scopes":["operator.read"],"purpose":"status"}'),
+      ),
+    ).toEqual({
+      roles: ["operator"],
+      scopes: ["operator.read"],
     });
   });
 
