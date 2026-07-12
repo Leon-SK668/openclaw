@@ -1,6 +1,6 @@
 // Signal tests cover message actions plugin behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sendReactionsModule = await import("./send-reactions.js");
 const sendReactionSignalMock = vi
@@ -9,7 +9,20 @@ const sendReactionSignalMock = vi
 const removeReactionSignalMock = vi
   .spyOn(sendReactionsModule, "removeReactionSignal")
   .mockResolvedValue({ ok: true });
+const { dispatchChannelMessageAction } =
+  await import("../../../src/channels/plugins/message-action-dispatch.js");
+const { setActivePluginRegistry } = await import("../../../src/plugins/runtime.js");
+const { createTestRegistry } = await import("../../../src/test-utils/channel-plugins.js");
+const { signalPlugin } = await import("./channel.js");
 const { signalMessageActions } = await import("./message-actions.js");
+
+const emptyRegistry = createTestRegistry([]);
+
+function activateSignalPluginRegistry() {
+  setActivePluginRegistry(
+    createTestRegistry([{ pluginId: "signal", source: "test", plugin: signalPlugin }]),
+  );
+}
 
 function createSignalAccountOverrideCfg(): OpenClawConfig {
   return {
@@ -29,6 +42,10 @@ describe("signalMessageActions", () => {
   beforeEach(() => {
     sendReactionSignalMock.mockClear();
     removeReactionSignalMock.mockClear();
+  });
+
+  afterEach(() => {
+    setActivePluginRegistry(emptyRegistry);
   });
 
   it("lists actions based on configured accounts and reaction gates", () => {
@@ -66,6 +83,56 @@ describe("signalMessageActions", () => {
     expect(signalMessageActions.supportsAction?.({ action: "react" })).toBe(true);
     expect(signalMessageActions.supportsAction?.({ action: "delete" })).toBe(false);
     expect(signalMessageActions.supportsAction?.({ action: "pin" })).toBe(false);
+  });
+
+  it("declines unsupported actions at the shared dispatcher boundary", async () => {
+    activateSignalPluginRegistry();
+
+    const result = await dispatchChannelMessageAction({
+      channel: "signal",
+      action: "delete",
+      params: { to: "+15550001111", messageId: "123" },
+      cfg: createSignalAccountOverrideCfg(),
+      accountId: "work",
+      requesterAccountId: "work",
+      toolContext: {
+        currentChannelProvider: "signal",
+        currentMessagingTarget: "+15550001111",
+        currentChatType: "direct",
+      },
+    });
+
+    expect(result).toBeNull();
+    expect(sendReactionSignalMock).not.toHaveBeenCalled();
+    expect(removeReactionSignalMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps reaction dispatch working through the shared dispatcher", async () => {
+    activateSignalPluginRegistry();
+    const cfg = createSignalAccountOverrideCfg();
+
+    const result = await dispatchChannelMessageAction({
+      channel: "signal",
+      action: "react",
+      params: { to: "+15550001111", messageId: "123", emoji: "👍" },
+      cfg,
+      accountId: "work",
+      requesterAccountId: "work",
+      toolContext: {
+        currentChannelProvider: "signal",
+        currentMessagingTarget: "+15550001111",
+        currentChatType: "direct",
+      },
+    });
+
+    expect(result?.details).toEqual({ ok: true, added: "👍" });
+    expect(sendReactionSignalMock).toHaveBeenCalledWith("+15550001111", 123, "👍", {
+      cfg,
+      accountId: "work",
+      groupId: undefined,
+      targetAuthor: undefined,
+      targetAuthorUuid: undefined,
+    });
   });
 
   it("blocks reactions when the action gate is disabled", async () => {
