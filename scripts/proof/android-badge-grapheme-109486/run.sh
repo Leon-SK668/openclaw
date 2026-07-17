@@ -109,7 +109,7 @@ if [[ "$gradle_status" -ne 0 ]]; then
   exit "$gradle_status"
 fi
 
-package_name="ai.openclaw.app"
+package_name="ai.openclaw.app.test"
 for artifact in \
   compact-badge-grapheme-proof.png \
   compact-badge-grapheme-proof.xml \

@@ -36,7 +36,7 @@ internal class CompactBadgeProofTest {
     ActivityScenario.launch(CompactBadgeProofActivity::class.java).use {
       val instrumentation = InstrumentationRegistry.getInstrumentation()
       val device = UiDevice.getInstance(instrumentation)
-      val targetFiles = instrumentation.targetContext.filesDir
+      val targetFiles = instrumentation.context.filesDir
 
       assertTrue(
         "proof root never became visible",
