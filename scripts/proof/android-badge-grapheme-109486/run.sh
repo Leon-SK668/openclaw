@@ -85,12 +85,14 @@ git -C "$target_root" diff --exit-code
 } | tee "$artifact_dir/environment.txt"
 
 adb logcat -c
+artifact_device_dir="/sdcard/Download/openclaw-compact-badge-proof-109486"
 set +e
 (
   cd "$target_root/apps/android"
   ./gradlew --no-daemon --stacktrace \
     :app:connectedPlayDebugAndroidTest \
-    "-Pandroid.testInstrumentationRunnerArguments.class=$test_class"
+    "-Pandroid.testInstrumentationRunnerArguments.class=$test_class" \
+    "-Pandroid.testInstrumentationRunnerArguments.proofDir=$artifact_device_dir"
 ) 2>&1 | tee "$artifact_dir/gradle.log"
 gradle_status=${PIPESTATUS[0]}
 set -e
@@ -109,17 +111,14 @@ if [[ "$gradle_status" -ne 0 ]]; then
   exit "$gradle_status"
 fi
 
-package_name="ai.openclaw.app"
-external_storage="$(adb shell 'printf %s "$EXTERNAL_STORAGE"' | tr -d '\r')"
-test -n "$external_storage"
-artifact_device_dir="$external_storage/Android/data/$package_name/files"
 for artifact in \
   compact-badge-grapheme-proof.png \
   compact-badge-grapheme-proof.xml \
   compact-badge-grapheme-proof.json; do
-  adb exec-out cat "$artifact_device_dir/$artifact" > "$artifact_dir/$artifact"
+  adb pull "$artifact_device_dir/$artifact" "$artifact_dir/$artifact" >/dev/null
   test -s "$artifact_dir/$artifact"
 done
+adb shell rm -rf "$artifact_device_dir"
 
 node "$proof_dir/verify-proof.mjs" \
   "$artifact_dir/compact-badge-grapheme-proof.png" \

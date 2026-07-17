@@ -36,6 +36,14 @@ internal class CompactBadgeProofTest {
     ActivityScenario.launch(CompactBadgeProofActivity::class.java).use {
       val instrumentation = InstrumentationRegistry.getInstrumentation()
       val device = UiDevice.getInstance(instrumentation)
+      val publicProofDir =
+        requireNotNull(InstrumentationRegistry.getArguments().getString(PROOF_DIR_ARGUMENT)) {
+          "public proof directory instrumentation argument unavailable"
+        }
+      assertTrue(
+        "public proof directory must use shared Download storage",
+        publicProofDir.startsWith("/sdcard/Download/"),
+      )
       val targetFiles =
         requireNotNull(instrumentation.targetContext.getExternalFilesDir(null)) {
           "target external proof directory unavailable"
@@ -43,6 +51,17 @@ internal class CompactBadgeProofTest {
       assertTrue(
         "failed to create target proof directory",
         targetFiles.isDirectory || targetFiles.mkdirs(),
+      )
+      device.executeShellCommand("rm -rf $publicProofDir")
+      assertTrue(
+        "stale public proof directory survived cleanup",
+        device.executeShellCommand("ls -d $publicProofDir").isBlank(),
+      )
+      device.executeShellCommand("mkdir -p $publicProofDir")
+      assertEquals(
+        "public proof directory was not created",
+        publicProofDir,
+        device.executeShellCommand("ls -d $publicProofDir").trim(),
       )
 
       assertTrue(
@@ -122,6 +141,18 @@ internal class CompactBadgeProofTest {
           .put("replacementNodeCount", replacementNodeCount)
           .put("cases", caseMetrics)
       File(targetFiles, METRICS_FILE).writeText(metrics.toString(2))
+
+      listOf(screenshotFile, hierarchyFile, File(targetFiles, METRICS_FILE)).forEach { artifact ->
+        val publicArtifact = "$publicProofDir/${artifact.name}"
+        device.executeShellCommand("cp ${artifact.absolutePath} $publicArtifact")
+        val exportedSize =
+          device.executeShellCommand("stat -c %s $publicArtifact").trim().toLongOrNull()
+        assertNotNull("public proof artifact was not exported: ${artifact.name}", exportedSize)
+        assertTrue(
+          "public proof artifact is empty: ${artifact.name}",
+          requireNotNull(exportedSize) > 0,
+        )
+      }
     }
   }
 
@@ -178,6 +209,7 @@ internal class CompactBadgeProofTest {
     const val SCREENSHOT_FILE = "compact-badge-grapheme-proof.png"
     const val HIERARCHY_FILE = "compact-badge-grapheme-proof.xml"
     const val METRICS_FILE = "compact-badge-grapheme-proof.json"
+    const val PROOF_DIR_ARGUMENT = "proofDir"
     const val UI_TIMEOUT_MS = 15_000L
     const val FONT_SETTLE_MS = 1_000L
     const val SCREEN_SAMPLE_STEP = 4
