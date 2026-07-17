@@ -81,12 +81,7 @@ jobs:
           emulator-boot-timeout: 600
           pre-emulator-launch-script: sdkmanager --install 'build-tools;36.0.0'
           working-directory: target/apps/android
-          script: |
-            bash "${GITHUB_WORKSPACE}/harness/scripts/proof/android-badge-grapheme-109486/run.sh" \
-              "${GITHUB_WORKSPACE}/target" \
-              "${GITHUB_WORKSPACE}/harness" \
-              "${PR_HEAD_SHA}" \
-              "${GITHUB_WORKSPACE}/proof-artifacts"
+          script: bash "${GITHUB_WORKSPACE}/harness/scripts/proof/android-badge-grapheme-109486/run.sh" "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/harness" "${PR_HEAD_SHA}" "${GITHUB_WORKSPACE}/proof-artifacts"
 
       - name: Upload proof artifacts
         if: always()
