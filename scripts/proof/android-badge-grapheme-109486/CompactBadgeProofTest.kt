@@ -37,6 +37,7 @@ internal class CompactBadgeProofTest {
       val instrumentation = InstrumentationRegistry.getInstrumentation()
       val device = UiDevice.getInstance(instrumentation)
       val targetFiles = instrumentation.context.filesDir
+      assertTrue("failed to create test-package proof directory", targetFiles.mkdirs() || targetFiles.isDirectory)
 
       assertTrue(
         "proof root never became visible",
