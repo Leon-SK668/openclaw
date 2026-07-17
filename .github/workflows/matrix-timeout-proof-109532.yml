@@ -1,0 +1,86 @@
+name: Matrix timeout UTF-16 proof (PR 109532)
+
+on:
+  push:
+    branches:
+      - proof/matrix-timeout-109532
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-timeout-proof-109532-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  OPENCLAW_BUILD_PRIVATE_QA: "1"
+  OPENCLAW_ENABLE_PRIVATE_QA_CLI: "1"
+  PR_HEAD_SHA: 2fd3a9d3d9f9e3e85a347fa84dc1c689c8cef776
+
+jobs:
+  matrix-timeout-proof:
+    if: github.repository == 'Leon-SK668/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.PR_HEAD_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Set up Node and dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.15.0"
+          install-bun: "false"
+          install-deps: "true"
+          use-actions-cache: "false"
+
+      - name: Build exact PR head
+        shell: bash
+        run: pnpm build
+
+      - name: Check out proof harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: proof-harness
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify proof harness revision
+        shell: bash
+        run: test "$(git -C proof-harness rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Run disposable Matrix timeout proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx \
+            "$GITHUB_WORKSPACE/proof-harness/scripts/proof/matrix-timeout-109532/run.mts" \
+            "$GITHUB_WORKSPACE" \
+            "$PR_HEAD_SHA" \
+            "$GITHUB_WORKSPACE/proof-artifacts"
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: matrix-timeout-proof-${{ env.PR_HEAD_SHA }}
+          path: |
+            proof-artifacts/timeout.log
+            proof-artifacts/proof.json
+            proof-artifacts/recording-routes.json
+            proof-artifacts/matrix-qa-harness.json
+          if-no-files-found: warn
+          retention-days: 7
