@@ -36,8 +36,14 @@ internal class CompactBadgeProofTest {
     ActivityScenario.launch(CompactBadgeProofActivity::class.java).use {
       val instrumentation = InstrumentationRegistry.getInstrumentation()
       val device = UiDevice.getInstance(instrumentation)
-      val targetFiles = instrumentation.context.filesDir
-      assertTrue("failed to create test-package proof directory", targetFiles.mkdirs() || targetFiles.isDirectory)
+      val targetFiles =
+        requireNotNull(instrumentation.targetContext.getExternalFilesDir(null)) {
+          "target external proof directory unavailable"
+        }
+      assertTrue(
+        "failed to create target proof directory",
+        targetFiles.isDirectory || targetFiles.mkdirs(),
+      )
 
       assertTrue(
         "proof root never became visible",

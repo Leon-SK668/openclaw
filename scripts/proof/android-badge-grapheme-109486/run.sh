@@ -109,12 +109,15 @@ if [[ "$gradle_status" -ne 0 ]]; then
   exit "$gradle_status"
 fi
 
-package_name="ai.openclaw.app.test"
+package_name="ai.openclaw.app"
+external_storage="$(adb shell 'printf %s "$EXTERNAL_STORAGE"' | tr -d '\r')"
+test -n "$external_storage"
+artifact_device_dir="$external_storage/Android/data/$package_name/files"
 for artifact in \
   compact-badge-grapheme-proof.png \
   compact-badge-grapheme-proof.xml \
   compact-badge-grapheme-proof.json; do
-  adb exec-out run-as "$package_name" cat "files/$artifact" > "$artifact_dir/$artifact"
+  adb exec-out cat "$artifact_device_dir/$artifact" > "$artifact_dir/$artifact"
   test -s "$artifact_dir/$artifact"
 done
 
