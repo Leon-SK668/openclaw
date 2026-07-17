@@ -24,8 +24,15 @@ assert.ok(pngWidth > 0 && pngHeight > 0, "PNG has invalid dimensions");
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const xml = decoder.decode(xmlBytes);
 const metricsText = decoder.decode(metricsBytes);
-assert.ok(!xml.includes("\uFFFD"), "UI hierarchy contains a replacement character");
 assert.ok(!metricsText.includes("\uFFFD"), "metrics contain a replacement character");
+// UiDevice.dumpWindowHierarchy serializes supplementary code points as decimal XML references.
+const decodedXml = xml.replace(/&#([0-9]+);/gu, (reference, rawCodePoint) => {
+  const codePoint = Number(rawCodePoint);
+  return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+    ? String.fromCodePoint(codePoint)
+    : reference;
+});
+assert.ok(!decodedXml.includes("\uFFFD"), "UI hierarchy contains a replacement character");
 
 const expectedCases = new Map([
   ["compass", "\u{1F9ED}"],
@@ -35,7 +42,7 @@ const expectedCases = new Map([
 ]);
 for (const [id, rendered] of expectedCases) {
   assert.ok(
-    xml.includes(`content-desc="badge:${id}:${rendered}"`),
+    decodedXml.includes(`content-desc="badge:${id}:${rendered}"`),
     `UI hierarchy is missing exact ${id} grapheme semantics`,
   );
 }
