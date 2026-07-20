@@ -1,6 +1,5 @@
 // Moonshot tests cover kimi web search provider plugin behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/provider-onboard";
-import type { SearchConfigRecord } from "openclaw/plugin-sdk/provider-web-search";
 import { withEnv, withEnvAsync } from "openclaw/plugin-sdk/test-env";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testing } from "../test-api.js";
@@ -19,10 +18,10 @@ function jsonResponse(body: unknown): Response {
 
 async function executeKimiSearch(
   query: string,
-  searchConfig: SearchConfigRecord = {},
+  config: OpenClawConfig = {},
 ): Promise<Record<string, unknown>> {
   const provider = createKimiWebSearchProvider();
-  const tool = provider.createTool({ config: {}, searchConfig });
+  const tool = provider.createTool({ config, searchConfig: {} });
   if (!tool) {
     throw new Error("Expected tool definition");
   }
@@ -97,7 +96,7 @@ describe("kimi web search provider", () => {
     );
   });
 
-  it("resolves configured env SecretRef apiKey through provider searchConfig", async () => {
+  it("resolves configured env SecretRef apiKey through plugin config", async () => {
     const configuredApiKey = {
       source: "env",
       provider: "default",
@@ -124,7 +123,13 @@ describe("kimi web search provider", () => {
       },
       async () => {
         const result = await executeKimiSearch("kimi configured SecretRef search", {
-          kimi: { apiKey: configuredApiKey },
+          plugins: {
+            entries: {
+              moonshot: {
+                config: { webSearch: { apiKey: configuredApiKey } },
+              },
+            },
+          },
         });
 
         const requestInit = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
