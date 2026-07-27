@@ -335,8 +335,9 @@ export async function fetchBrowserScreenshotDataUrl(params: {
       signal: controller.signal,
     });
     if (!res.ok) {
-      // Release an unread error stream before surfacing the stable status error.
-      await res.body?.cancel().catch(() => undefined);
+      // A response stream can take indefinitely to cancel; release it without
+      // delaying the stable HTTP error or defeating the request deadline.
+      void res.body?.cancel().catch(() => undefined);
       throw new Error(`screenshot fetch failed (${res.status})`);
     }
     blob = await res.blob();
