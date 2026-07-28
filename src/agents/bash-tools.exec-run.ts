@@ -140,14 +140,6 @@ export function createExecTool(
     agentId,
     resolveHostForParams,
   });
-  const autoReviewer =
-    defaults?.autoReviewer ??
-    createModelExecAutoReviewer({
-      cfg: defaults?.config,
-      agentId,
-      reviewer: resolveExecReviewerDefaults({ defaults, agentId }),
-    });
-
   return {
     name: "exec",
     label: "exec",
@@ -160,6 +152,15 @@ export function createExecTool(
     finalizeBeforeToolCallParams: requestPreparation.finalizeBeforeToolCallParams,
     execute: async (toolCallId, args, signal, onUpdate) => {
       signal?.throwIfAborted();
+      // Review cancellation belongs to this execution, never another call on the shared tool.
+      const autoReviewer =
+        defaults?.autoReviewer ??
+        createModelExecAutoReviewer({
+          cfg: defaults?.config,
+          agentId,
+          reviewer: resolveExecReviewerDefaults({ defaults, agentId }),
+          signal,
+        });
       let params = requestPreparation.normalizeParams(args);
       const resolveExecEnvPrepared = requestPreparation.isResolveExecEnvPrepared(
         args as ExecToolArgs,
@@ -300,7 +301,7 @@ export function createExecTool(
       ) {
         security = "full";
       }
-      // Keep local exec defaults in sync with exec-approvals.json when tools.exec.* is unset.
+      // Keep local exec defaults in sync with host approval state when tools.exec.* is unset.
       const requestedAsk = normalizeExecAsk(params.ask);
       const hostAsk = maxAsk(modePolicy.ask, approvalPolicy?.ask ?? modePolicy.ask);
       const trustedAsk = defaults?.messageProvider && hostAsk === "off" ? undefined : requestedAsk;
@@ -668,3 +669,6 @@ export function createExecTool(
     },
   };
 }
+
+/** Default exec tool instance used by agent tool registries. */
+export const execTool = createExecTool();
