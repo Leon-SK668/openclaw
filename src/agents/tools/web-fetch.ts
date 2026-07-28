@@ -4,6 +4,7 @@
  * Fetches HTTP(S) content through SSRF guards, provider config, caching, and bounded extraction.
  */
 import { resolveIntegerOption } from "@openclaw/normalization-core/number-coercion";
+import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
@@ -13,8 +14,10 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { sha256Hex } from "../../infra/crypto-digest.js";
+import { pruneMapToMaxSize } from "../../infra/map-size.js";
 import { SsrFBlockedError, type LookupFn, type SsrFPolicy } from "../../infra/net/ssrf.js";
 import { logDebug, logWarn } from "../../logger.js";
+import { getActivePluginRegistryVersion } from "../../plugins/runtime.js";
 import { assertSecretOwnerAvailable } from "../../secrets/runtime-degraded-state.js";
 import { runtimeWebSecretOwnerId } from "../../secrets/runtime-web-secret-owner.js";
 import type { RuntimeWebFetchMetadata } from "../../secrets/runtime-web-tools.types.js";
@@ -80,6 +83,9 @@ const DEFAULT_FETCH_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 const FETCH_CACHE = new Map<string, CacheEntry<Record<string, unknown>>>();
+const FETCH_PROVIDER_HINT_MAX_ENTRIES = 100;
+const FETCH_PROVIDER_HINTS = new Map<string, { providerId: string; expiresAt: number }>();
+let fetchProviderHintsRegistryVersion: number | undefined;
 
 // Accept and Accept-Language are part of the fetch/readability contract,
 // User-Agent has its own tools.web.fetch.userAgent key, and Undici owns
@@ -516,10 +522,72 @@ type WebFetchRuntimeParams = {
   useTrustedEnvProxy: boolean;
   ssrfPolicy?: SsrFPolicy;
   providerCacheKey?: string;
+  providerSource?: string;
+  sandboxed: boolean;
+  preferRuntimeProviders: boolean;
   lookupFn?: LookupFn;
   signal?: AbortSignal;
   resolveProviderFallback: () => Promise<WebFetchProviderFallback>;
 };
+
+type WebFetchPayloadResult = {
+  payload: Record<string, unknown>;
+  cacheKey: string;
+  cacheHit?: boolean;
+  providerId?: string;
+};
+
+function resolveFetchProviderHintKey(params: WebFetchRuntimeParams): string {
+  const registryVersion = getActivePluginRegistryVersion();
+  if (fetchProviderHintsRegistryVersion !== registryVersion) {
+    FETCH_PROVIDER_HINTS.clear();
+    fetchProviderHintsRegistryVersion = registryVersion;
+  }
+  const fetchConfig = params.config?.tools?.web?.fetch;
+  const configuredProvider =
+    fetchConfig && typeof fetchConfig === "object" && "provider" in fetchConfig
+      ? fetchConfig.provider
+      : undefined;
+  const providerSelectionFingerprint = sha256Hex(
+    stableStringify({
+      configuredProvider,
+      plugins: params.config?.plugins,
+      secrets: params.config?.secrets,
+    }),
+  );
+  return JSON.stringify([
+    registryVersion,
+    providerSelectionFingerprint,
+    params.sandboxed,
+    params.preferRuntimeProviders,
+    params.providerSource ?? "",
+    params.providerCacheKey ?? "",
+  ]);
+}
+
+function createWebFetchCacheKey(params: {
+  parsedUrl: URL;
+  runtime: WebFetchRuntimeParams;
+  ssrfPolicy?: SsrFPolicy;
+  providerCacheKey?: string;
+  providerSource?: string;
+}): string {
+  const headersCacheKey = resolveFetchHeadersCacheKey(params.runtime.headers);
+  const cacheDiscriminators = [
+    `user-agent:${sha256Hex(params.runtime.userAgent)}`,
+    params.providerCacheKey ? `provider:${params.providerCacheKey}` : "",
+    params.providerSource ? `provider-source:${params.providerSource}` : "",
+    params.ssrfPolicy ? `ssrf-policy:${sha256Hex(JSON.stringify(params.ssrfPolicy))}` : "",
+    params.runtime.useTrustedEnvProxy ? "trusted-env-proxy" : "",
+    headersCacheKey ? `headers:${headersCacheKey}` : "",
+  ].filter(Boolean);
+  return normalizeCacheKey(
+    [
+      `fetch:${params.parsedUrl.href}:${params.runtime.extractMode}:${params.runtime.maxChars}`,
+      ...cacheDiscriminators,
+    ].join(":"),
+  );
+}
 
 function normalizeProviderFinalUrl(value: unknown): string | undefined {
   const trimmed = normalizeOptionalString(value);
@@ -690,13 +758,30 @@ async function buildWebFetchPayload(params: {
 async function maybeFetchProviderWebFetchPayload(
   params: WebFetchRuntimeParams & {
     urlToFetch: string;
+    cacheKey: string;
+    createCacheKeyForProvider: (providerCacheKey?: string) => string;
     tookMs: number;
   },
-): Promise<Record<string, unknown> | null> {
+): Promise<WebFetchPayloadResult | null> {
   const providerFallback = await params.resolveProviderFallback();
   throwIfFetchAborted(params.signal);
   if (!providerFallback) {
     return null;
+  }
+  // Provider discovery is lazy, so use the actual fallback id for cache identity.
+  // This prevents stale runtime metadata from aliasing another provider's result.
+  const providerCacheKey = normalizeOptionalLowercaseString(providerFallback.provider.id);
+  const cacheKey = params.createCacheKeyForProvider(providerCacheKey);
+  if (cacheKey !== params.cacheKey) {
+    const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
+    if (cached) {
+      return {
+        payload: { ...cached.value, cached: true },
+        cacheKey,
+        cacheHit: true,
+        providerId: providerCacheKey,
+      };
+    }
   }
   let rawPayload: unknown;
   try {
@@ -711,7 +796,7 @@ async function maybeFetchProviderWebFetchPayload(
     throw error;
   }
   throwIfFetchAborted(params.signal);
-  return await buildWebFetchPayload({
+  const payload = await buildWebFetchPayload({
     providerId: providerFallback.provider.id,
     payload: rawPayload,
     requestedUrl: params.url,
@@ -719,12 +804,17 @@ async function maybeFetchProviderWebFetchPayload(
     maxChars: params.maxChars,
     tookMs: params.tookMs,
   });
+  throwIfFetchAborted(params.signal);
+  return {
+    payload,
+    cacheKey,
+    providerId: providerCacheKey,
+  };
 }
 
 async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string, unknown>> {
   throwIfFetchAborted(params.signal);
   const ssrfPolicy = params.ssrfPolicy;
-  const useTrustedEnvProxy = params.useTrustedEnvProxy;
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(params.url);
@@ -734,38 +824,62 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
   if (!["http:", "https:"].includes(parsedUrl.protocol)) {
     throw new Error("Invalid URL: must be http or https");
   }
-  const headersCacheKey = resolveFetchHeadersCacheKey(params.headers);
-  // Append the operator header set after the existing cache discriminators so
-  // requests without custom headers keep their current cache key.
-  const cacheDiscriminators = [
-    `user-agent:${sha256Hex(params.userAgent)}`,
-    params.providerCacheKey ? `provider:${params.providerCacheKey}` : "",
-    ssrfPolicy ? `ssrf-policy:${sha256Hex(JSON.stringify(ssrfPolicy))}` : "",
-    useTrustedEnvProxy ? "trusted-env-proxy" : "",
-    headersCacheKey ? `headers:${headersCacheKey}` : "",
-  ].filter(Boolean);
-  const cacheKey = normalizeCacheKey(
-    [
-      `fetch:${parsedUrl.href}:${params.extractMode}:${params.maxChars}`,
-      ...cacheDiscriminators,
-    ].join(":"),
-  );
+  const createCacheKeyForProvider = (providerCacheKey?: string) =>
+    createWebFetchCacheKey({
+      parsedUrl,
+      runtime: params,
+      ssrfPolicy,
+      providerCacheKey,
+      providerSource: params.providerSource,
+    });
+  const cacheKey = createCacheKeyForProvider(params.providerCacheKey);
   const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
   if (cached) {
     return { ...cached.value, cached: true };
   }
+  const providerHintKey = resolveFetchProviderHintKey(params);
+  const providerHint = FETCH_PROVIDER_HINTS.get(providerHintKey);
+  if (providerHint && providerHint.expiresAt <= Date.now()) {
+    FETCH_PROVIDER_HINTS.delete(providerHintKey);
+  }
+  const hintedProviderCacheKey =
+    providerHint?.expiresAt > Date.now() ? providerHint.providerId : undefined;
+  const hintedCacheKey = hintedProviderCacheKey
+    ? createCacheKeyForProvider(hintedProviderCacheKey)
+    : undefined;
+  if (hintedCacheKey && hintedCacheKey !== cacheKey) {
+    const hintedCache = readCache(FETCH_CACHE, hintedCacheKey, params.cacheTtlMs);
+    if (hintedCache) {
+      return { ...hintedCache.value, cached: true };
+    }
+  }
 
   // Preserve the direct fetch's rejection; replacing it with signal.reason would
   // discard the transport's own error detail.
-  const payload = await fetchWebPayload(params);
+  const result = await fetchWebPayload(params, { cacheKey, createCacheKeyForProvider });
   // Publish only after guard release: cancellation or cleanup failure must not
   // leave a successful cache entry for a call that never returned its content.
   throwIfFetchAborted(params.signal);
-  writeCache(FETCH_CACHE, cacheKey, payload, params.cacheTtlMs);
-  return payload;
+  if (!result.cacheHit) {
+    writeCache(FETCH_CACHE, result.cacheKey, result.payload, params.cacheTtlMs);
+  }
+  if (result.providerId && params.cacheTtlMs > 0) {
+    pruneMapToMaxSize(FETCH_PROVIDER_HINTS, FETCH_PROVIDER_HINT_MAX_ENTRIES - 1);
+    FETCH_PROVIDER_HINTS.set(providerHintKey, {
+      providerId: result.providerId,
+      expiresAt: Date.now() + params.cacheTtlMs,
+    });
+  }
+  return result.payload;
 }
 
-async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<string, unknown>> {
+async function fetchWebPayload(
+  params: WebFetchRuntimeParams,
+  cacheContext: {
+    cacheKey: string;
+    createCacheKeyForProvider: (providerCacheKey?: string) => string;
+  },
+): Promise<WebFetchPayloadResult> {
   const start = Date.now();
   let res: Response;
   let release: () => Promise<void>;
@@ -805,13 +919,14 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
     if (error instanceof SsrFBlockedError || params.signal?.aborted) {
       throw error;
     }
-    const payload = await maybeFetchProviderWebFetchPayload({
+    const providerResult = await maybeFetchProviderWebFetchPayload({
       ...params,
       urlToFetch: finalUrl,
+      ...cacheContext,
       tookMs: Date.now() - start,
     });
-    if (payload) {
-      return payload;
+    if (providerResult) {
+      return providerResult;
     }
     throw error;
   }
@@ -819,13 +934,14 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
   try {
     if (!res.ok) {
       throwIfFetchAborted(params.signal);
-      const payload = await maybeFetchProviderWebFetchPayload({
+      const providerResult = await maybeFetchProviderWebFetchPayload({
         ...params,
         urlToFetch: params.url,
+        ...cacheContext,
         tookMs: Date.now() - start,
       });
-      if (payload) {
-        return payload;
+      if (providerResult) {
+        return providerResult;
       }
       const rawDetailResult = await readResponseText(res, { maxBytes: DEFAULT_ERROR_MAX_BYTES });
       throwIfFetchAborted(params.signal);
@@ -870,18 +986,19 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
           title = readable.title;
           extractor = readable.extractor;
         } else {
-          let payload: Record<string, unknown> | null = null;
+          let providerResult: WebFetchPayloadResult | null = null;
           try {
-            payload = await maybeFetchProviderWebFetchPayload({
+            providerResult = await maybeFetchProviderWebFetchPayload({
               ...params,
               urlToFetch: finalUrl,
+              ...cacheContext,
               tookMs: Date.now() - start,
             });
           } catch {
             throwIfFetchAborted(params.signal);
           }
-          if (payload) {
-            return payload;
+          if (providerResult) {
+            return providerResult;
           }
           const basic = await extractBasicHtmlContent({
             html: body,
@@ -900,13 +1017,14 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
           }
         }
       } else {
-        const payload = await maybeFetchProviderWebFetchPayload({
+        const providerResult = await maybeFetchProviderWebFetchPayload({
           ...params,
           urlToFetch: finalUrl,
+          ...cacheContext,
           tookMs: Date.now() - start,
         });
-        if (payload) {
-          return payload;
+        if (providerResult) {
+          return providerResult;
         }
         throw new Error(
           "Web fetch extraction failed: Readability disabled and no fetch provider is available.",
@@ -922,22 +1040,25 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
       }
     }
 
-    return await buildWebFetchPayload({
-      payload: {
-        finalUrl,
-        status: res.status,
-        contentType: normalizedContentType,
-        title,
-        extractor,
-        text,
-        warning: responseTruncatedWarning,
-        truncated: bodyResult.truncated,
-      },
-      requestedUrl: params.url,
-      extractMode: params.extractMode,
-      maxChars: params.maxChars,
-      tookMs: Date.now() - start,
-    });
+    return {
+      payload: await buildWebFetchPayload({
+        payload: {
+          finalUrl,
+          status: res.status,
+          contentType: normalizedContentType,
+          title,
+          extractor,
+          text,
+          warning: responseTruncatedWarning,
+          truncated: bodyResult.truncated,
+        },
+        requestedUrl: params.url,
+        extractMode: params.extractMode,
+        maxChars: params.maxChars,
+        tookMs: Date.now() - start,
+      }),
+      cacheKey: cacheContext.cacheKey,
+    };
   } finally {
     if (!res.bodyUsed) {
       // Fallbacks and provider failures can abandon the upstream stream. Cancel
@@ -1058,6 +1179,11 @@ export function createWebFetchTool(options?: {
             ? { ...executionFetch?.ssrfPolicy, hostnameAllowlist }
             : executionFetch?.ssrfPolicy,
           ...(providerCacheKey ? { providerCacheKey } : {}),
+          ...(runtimeWebFetch?.providerSource
+            ? { providerSource: runtimeWebFetch.providerSource }
+            : {}),
+          sandboxed: options?.sandboxed === true,
+          preferRuntimeProviders,
           lookupFn: options?.lookupFn,
           signal,
           resolveProviderFallback,
