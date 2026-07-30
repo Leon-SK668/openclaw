@@ -1,0 +1,64 @@
+name: PR 103113 exact-head changed-file checks
+
+on:
+  push:
+    branches:
+      - proof/pr103113-exact-head-lint-20260730-r1
+
+permissions: {}
+
+jobs:
+  changed-file-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_SHA: cc570a74532e4907e5f1f8090dd05fc7a1ddfc27
+      TARGET_SHA: a296f83479e6f90d8a36fbb32967609ef16ea0de
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head and base anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=2 origin refs/pull/103113/head
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+
+      - name: Check exact diff whitespace
+        shell: bash
+        run: git diff --check "$BASE_SHA" "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+
+      - name: Check changed-file formatting
+        shell: bash
+        run: |
+          corepack pnpm format:check \
+            src/web-fetch/runtime.test.ts \
+            src/web/provider-runtime-shared.test.ts \
+            src/web/provider-runtime-shared.ts
+
+      - name: Check changed-file lint
+        shell: bash
+        run: |
+          node scripts/run-oxlint.mjs \
+            src/web-fetch/runtime.test.ts \
+            src/web/provider-runtime-shared.test.ts \
+            src/web/provider-runtime-shared.ts
+
+      - name: Check web-fetch provider boundaries
+        shell: bash
+        run: node scripts/check-web-fetch-provider-boundaries.mjs
