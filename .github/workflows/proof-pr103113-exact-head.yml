@@ -1,0 +1,96 @@
+name: PR 103113 exact-head Firecrawl runtime proof
+
+on:
+  push:
+    branches:
+      - proof/pr103113-exact-head-20260730-r1
+
+permissions: {}
+
+jobs:
+  runtime-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: a296f83479e6f90d8a36fbb32967609ef16ea0de
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/103113/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Run exact-head focused regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm test src/web/provider-runtime-shared.test.ts src/web-fetch/runtime.test.ts
+
+      - name: Build exact-head runtime artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm build
+
+      - name: Run exact-head bundled Firecrawl fallback proof
+        shell: bash
+        env:
+          FIRECRAWL_API_KEY: redacted-proof-key
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { resolveWebFetchDefinition } from "./dist/web-fetch/runtime.js";
+
+          const runtimeMetadata = {
+            providerConfigured: "removed-provider",
+            providerSource: "configured",
+            selectedProvider: "removed-provider",
+            selectedProviderKeySource: "missing",
+            diagnostics: [],
+          };
+          const originalMetadata = structuredClone(runtimeMetadata);
+
+          const resolution = resolveWebFetchDefinition({
+            config: {},
+            runtimeWebFetch: runtimeMetadata,
+            preferRuntimeProviders: true,
+          });
+          assert(resolution, "expected runtime provider resolution");
+          assert.equal(resolution.provider.id, "firecrawl");
+          assert.deepEqual(runtimeMetadata, originalMetadata);
+
+          console.log(
+            "FIRECRAWL_RUNTIME_PROOF_103113",
+            JSON.stringify({
+              head: process.env.TARGET_SHA,
+              discoveredProvider: resolution.provider.id,
+              toolDescription: resolution.definition.description,
+              callerMetadataUnchanged:
+                JSON.stringify(runtimeMetadata) === JSON.stringify(originalMetadata),
+            }),
+          );
+          NODE
