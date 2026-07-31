@@ -103,7 +103,8 @@ describe("Discord REST error redaction", () => {
       expect(discordError.discordCode).toBe(10_065);
       expect(isUnknownDiscordVoiceStateError(discordError)).toBe(true);
 
-      const rateError = await captureError(client.get("/rate-limit"));
+      const webhookRateLimitPath = `/webhooks/app/${token}/rate-limit`;
+      const rateError = await captureError(client.get(webhookRateLimitPath));
       expect(rateError).toBeInstanceOf(RateLimitError);
       const rateLimitError = rateError as RateLimitError;
       const rateLimitDetails = JSON.stringify({
@@ -121,10 +122,11 @@ describe("Discord REST error redaction", () => {
 
       const bucketCount = client.getSchedulerMetrics().activeBuckets;
       expect(bucketCount).toBeGreaterThan(0);
-      const repeatedRateError = await captureError(client.get("/rate-limit"));
+      const repeatedRateError = await captureError(client.get(webhookRateLimitPath));
       expect(repeatedRateError).toBeInstanceOf(RateLimitError);
       expect((repeatedRateError as RateLimitError).bucket).toBe(rateLimitError.bucket);
       expect(client.getSchedulerMetrics().activeBuckets).toBe(bucketCount);
+      expect(JSON.stringify(client.getSchedulerMetrics())).not.toContain(token);
 
       const reflectedHeaderError = await captureError(client.get("/rate-limit-reflected-headers"));
       expect(reflectedHeaderError).toBeInstanceOf(RateLimitError);
