@@ -190,7 +190,7 @@ export function readDiscordRateLimitBucket(response: Response): string | null {
   return value ? redactIdentifier(value, { len: 32 }) : null;
 }
 
-export function readDiscordRateLimitScope(response: Response): string | null {
+function readDiscordRateLimitScope(response: Response): string | null {
   const value = response.headers.get("X-RateLimit-Scope");
   return value && DISCORD_RATE_LIMIT_SCOPES.has(value) ? value : null;
 }
