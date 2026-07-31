@@ -420,7 +420,15 @@ describe("ollama web search provider", () => {
     }
   });
 
-  it("resolves provider apiKey env SecretRefs for web search requests", async () => {
+  it.each<SecretInput>([
+    {
+      source: "env",
+      provider: "default",
+      id: "OLLAMA_WEB_SEARCH_REF",
+    },
+    "$OLLAMA_WEB_SEARCH_REF",
+    "${OLLAMA_WEB_SEARCH_REF}",
+  ])("resolves provider apiKey env SecretRef %# for web search requests", async (apiKey) => {
     const refEnvVar = "OLLAMA_WEB_SEARCH_REF";
     const resolvedKey = "resolved-ref-value";
     await withEnvAsync({ [refEnvVar]: resolvedKey }, async () => {
@@ -440,11 +448,7 @@ describe("ollama web search provider", () => {
       const result = await runOllamaWebSearch({
         config: createOllamaConfig({
           baseUrl: "https://ollama.com",
-          apiKey: {
-            source: "env",
-            provider: "default",
-            id: refEnvVar,
-          },
+          apiKey,
         }),
         query: "openclaw",
       });
@@ -525,6 +529,21 @@ describe("ollama web search provider", () => {
       );
     });
   });
+
+  it.each(["$OLLAMA_WEB_SEARCH_REF", "${OLLAMA_WEB_SEARCH_REF}"])(
+    "does not use ambient env fallback when configured apiKey SecretRef shorthand %s is unavailable",
+    async (apiKey) => {
+      const refEnvVar = "OLLAMA_WEB_SEARCH_REF";
+      const ambientEnvVar = ["OLLAMA_API", "KEY"].join("_");
+      const ambientKey = ["ambient", "cloud", "value"].join("-");
+      await withEnvAsync({ [refEnvVar]: undefined, [ambientEnvVar]: ambientKey }, async () => {
+        await expectConfiguredRefFailure(
+          apiKey,
+          "models.providers.ollama.apiKey env SecretRef OLLAMA_WEB_SEARCH_REF is not available",
+        );
+      });
+    },
+  );
 
   it("does not use ambient env fallback for non-env apiKey SecretRefs", async () => {
     const ambientEnvVar = ["OLLAMA_API", "KEY"].join("_");
