@@ -289,6 +289,14 @@ describe("official external plugin catalog", () => {
     }
   });
 
+  it("advertises DeepInfra through the generic embedding provider contract", () => {
+    const entry = expectCatalogEntry("deepinfra");
+    const contracts = getOfficialExternalPluginCatalogManifest(entry)?.contracts;
+
+    expect(contracts?.embeddingProviders).toEqual(["deepinfra"]);
+    expect(contracts?.memoryEmbeddingProviders).toBeUndefined();
+  });
+
   it("does not allow malformed feed wrappers to count as feed documents", () => {
     expect(
       isOfficialExternalPluginCatalogFeed({
@@ -1951,6 +1959,38 @@ describe("official external plugin catalog", () => {
       minHostVersion: ">=2026.6.8",
     });
   });
+
+  it("lists Synthetic as an official external provider", () => {
+    const synthetic = expectCatalogEntry("synthetic");
+
+    expect(resolveOfficialExternalPluginId(synthetic)).toBe("synthetic");
+    expect(resolveOfficialExternalPluginInstall(synthetic)).toEqual({
+      clawhubSpec: "clawhub:@openclaw/synthetic-provider",
+      npmSpec: "@openclaw/synthetic-provider",
+      defaultChoice: "npm",
+      minHostVersion: ">=2026.7.2",
+    });
+  });
+
+  it.each([
+    ["teams-meetings", "@openclaw/teams-meetings", "teams_meetings", "teams"],
+    ["zoom-meetings", "@openclaw/zoom-meetings", "zoom_meetings", "zoom"],
+  ] as const)(
+    "lists %s as an official external meeting plugin",
+    (id, npmSpec, toolId, transcriptSourceProviderId) => {
+      const entry = expectCatalogEntry(id);
+      const contracts = getOfficialExternalPluginCatalogManifest(entry)?.contracts;
+
+      expect(resolveOfficialExternalPluginInstall(entry)).toEqual({
+        clawhubSpec: `clawhub:${npmSpec}`,
+        npmSpec,
+        defaultChoice: "npm",
+        minHostVersion: ">=2026.7.2",
+      });
+      expect(contracts?.tools).toEqual([toolId]);
+      expect(contracts?.transcriptSourceProviders).toEqual([transcriptSourceProviderId]);
+    },
+  );
 
   it("lists LongCat as an official external provider", () => {
     const longcat = expectCatalogEntry("longcat");

@@ -30,13 +30,10 @@ import {
   streamWithPayloadPatch,
 } from "openclaw/plugin-sdk/provider-stream-shared";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
-import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
-import {
-  isRecord,
-  normalizeLowercaseStringOrEmpty,
-  readStringValue,
-} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { fetchWithSsrFGuard, isLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
+import { isRecord, readStringValue } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+import { estimateStringChars } from "./cjk-char-estimate.js";
 import { OLLAMA_CLOUD_BASE_URL, OLLAMA_DEFAULT_BASE_URL } from "./defaults.js";
 import { shouldWrapOllamaCompatMoonshotThinking } from "./model-behavior.js";
 import { normalizeOllamaWireModelId } from "./model-id.js";
@@ -196,13 +193,7 @@ export function isOllamaCompatProvider(model: {
   }
   try {
     const parsed = new URL(model.baseUrl);
-    const hostname = normalizeLowercaseStringOrEmpty(parsed.hostname);
-    const isLocalhost =
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname === "[::1]";
-    if (isLocalhost && parsed.port === "11434") {
+    if (isLoopbackHost(parsed.hostname) && parsed.port === "11434") {
       return true;
     }
 
@@ -571,17 +562,24 @@ function buildUsageWithNoCost(params: {
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  cacheTelemetry?: Usage["cacheTelemetry"];
   totalTokens?: number;
 }): Usage {
   const input = params.input ?? 0;
   const output = params.output ?? 0;
   const cacheRead = params.cacheRead ?? 0;
   const cacheWrite = params.cacheWrite ?? 0;
+  const cacheTelemetry =
+    params.cacheTelemetry ??
+    (params.cacheRead !== undefined && params.cacheWrite !== undefined
+      ? { state: "available" as const }
+      : { state: "unavailable" as const });
   return {
     input,
     output,
     cacheRead,
     cacheWrite,
+    cacheTelemetry,
     totalTokens: params.totalTokens ?? input + output,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
@@ -686,7 +684,7 @@ interface OllamaChatResponse {
 function safeJsonLength(value: unknown): number {
   try {
     const serialized = JSON.stringify(value);
-    return typeof serialized === "string" ? serialized.length : 0;
+    return typeof serialized === "string" ? estimateStringChars(serialized) : 0;
   } catch {
     return 0;
   }
@@ -717,10 +715,10 @@ function estimateOllamaPromptTokens(params: {
 }): number {
   let chars = 0;
   for (const message of params.messages) {
-    chars += message.content.length;
+    chars += estimateStringChars(message.content);
     chars += safeJsonLength(message.images);
     chars += safeJsonLength(message.tool_calls);
-    chars += message.tool_name?.length ?? 0;
+    chars += message.tool_name ? estimateStringChars(message.tool_name) : 0;
   }
   chars += safeJsonLength(params.tools);
   return estimateTokensFromChars(chars);
@@ -732,9 +730,9 @@ function estimateOllamaCompletionTokens(
 ): number {
   const chars =
     extraOutputChars +
-    response.message.content.length +
-    (response.message.thinking?.length ?? 0) +
-    (response.message.reasoning?.length ?? 0) +
+    estimateStringChars(response.message.content) +
+    (response.message.thinking ? estimateStringChars(response.message.thinking) : 0) +
+    (response.message.reasoning ? estimateStringChars(response.message.reasoning) : 0) +
     safeJsonLength(response.message.tool_calls);
   return estimateTokensFromChars(chars);
 }
@@ -1225,7 +1223,7 @@ function createRawOllamaStreamFn(
           headers.Authorization = `Bearer ${options.apiKey}`;
         }
 
-        const { response, release } = await fetchWithSsrFGuard({
+        const { response, release, refreshTimeout } = await fetchWithSsrFGuard({
           url: chatUrl,
           init: {
             method: "POST",
@@ -1384,6 +1382,9 @@ function createRawOllamaStreamFn(
 
           for await (const chunk of parseNdjsonStream(reader)) {
             throwIfOllamaStreamAborted(options?.signal);
+            // Keep guarded timeouts tied to stream progress so slow remote
+            // inference is not aborted while Ollama is still emitting tokens.
+            refreshTimeout?.();
             const thinkingDelta = chunk.message?.thinking ?? chunk.message?.reasoning;
             if (thinkingDelta && shouldEmitThinking) {
               if (!streamStarted) {
@@ -1473,7 +1474,10 @@ function createRawOllamaStreamFn(
 
           const usageFallback = {
             input: estimateOllamaPromptTokens({ messages: ollamaMessages, tools: ollamaTools }),
-            output: estimateOllamaCompletionTokens(finalResponse, suppressedThinking.length),
+            output: estimateOllamaCompletionTokens(
+              finalResponse,
+              estimateStringChars(suppressedThinking),
+            ),
           };
           const assistantMessage = buildAssistantMessage(finalResponse, modelInfo, usageFallback, {
             ...toolCallNameOptions,

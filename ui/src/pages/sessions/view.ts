@@ -11,7 +11,6 @@ import type {
   SessionsListResult,
 } from "../../api/types.ts";
 import "../../styles/sessions.css";
-import { pathForRoute } from "../../app-route-paths.ts";
 import { icons } from "../../components/icons.ts";
 import {
   renderSettingsPage,
@@ -47,7 +46,11 @@ import {
   type SessionsGroupBy,
   UNGROUPED_ID,
 } from "../../lib/sessions/grouping.ts";
-import { searchForSession, type SessionArchivedFilter } from "../../lib/sessions/index.ts";
+import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
+import {
+  resolveSessionPreferredFace,
+  sessionNavigationTarget,
+} from "../../lib/sessions/route-navigation.ts";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -75,6 +78,8 @@ export type SessionsProps = {
   includeUnknown: boolean;
   statusFilter: SessionArchivedFilter;
   basePath: string;
+  agentId: string;
+  mainKey: string;
   searchQuery: string;
   transcriptSearchAvailable: boolean;
   transcriptSearchQuery: string;
@@ -1451,13 +1456,16 @@ function renderSessionsTable(props: SessionsProps, ctx: SessionsTableContext) {
             <div class="data-table-pagination__controls">
               <select
                 class="data-table-pagination__size"
+                aria-label=${t("sessionsView.pageSize")}
                 .value=${String(props.pageSize)}
                 @change=${(e: Event) =>
                   props.onPageSizeChange(Number((e.target as HTMLSelectElement).value))}
               >
                 ${PAGE_SIZES.map(
+                  // The matching option owns initial selection because the select's value
+                  // property binds before these dynamic children exist on first render.
                   (s) =>
-                    html`<option value=${s}>
+                    html`<option value=${s} ?selected=${s === props.pageSize}>
                       ${t("sessionsView.rowsPerPage", { count: String(s) })}
                     </option>`,
                 )}
@@ -1504,7 +1512,15 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
   const keyCellTitle = friendlyKeyLabel ?? row.key;
   const canLink = row.kind !== "global";
   const chatUrl = canLink
-    ? `${pathForRoute("chat", props.basePath)}${searchForSession(row.key)}`
+    ? sessionNavigationTarget({
+        face: resolveSessionPreferredFace(row),
+        sessionKey: row.key,
+        fallbackAgentId: props.agentId,
+        basePath: props.basePath,
+        row,
+        mainKey: props.mainKey,
+        preferenceDerivedFace: true,
+      }).href
     : null;
   const displayKind = resolveSessionDisplayKind(row);
   const kindClass = `session-kind session-kind--${displayKind}`;

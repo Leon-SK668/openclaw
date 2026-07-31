@@ -6,6 +6,7 @@ import {
 import { listAgentEntries } from "../../agents/agent-scope.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
+import type { ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
 import { type ModelAliasIndex, resolveModelRefFromString } from "../../agents/model-selection.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox/runtime-status.js";
 import { resolveEffectiveAgentRuntime } from "../../agents/thinking-runtime.js";
@@ -44,7 +45,8 @@ import { clearExecInlineDirectives, clearInlineDirectives } from "./get-reply-di
 import { type ReplyExecOverrides, resolveReplyExecOverrides } from "./get-reply-exec-overrides.js";
 import { shouldUseReplyFastTestRuntime } from "./get-reply-fast-path.js";
 import { defaultGroupActivation, resolveGroupRequireMention } from "./groups.js";
-import { CURRENT_MESSAGE_MARKER, stripMentions, stripStructuralPrefixes } from "./mentions.js";
+import { HISTORY_CONTEXT_MARKER } from "./history.js";
+import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import {
   createFastTestModelSelectionState,
   createModelSelectionState,
@@ -90,19 +92,6 @@ function canUseFastExplicitModelDirective(params: {
   );
 }
 
-function resolveDirectiveCommandText(params: {
-  ctx: FinalizedRuntimeMsgContext;
-  sessionCtx: TemplateContext;
-}) {
-  const commandSource = params.sessionCtx.commandText;
-  const promptSource = params.sessionCtx.agentText;
-  return {
-    commandSource,
-    promptSource,
-    commandText: commandSource || promptSource,
-  };
-}
-
 type ReplyDirectiveContinuation = {
   commandSource: string;
   command: ReturnType<typeof buildCommandContext>;
@@ -134,6 +123,9 @@ type ReplyDirectiveContinuation = {
   resolvedBlockStreamingBreak: "text_end" | "message_end";
   provider: string;
   model: string;
+  requestedRouteResolution: Awaited<
+    ReturnType<typeof createModelSelectionState>
+  >["requestedRouteResolution"];
   modelState: Awaited<ReturnType<typeof createModelSelectionState>>;
   contextTokens: number;
   inlineStatusRequested: boolean;
@@ -181,6 +173,7 @@ export async function resolveReplyDirectives(params: {
   typing: TypingController;
   opts?: GetReplyOptions;
   skillFilter?: string[];
+  preparedModelCatalog?: ModelCatalogSnapshot;
 }): Promise<ReplyDirectiveResult> {
   const {
     ctx,
@@ -220,10 +213,7 @@ export async function resolveReplyDirectives(params: {
   let provider = initialProvider;
   let model = initialModel;
 
-  const { commandText } = resolveDirectiveCommandText({
-    ctx,
-    sessionCtx,
-  });
+  const commandText = sessionCtx.commandText;
   const command = buildCommandContext({
     ctx,
     cfg,
@@ -359,6 +349,8 @@ export async function resolveReplyDirectives(params: {
         queueReset: false,
       };
   const existingBody = sessionCtx.agentText;
+  const hasLegacyHistoryEnvelope = existingBody.trimStart().startsWith(HISTORY_CONTEXT_MARKER);
+  const preserveAgentText = commandText === "" || hasLegacyHistoryEnvelope;
   let cleanedBody = (() => {
     if (!existingBody) {
       if (resetTriggered) {
@@ -366,24 +358,18 @@ export async function resolveReplyDirectives(params: {
       }
       return parsedDirectives.cleaned;
     }
-    const markerIndex = existingBody.indexOf(CURRENT_MESSAGE_MARKER);
-    if (markerIndex < 0) {
-      return parseInlineDirectives(existingBody, {
-        modelAliases: configuredAliases,
-        allowStatusDirective,
-      }).cleaned;
+    if (preserveAgentText) {
+      // An explicit empty command projection and flat history envelopes have no
+      // trustworthy directive range. Preserve prompt text instead of guessing.
+      return existingBody;
     }
-
-    const head = existingBody.slice(0, markerIndex + CURRENT_MESSAGE_MARKER.length);
-    const tail = existingBody.slice(markerIndex + CURRENT_MESSAGE_MARKER.length);
-    const cleanedTail = parseInlineDirectives(tail, {
+    return parseInlineDirectives(existingBody, {
       modelAliases: configuredAliases,
       allowStatusDirective,
     }).cleaned;
-    return `${head}${cleanedTail}`;
   })();
 
-  if (allowStatusDirective) {
+  if (allowStatusDirective && !preserveAgentText) {
     cleanedBody = stripInlineStatus(cleanedBody).cleaned;
   }
 
@@ -538,6 +524,7 @@ export async function resolveReplyDirectives(params: {
           skipStoredModelOverride,
           hasResolvedHeartbeatModelOverride,
           isHeartbeat: opts?.isHeartbeat === true,
+          preparedModelCatalog: params.preparedModelCatalog,
         });
   } catch (error) {
     if (error instanceof ModelSelectionLockedError) {
@@ -712,6 +699,9 @@ export async function resolveReplyDirectives(params: {
       resolvedBlockStreamingBreak,
       provider,
       model,
+      requestedRouteResolution: effectiveModelDirective
+        ? "resolved"
+        : modelState.requestedRouteResolution,
       modelState,
       contextTokens,
       inlineStatusRequested,
