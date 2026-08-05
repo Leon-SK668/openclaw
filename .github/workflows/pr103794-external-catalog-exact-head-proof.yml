@@ -1,0 +1,185 @@
+name: PR 103794 external catalog exact-head proof
+
+on:
+  push:
+    branches:
+      - proof/pr103794-external-catalog-20260805
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PROOF_HARNESS_PARENT_SHA: 58c112a5e52025eb1851d34dc5e20430dc89dd73
+      PROOF_TARGET_SHA: 58c112a5e52025eb1851d34dc5e20430dc89dd73
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Check out proof harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
+          path: harness
+          persist-credentials: false
+
+      - name: Verify proof harness provenance
+        working-directory: harness
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$PROOF_HARNESS_PARENT_SHA"
+
+      - name: Check out exact PR head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Leon-SK668/openclaw
+          ref: 58c112a5e52025eb1851d34dc5e20430dc89dd73
+          fetch-depth: 1
+          path: target
+          persist-credentials: false
+
+      - name: Verify exact PR head
+        working-directory: target
+        run: test "$(git rev-parse HEAD)" = "$PROOF_TARGET_SHA"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        working-directory: target
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Prove external catalog setup output
+        working-directory: target
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import path from "node:path";
+          import { mkdir, writeFile } from "node:fs/promises";
+
+          const targetSha = process.env.PROOF_TARGET_SHA;
+          const harnessParentSha = process.env.PROOF_HARNESS_PARENT_SHA;
+          const artifactDir = path.resolve(".artifacts/pr103794-external-catalog-proof");
+          const catalogPath = path.join(artifactDir, "catalog.json");
+          const stateDir = path.join(artifactDir, "state");
+          await mkdir(stateDir, { recursive: true });
+          await writeFile(
+            catalogPath,
+            `${JSON.stringify(
+              {
+                entries: [
+                  {
+                    name: "@proof/empty-prefix",
+                    version: "1.0.0",
+                    openclaw: {
+                      channel: {
+                        id: "proof-empty-prefix",
+                        label: "Proof Empty Prefix",
+                        selectionLabel: "Proof Empty Prefix",
+                        docsPath: "/channels/proof-empty-prefix",
+                        blurb: "External catalog entry.",
+                        selectionDocsPrefix: "",
+                        selectionDocsOmitLabel: true,
+                        exposure: { configured: true, setup: true, docs: true },
+                      },
+                      install: { npmSpec: "@proof/empty-prefix" },
+                    },
+                  },
+                  {
+                    name: "@proof/default-prefix",
+                    version: "1.0.0",
+                    openclaw: {
+                      channel: {
+                        id: "proof-default-prefix",
+                        label: "Proof Default Prefix",
+                        selectionLabel: "Proof Default Prefix",
+                        docsPath: "/channels/proof-default-prefix",
+                        blurb: "External catalog entry.",
+                        selectionDocsOmitLabel: true,
+                        exposure: { configured: true, setup: true, docs: true },
+                      },
+                      install: { npmSpec: "@proof/default-prefix" },
+                    },
+                  },
+                ],
+              },
+              null,
+              2,
+            )}\n`,
+            "utf8",
+          );
+
+          process.env.OPENCLAW_PLUGIN_CATALOG_PATHS = catalogPath;
+          process.env.OPENCLAW_STATE_DIR = stateDir;
+          process.env.OPENCLAW_LOCALE = "en";
+
+          const { getChannelPluginCatalogEntry } = await import(
+            "./src/channels/plugins/catalog.ts"
+          );
+          const { resolveChannelSelectionNoteLines } = await import(
+            "./src/flows/channel-setup.status.ts"
+          );
+
+          const options = {
+            workspaceDir: process.cwd(),
+            env: process.env,
+            officialCatalogPaths: [path.join(artifactDir, "missing-official-catalog.json")],
+          };
+          const emptyEntry = getChannelPluginCatalogEntry("proof-empty-prefix", options);
+          const defaultEntry = getChannelPluginCatalogEntry("proof-default-prefix", options);
+          const lines = resolveChannelSelectionNoteLines({
+            cfg: { agents: { defaults: { workspace: process.cwd() } } },
+            installedPlugins: [],
+            selection: ["proof-empty-prefix", "proof-default-prefix"],
+          });
+          const emptyLine = lines.find((line) => line.startsWith("Proof Empty Prefix"));
+          const defaultLine = lines.find((line) => line.startsWith("Proof Default Prefix"));
+
+          const proof = {
+            targetSha,
+            harnessParentSha,
+            exactHeadChecked:
+              targetSha === "58c112a5e52025eb1851d34dc5e20430dc89dd73",
+            externalCatalogPath: path.relative(process.cwd(), catalogPath),
+            externalEmptyPrefixPreserved: emptyEntry?.meta.selectionDocsPrefix === "",
+            omittedPrefixRemainedUndefined:
+              defaultEntry?.meta.selectionDocsPrefix === undefined,
+            setupEmptyPrefixSuppressedDefault:
+              Boolean(emptyLine) && !emptyLine.includes("Docs:"),
+            setupOmittedPrefixUsedDefault:
+              Boolean(defaultLine) && defaultLine.includes("Docs:"),
+            emptySelectionLine: emptyLine,
+            defaultSelectionLine: defaultLine,
+          };
+
+          assert.equal(proof.exactHeadChecked, true);
+          assert.equal(proof.externalEmptyPrefixPreserved, true);
+          assert.equal(proof.omittedPrefixRemainedUndefined, true);
+          assert.equal(proof.setupEmptyPrefixSuppressedDefault, true);
+          assert.equal(proof.setupOmittedPrefixUsedDefault, true);
+          await writeFile(
+            path.join(artifactDir, "proof.json"),
+            `${JSON.stringify(proof, null, 2)}\n`,
+            "utf8",
+          );
+          console.log("PR103794_EXTERNAL_CATALOG_PROOF", JSON.stringify(proof));
+          NODE
+
+      - name: Upload proof artifact
+        id: upload-proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr103794-external-catalog-exact-head-proof
+          path: target/.artifacts/pr103794-external-catalog-proof/proof.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record artifact digest
+        run: |
+          test -n "${{ steps.upload-proof.outputs.artifact-digest }}"
+          echo "artifactDigest=${{ steps.upload-proof.outputs.artifact-digest }}"
