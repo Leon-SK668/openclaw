@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      PROOF_HARNESS_PARENT_SHA: 2f392de49a20a286fa62736b6ae9a07d4234f4b4
-      PROOF_TARGET_SHA: a438ba5b6291c9daa2564fbe8af4958eff3b54ec
+      PROOF_HARNESS_PARENT_SHA: ee1a77c40d7d5665f3a5f6176b0b8a7e6e234c8f
+      PROOF_TARGET_SHA: f242736db7d8e512bc26fdce0b47f50c688cc246
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Check out proof harness
@@ -34,7 +34,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: Leon-SK668/openclaw
-          ref: a438ba5b6291c9daa2564fbe8af4958eff3b54ec
+          ref: f242736db7d8e512bc26fdce0b47f50c688cc246
           fetch-depth: 1
           path: target
           persist-credentials: false
@@ -193,7 +193,7 @@ jobs:
             targetSha,
             harnessParentSha,
             exactHeadChecked:
-              targetSha === "a438ba5b6291c9daa2564fbe8af4958eff3b54ec",
+              targetSha === "f242736db7d8e512bc26fdce0b47f50c688cc246",
             externalCatalogPath: path.relative(process.cwd(), catalogPath),
             externalEmptyPrefixPreserved: emptyEntry?.meta.selectionDocsPrefix === "",
             omittedPrefixRemainedUndefined:
