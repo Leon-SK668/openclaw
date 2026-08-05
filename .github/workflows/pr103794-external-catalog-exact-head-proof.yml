@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      PROOF_HARNESS_PARENT_SHA: 58c112a5e52025eb1851d34dc5e20430dc89dd73
-      PROOF_TARGET_SHA: 58c112a5e52025eb1851d34dc5e20430dc89dd73
+      PROOF_HARNESS_PARENT_SHA: 2f392de49a20a286fa62736b6ae9a07d4234f4b4
+      PROOF_TARGET_SHA: a438ba5b6291c9daa2564fbe8af4958eff3b54ec
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Check out proof harness
@@ -34,7 +34,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: Leon-SK668/openclaw
-          ref: 58c112a5e52025eb1851d34dc5e20430dc89dd73
+          ref: a438ba5b6291c9daa2564fbe8af4958eff3b54ec
           fetch-depth: 1
           path: target
           persist-credentials: false
@@ -53,6 +53,12 @@ jobs:
         run: |
           corepack enable
           pnpm install --frozen-lockfile
+
+      - name: Run focused regression tests
+        working-directory: target
+        run: |
+          node scripts/run-vitest.mjs src/flows/channel-setup.status.test.ts
+          node scripts/run-vitest.mjs src/channels/plugins/catalog.test.ts src/plugins/manifest-registry-installed.test.ts
 
       - name: Prove external catalog setup output
         working-directory: target
@@ -106,6 +112,40 @@ jobs:
                       install: { npmSpec: "@proof/default-prefix" },
                     },
                   },
+                  {
+                    name: "@proof/whitespace-prefix",
+                    version: "1.0.0",
+                    openclaw: {
+                      channel: {
+                        id: "proof-whitespace-prefix",
+                        label: "Proof Whitespace Prefix",
+                        selectionLabel: "Proof Whitespace Prefix",
+                        docsPath: "/channels/proof-whitespace-prefix",
+                        blurb: "External catalog entry.",
+                        selectionDocsPrefix: " \t ",
+                        selectionDocsOmitLabel: true,
+                        exposure: { configured: true, setup: true, docs: true },
+                      },
+                      install: { npmSpec: "@proof/whitespace-prefix" },
+                    },
+                  },
+                  {
+                    name: "@proof/control-prefix",
+                    version: "1.0.0",
+                    openclaw: {
+                      channel: {
+                        id: "proof-control-prefix",
+                        label: "Proof Control Prefix",
+                        selectionLabel: "Proof Control Prefix",
+                        docsPath: "/channels/proof-control-prefix",
+                        blurb: "External catalog entry.",
+                        selectionDocsPrefix: "\u001b[2K\u0007",
+                        selectionDocsOmitLabel: true,
+                        exposure: { configured: true, setup: true, docs: true },
+                      },
+                      install: { npmSpec: "@proof/control-prefix" },
+                    },
+                  },
                 ],
               },
               null,
@@ -132,36 +172,59 @@ jobs:
           };
           const emptyEntry = getChannelPluginCatalogEntry("proof-empty-prefix", options);
           const defaultEntry = getChannelPluginCatalogEntry("proof-default-prefix", options);
+          const whitespaceEntry = getChannelPluginCatalogEntry("proof-whitespace-prefix", options);
+          const controlEntry = getChannelPluginCatalogEntry("proof-control-prefix", options);
           const lines = resolveChannelSelectionNoteLines({
             cfg: { agents: { defaults: { workspace: process.cwd() } } },
             installedPlugins: [],
-            selection: ["proof-empty-prefix", "proof-default-prefix"],
+            selection: [
+              "proof-empty-prefix",
+              "proof-default-prefix",
+              "proof-whitespace-prefix",
+              "proof-control-prefix",
+            ],
           });
           const emptyLine = lines.find((line) => line.startsWith("Proof Empty Prefix"));
           const defaultLine = lines.find((line) => line.startsWith("Proof Default Prefix"));
+          const whitespaceLine = lines.find((line) => line.startsWith("Proof Whitespace Prefix"));
+          const controlLine = lines.find((line) => line.startsWith("Proof Control Prefix"));
 
           const proof = {
             targetSha,
             harnessParentSha,
             exactHeadChecked:
-              targetSha === "58c112a5e52025eb1851d34dc5e20430dc89dd73",
+              targetSha === "a438ba5b6291c9daa2564fbe8af4958eff3b54ec",
             externalCatalogPath: path.relative(process.cwd(), catalogPath),
             externalEmptyPrefixPreserved: emptyEntry?.meta.selectionDocsPrefix === "",
             omittedPrefixRemainedUndefined:
               defaultEntry?.meta.selectionDocsPrefix === undefined,
+            externalWhitespacePrefixPreserved:
+              whitespaceEntry?.meta.selectionDocsPrefix === " \t ",
+            externalControlPrefixPreserved:
+              controlEntry?.meta.selectionDocsPrefix === "\u001b[2K\u0007",
             setupEmptyPrefixSuppressedDefault:
               Boolean(emptyLine) && !emptyLine.includes("Docs:"),
             setupOmittedPrefixUsedDefault:
               Boolean(defaultLine) && defaultLine.includes("Docs:"),
+            setupWhitespacePrefixUsedDefault:
+              Boolean(whitespaceLine) && whitespaceLine.includes("Docs:"),
+            setupControlPrefixUsedDefault:
+              Boolean(controlLine) && controlLine.includes("Docs:"),
             emptySelectionLine: emptyLine,
             defaultSelectionLine: defaultLine,
+            whitespaceSelectionLine: whitespaceLine,
+            controlSelectionLine: controlLine,
           };
 
           assert.equal(proof.exactHeadChecked, true);
           assert.equal(proof.externalEmptyPrefixPreserved, true);
           assert.equal(proof.omittedPrefixRemainedUndefined, true);
+          assert.equal(proof.externalWhitespacePrefixPreserved, true);
+          assert.equal(proof.externalControlPrefixPreserved, true);
           assert.equal(proof.setupEmptyPrefixSuppressedDefault, true);
           assert.equal(proof.setupOmittedPrefixUsedDefault, true);
+          assert.equal(proof.setupWhitespacePrefixUsedDefault, true);
+          assert.equal(proof.setupControlPrefixUsedDefault, true);
           await writeFile(
             path.join(artifactDir, "proof.json"),
             `${JSON.stringify(proof, null, 2)}\n`,
