@@ -77,21 +77,40 @@ describe("kimi web search provider", () => {
     );
   });
 
-  it("does not use ambient env fallback when configured env SecretRef is missing", () => {
+  it("explains recovery when a configured env SecretRef is missing", async () => {
     const configuredApiKey = {
       source: "env",
       provider: "default",
       id: kimiSecretRefApiKeyEnv,
     };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
 
-    withEnv(
+    await withEnvAsync(
       {
         [kimiSecretRefApiKeyEnv]: undefined,
         [kimiApiKeyEnv]: "dummy",
         [moonshotApiKeyEnv]: "example",
       },
-      () => {
-        expect(testing.resolveKimiApiKey({ apiKey: configuredApiKey })).toBeUndefined();
+      async () => {
+        const result = await executeKimiSearch("kimi missing configured SecretRef", {
+          plugins: {
+            entries: {
+              moonshot: {
+                config: { webSearch: { apiKey: configuredApiKey } },
+              },
+            },
+          },
+        });
+
+        expect(result.error).toBe("missing_kimi_api_key");
+        expectStringFieldContains(result, "message", "repair or remove that SecretRef");
+        expectStringFieldContains(
+          result,
+          "message",
+          "KIMI_API_KEY and MOONSHOT_API_KEY are ignored until then",
+        );
+        expect(fetchMock).not.toHaveBeenCalled();
       },
     );
   });
