@@ -35,6 +35,8 @@ const BARE_SPACE_SEPARATED_LETTERS_CODE_PATTERN = /^(\s*)[A-Z]{4} [A-Z]{4}(\s*)$
 const CODE_PROMPT_EXPLANATION_PATTERN = /^\([^\r\n]{1,160}\)$/;
 const DIRECT_CODE_VALUE_PREFIX_PATTERN = /\b(?:enter|paste|type)\s+$/i;
 const DIRECT_CODE_VALUE_SUFFIX_PATTERN = /^\s*(?:[.,;:!?)]\s*)?$/;
+const CONTINUATION_CODE_VALUE_SUFFIX_PATTERN =
+  /^\s+(?:(?:in|into|on)\s+(?:the\s+)?(?:browser|app|client)|to\s+continue)\b/i;
 const CODE_VALUE_PATTERN = /^(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
 const INLINE_CODE_VALUE_PATTERN =
   /^(?=[A-Z0-9-]*(?:\d|-))(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
@@ -136,7 +138,7 @@ function cronCommandSummaryNeedsExternalRedaction(summary: string | undefined): 
     );
 }
 
-type EmbeddedCodeRedactionMode = "action" | "preserved" | "none";
+type EmbeddedCodeRedactionMode = "action" | "continuation" | "preserved" | "none";
 
 function maskCodePromptTextForScan(line: string): string {
   let masked = line;
@@ -163,11 +165,18 @@ function maskCodePromptTextForScan(line: string): string {
   return masked;
 }
 
-function isCodeCandidateAttachedToPrompt(scan: string, start: number, end: number): boolean {
+function isCodeCandidateAttachedToPrompt(
+  scan: string,
+  start: number,
+  end: number,
+  mode: EmbeddedCodeRedactionMode,
+): boolean {
   const prefix = scan.slice(0, start);
+  const suffix = scan.slice(end);
   if (
     DIRECT_CODE_VALUE_PREFIX_PATTERN.test(prefix) &&
-    DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(scan.slice(end))
+    (DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(suffix) ||
+      (mode === "continuation" && CONTINUATION_CODE_VALUE_SUFFIX_PATTERN.test(suffix)))
   ) {
     return true;
   }
@@ -196,12 +205,12 @@ function redactEmbeddedCodeCandidates(
     const start = match.index;
     const end = start + match[0].length;
     const candidate = line.slice(start, end);
-    const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end);
+    const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end, mode);
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
     const shouldRedact =
       attachedToPrompt ||
       (!isCronCommandTerminalStatusLine(candidate) &&
-        (mode === "preserved" || isUnambiguousCodeShape));
+        (mode === "preserved" || (mode === "action" && isUnambiguousCodeShape)));
     result += line.slice(cursor, start);
     result += shouldRedact ? "[redacted-code]" : candidate;
     if (shouldRedact) {
@@ -214,8 +223,7 @@ function redactEmbeddedCodeCandidates(
 
 function redactCronCommandSummaryLine(
   line: string,
-  redactEmbeddedCodes: boolean,
-  redactPreservedBlockCodes: boolean,
+  embeddedCodeMode: EmbeddedCodeRedactionMode,
   redactBareLetters: boolean,
   onRedactedCode: (code: string, satisfiesPrompt: boolean) => void,
 ): string {
@@ -224,12 +232,7 @@ function redactCronCommandSummaryLine(
       return `${key}${separator}***`;
     })
     .replace(URL_PATTERN, "[redacted-url]");
-  const mode: EmbeddedCodeRedactionMode = redactPreservedBlockCodes
-    ? "preserved"
-    : redactEmbeddedCodes
-      ? "action"
-      : "none";
-  redacted = redactEmbeddedCodeCandidates(redacted, mode, onRedactedCode);
+  redacted = redactEmbeddedCodeCandidates(redacted, embeddedCodeMode, onRedactedCode);
   const bareCode = redacted.trim();
   const redactBareCode = (value: string, pattern: RegExp): string => {
     if (!pattern.test(value)) {
@@ -285,11 +288,19 @@ export function redactCronCommandSummaryForExternalDelivery(
       }
       const isActionLine = isCronCommandActionCriticalLine(part);
       const promptCarry = actionPromptCarry;
+      // The first non-status continuation belongs to the preceding action prompt;
+      // otherwise an embedded one-time code bypasses the bare-code redaction path.
+      const embeddedCodeMode: EmbeddedCodeRedactionMode = inPreservedActionBlock
+        ? "preserved"
+        : isActionLine
+          ? "action"
+          : promptCarry !== "none" && !isCronCommandTerminalStatusLine(part)
+            ? "continuation"
+            : "none";
       let lineSatisfiedPrompt = false;
       const redacted = redactCronCommandSummaryLine(
         part,
-        isActionLine,
-        inPreservedActionBlock,
+        embeddedCodeMode,
         promptCarry !== "none" && !isCronCommandTerminalStatusLine(part),
         (code, satisfiesPrompt) => {
           lineSatisfiedPrompt ||= satisfiesPrompt || (!isActionLine && promptCarry !== "none");

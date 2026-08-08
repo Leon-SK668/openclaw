@@ -90,6 +90,22 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("redacts an embedded letters-only code in the first action continuation", () => {
+    const summary = "Visit https://example.com/device\nThen type WDJBMJHT in the browser";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url]\nThen type [redacted-code] in the browser",
+    );
+  });
+
+  it("preserves a terminal status in the first action continuation", () => {
+    const summary = "Visit https://example.com/device\nSUCCESS";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url]\nSUCCESS",
+    );
+  });
+
   it("redacts letters-only codes embedded in captured-tail action lines", () => {
     const summary = "Go to https://example.com/device and type WDJBMJHT";
 
