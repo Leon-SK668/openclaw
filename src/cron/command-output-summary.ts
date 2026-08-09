@@ -42,6 +42,7 @@ const DIRECT_CODE_VALUE_PREFIX_PATTERN = /\b(?:enter|paste|type)\s+$/i;
 const DIRECT_CODE_VALUE_SUFFIX_PATTERN = /^\s*(?:[.,;:!?)]\s*)?$/;
 const CONTINUATION_CODE_VALUE_SUFFIX_PATTERN =
   /^\s+(?:(?:in|into|on)\s+(?:the\s+)?(?:browser|app|client)|to\s+continue)\b/i;
+const PLAIN_CODE_LABEL_PREFIX_PATTERN = /^\s*code\s*[:=]\s*$/i;
 const CODE_VALUE_PATTERN = /^(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
 const INLINE_CODE_VALUE_PATTERN =
   /^(?=[A-Z0-9-]*(?:\d|-))(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
@@ -176,9 +177,19 @@ function maskCodePromptTextForScan(line: string): string {
   return masked;
 }
 
-function isCodeCandidateAttachedToPrompt(scan: string, start: number, end: number): boolean {
+function isCodeCandidateAttachedToPrompt(
+  scan: string,
+  start: number,
+  end: number,
+  allowPlainCodeLabel: boolean,
+): boolean {
   const prefix = scan.slice(0, start);
   const suffix = scan.slice(end);
+  // A bare Code: label is strong only while an action prompt remains active;
+  // matching it globally would redact ordinary command output.
+  if (allowPlainCodeLabel && PLAIN_CODE_LABEL_PREFIX_PATTERN.test(prefix)) {
+    return true;
+  }
   if (
     DIRECT_CODE_VALUE_PREFIX_PATTERN.test(prefix) &&
     (DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(suffix) ||
@@ -196,6 +207,7 @@ function isCodeCandidateAttachedToPrompt(scan: string, start: number, end: numbe
 function redactEmbeddedCodeCandidates(
   line: string,
   mode: EmbeddedCodeRedactionMode,
+  allowPlainCodeLabel: boolean,
   onRedactedCode: (code: string, satisfiesPrompt: boolean) => void,
 ): string {
   if (mode === "none") {
@@ -211,7 +223,12 @@ function redactEmbeddedCodeCandidates(
     const start = match.index;
     const end = start + match[0].length;
     const candidate = line.slice(start, end);
-    const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end);
+    const attachedToPrompt = isCodeCandidateAttachedToPrompt(
+      scan,
+      start,
+      end,
+      allowPlainCodeLabel,
+    );
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
     const shouldRedact =
       attachedToPrompt ||
@@ -231,7 +248,7 @@ function redactEmbeddedCodeCandidates(
 function redactCronCommandSummaryLine(
   line: string,
   embeddedCodeMode: EmbeddedCodeRedactionMode,
-  redactBareLetters: boolean,
+  hasActivePromptContinuation: boolean,
   redactBareUnambiguousCodes: boolean,
   onRedactedCode: (code: string, satisfiesPrompt: boolean) => void,
 ): string {
@@ -240,7 +257,12 @@ function redactCronCommandSummaryLine(
       return `${key}${separator}***`;
     })
     .replace(URL_PATTERN, "[redacted-url]");
-  redacted = redactEmbeddedCodeCandidates(redacted, embeddedCodeMode, onRedactedCode);
+  redacted = redactEmbeddedCodeCandidates(
+    redacted,
+    embeddedCodeMode,
+    hasActivePromptContinuation,
+    onRedactedCode,
+  );
   const bareCode = redacted.trim();
   const redactBareCode = (value: string, pattern: RegExp): string => {
     if (!pattern.test(value)) {
@@ -255,7 +277,7 @@ function redactCronCommandSummaryLine(
     bareRedacted = redactBareCode(bareRedacted, BARE_MIXED_CODE_PATTERN);
     bareRedacted = redactBareCode(bareRedacted, BARE_NUMERIC_CODE_PATTERN);
   }
-  if (!redactBareLetters) {
+  if (!hasActivePromptContinuation) {
     return bareRedacted;
   }
   bareRedacted = redactBareCode(bareRedacted, BARE_SPACE_SEPARATED_LETTERS_CODE_PATTERN);
