@@ -223,12 +223,7 @@ function redactEmbeddedCodeCandidates(
     const start = match.index;
     const end = start + match[0].length;
     const candidate = line.slice(start, end);
-    const attachedToPrompt = isCodeCandidateAttachedToPrompt(
-      scan,
-      start,
-      end,
-      allowPlainCodeLabel,
-    );
+    const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end, allowPlainCodeLabel);
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
     const shouldRedact =
       attachedToPrompt ||
