@@ -168,6 +168,25 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it.each(["WDJBMJHT", "482913", "ABCD-EFGH"])(
+    "redacts a plain Code label in active action context: %s",
+    (code) => {
+      const summary = `Visit https://example.com/device\nSUCCESS\nCode: ${code}`;
+
+      expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+        "Visit [redacted-url]\nSUCCESS\nCode: [redacted-code]",
+      );
+    },
+  );
+
+  it("does not redact a plain Code label after action context expires", () => {
+    const summary = "Visit https://example.com/device\nDetails are available\nCode: WDJBMJHT";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url]\nDetails are available\nCode: WDJBMJHT",
+    );
+  });
+
   it("redacts letters-only codes embedded in captured-tail action lines", () => {
     const summary = "Go to https://example.com/device and type WDJBMJHT";
 
@@ -308,6 +327,7 @@ describe("cron command output summaries", () => {
     expect(isCronCommandActionCriticalLine("Your device code is ABCD-EFGH")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your device code is WDJBMJHT")).toBe(true);
     expect(isCronCommandActionCriticalLine("Open this URL to continue:")).toBe(true);
+    expect(isCronCommandActionCriticalLine("Code: WDJBMJHT")).toBe(false);
     expect(isCronCommandActionCriticalLine("Use the code from the previous step")).toBe(false);
     expect(isCronCommandActionCriticalLine("Your code compiles successfully")).toBe(false);
     expect(isCronCommandActionCriticalLine("Your code is already formatted")).toBe(false);
