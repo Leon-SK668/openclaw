@@ -225,6 +225,7 @@ function redactCronCommandSummaryLine(
   line: string,
   embeddedCodeMode: EmbeddedCodeRedactionMode,
   redactBareLetters: boolean,
+  redactBareUnambiguousCodes: boolean,
   onRedactedCode: (code: string, satisfiesPrompt: boolean) => void,
 ): string {
   let redacted = redactToolPayloadText(line)
@@ -241,9 +242,12 @@ function redactCronCommandSummaryLine(
     onRedactedCode(bareCode, true);
     return value.replace(pattern, "$1[redacted-code]$2");
   };
-  let bareRedacted = redactBareCode(redacted, BARE_SEPARATED_CODE_PATTERN);
-  bareRedacted = redactBareCode(bareRedacted, BARE_MIXED_CODE_PATTERN);
-  bareRedacted = redactBareCode(bareRedacted, BARE_NUMERIC_CODE_PATTERN);
+  let bareRedacted = redacted;
+  if (redactBareUnambiguousCodes) {
+    bareRedacted = redactBareCode(bareRedacted, BARE_SEPARATED_CODE_PATTERN);
+    bareRedacted = redactBareCode(bareRedacted, BARE_MIXED_CODE_PATTERN);
+    bareRedacted = redactBareCode(bareRedacted, BARE_NUMERIC_CODE_PATTERN);
+  }
   if (!redactBareLetters) {
     return bareRedacted;
   }
@@ -288,20 +292,23 @@ export function redactCronCommandSummaryForExternalDelivery(
       }
       const isActionLine = isCronCommandActionCriticalLine(part);
       const promptCarry = actionPromptCarry;
+      const hasActivePromptContinuation =
+        promptCarry !== "none" && !isCronCommandTerminalStatusLine(part);
       // The first non-status continuation belongs to the preceding action prompt;
       // otherwise an embedded one-time code bypasses the bare-code redaction path.
       const embeddedCodeMode: EmbeddedCodeRedactionMode = inPreservedActionBlock
         ? "preserved"
         : isActionLine
           ? "action"
-          : promptCarry !== "none" && !isCronCommandTerminalStatusLine(part)
+          : hasActivePromptContinuation
             ? "continuation"
             : "none";
       let lineSatisfiedPrompt = false;
       const redacted = redactCronCommandSummaryLine(
         part,
         embeddedCodeMode,
-        promptCarry !== "none" && !isCronCommandTerminalStatusLine(part),
+        hasActivePromptContinuation,
+        inPreservedActionBlock || hasActivePromptContinuation,
         (code, satisfiesPrompt) => {
           lineSatisfiedPrompt ||= satisfiesPrompt || (!isActionLine && promptCarry !== "none");
           // Status-shaped values on prompt lines are redacted locally but are too

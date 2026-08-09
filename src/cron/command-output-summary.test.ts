@@ -165,6 +165,31 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("does not redact bare codes after prompt context expires", () => {
+    const summary =
+      "Enter code Z9X8-Y7W6\nbuild completed\n654321\nAB12CD34\nA1B2-C3D4";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Enter code [redacted-code]\nbuild completed\n654321\nAB12CD34\nA1B2-C3D4",
+    );
+  });
+
+  it("redacts bare unambiguous codes in an active prompt continuation", () => {
+    const numeric = "Enter code:\n(expires in 15 minutes)\n123456";
+    const mixed = "Enter code:\n(expires in 15 minutes)\nAB12CD34";
+    const separated = "Enter code:\n(expires in 15 minutes)\nA1B2-C3D4";
+
+    expect(redactCronCommandSummaryForExternalDelivery(numeric)).toBe(
+      "Enter code:\n(expires in 15 minutes)\n[redacted-code]",
+    );
+    expect(redactCronCommandSummaryForExternalDelivery(mixed)).toBe(
+      "Enter code:\n(expires in 15 minutes)\n[redacted-code]",
+    );
+    expect(redactCronCommandSummaryForExternalDelivery(separated)).toBe(
+      "Enter code:\n(expires in 15 minutes)\n[redacted-code]",
+    );
+  });
+
   it.each([
     "SUCCESS",
     "COMPLETED",

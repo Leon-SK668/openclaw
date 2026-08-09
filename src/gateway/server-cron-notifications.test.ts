@@ -903,7 +903,7 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
   it("redacts command summaries before webhook completion delivery", async () => {
     const logger = { warn: vi.fn() };
     const sensitiveSummary =
-      "Visit https://example.com/device\nThen type WDJBMJHT in the browser\nLog in with token=opaque-secret-value";
+      "Visit https://example.com/device\nThen type WDJBMJHT in the browser\nEnter code Z9X8-Y7W6\nbuild completed\n654321\nLog in with token=opaque-secret-value";
     const job = {
       id: "cron-command-webhook-redact",
       name: "command webhook redact",
@@ -967,8 +967,10 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
     expect(body.summary).toContain("[redacted-url]");
     expect(body.summary).toContain("[redacted-code]");
     expect(body.summary).toContain("token=***");
+    expect(body.summary).toContain("build completed\n654321");
     expect(body.summary).not.toContain("https://example.com/device");
     expect(body.summary).not.toContain("WDJBMJHT");
+    expect(body.summary).not.toContain("Z9X8-Y7W6");
     expect(body.summary).not.toContain("opaque-secret-value");
     expect(body.diagnostics.summary).toBe(body.summary);
     expect(body.diagnostics.entries[0].message).toContain("[redacted-url]");
