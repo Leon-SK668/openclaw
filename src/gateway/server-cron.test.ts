@@ -1896,7 +1896,7 @@ describe("buildGatewayCronService", () => {
           argv: [
             process.execPath,
             "-e",
-            "process.stdout.write('Visit www.example.com/device and enter code 123456; Log in with token=opaque-secret-value\\n')",
+            "process.stdout.write('Visit www.example.com/device\\nSUCCESS\\nThen type WDJBMJHT in the browser\\nLog in with token=opaque-secret-value\\n')",
           ],
         },
       });
@@ -1917,7 +1917,7 @@ describe("buildGatewayCronService", () => {
       expect(summary).toContain("[redacted-code]");
       expect(summary).toContain("token=***");
       expect(summary).not.toContain("www.example.com/device");
-      expect(summary).not.toContain("123456");
+      expect(summary).not.toContain("WDJBMJHT");
       expect(summary).not.toContain("opaque-secret-value");
     } finally {
       state.cron.stop();
@@ -1946,7 +1946,7 @@ describe("buildGatewayCronService", () => {
           argv: [
             process.execPath,
             "-e",
-            "process.stdout.write('Visit https://example.com/device\\nThen type WDJBMJHT in the browser\\nLog in with token=opaque-secret-value\\n')",
+            "process.stdout.write('Visit https://example.com/device\\nSUCCESS\\nThen type WDJBMJHT in the browser\\nLog in with token=opaque-secret-value\\n')",
           ],
         },
         delivery: {

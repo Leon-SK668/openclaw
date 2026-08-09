@@ -44,6 +44,28 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("carries a preserved URL handoff through the generated stdout header", () => {
+    const summary = buildCronCommandSummary({
+      stdout: "https://example.com/continue?session=fixture-secret\nABCDEF12",
+      stderr: "diagnostic output",
+      preservedStdoutLines: ["Open this URL to continue:"],
+    });
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      [
+        "action-required output preserved:",
+        "Open this URL to continue:",
+        "",
+        "stdout:",
+        "[redacted-url]",
+        "[redacted-code]",
+        "",
+        "stderr:",
+        "diagnostic output",
+      ].join("\n"),
+    );
+  });
+
   it("redacts split URLs and bare codes after action lines in the captured tail", () => {
     const summary = buildCronCommandSummary({
       stdout:
@@ -90,6 +112,26 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("carries an explicit URL handoff to a standalone URL and bare code", () => {
+    const summary = [
+      "Open this URL to continue:",
+      "https://example.com/continue?session=fixture-secret",
+      "ABCDEF12",
+    ].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Open this URL to continue:\n[redacted-url]\n[redacted-code]",
+    );
+  });
+
+  it("does not treat an ordinary code prompt plus URL as a URL handoff", () => {
+    const summary = ["Enter code:", "https://docs.example.com/help", "123456"].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Enter code:\n[redacted-url]\n123456",
+    );
+  });
+
   it("redacts an embedded letters-only code in the first action continuation", () => {
     const summary = "Visit https://example.com/device\nThen type WDJBMJHT in the browser";
 
@@ -103,6 +145,26 @@ describe("cron command output summaries", () => {
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       "Visit [redacted-url]\nSUCCESS",
+    );
+  });
+
+  it("carries action context across a terminal status to a code continuation", () => {
+    const summary = [
+      "Visit https://example.com/device",
+      "SUCCESS",
+      "Then type WDJBMJHT in the browser",
+    ].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url]\nSUCCESS\nThen type [redacted-code] in the browser",
+    );
+  });
+
+  it("carries action context across a terminal status to a bare code", () => {
+    const summary = ["Visit https://example.com/device", "SUCCESS", "WDJBMJHT"].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url]\nSUCCESS\n[redacted-code]",
     );
   });
 
@@ -128,6 +190,28 @@ describe("cron command output summaries", () => {
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       "Go to [redacted-url] and enter DEBUGGING mode",
+    );
+  });
+
+  it("preserves uppercase prose and redacts clear codes in action blocks", () => {
+    const summary = [
+      "action-required output preserved:",
+      "Visit https://example.com/device and enter DEBUGGING mode",
+      "Then type WDJBMJHT in the browser",
+      "123456",
+      "AB12CD34",
+      "A1B2-C3D4",
+    ].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      [
+        "action-required output preserved:",
+        "Visit [redacted-url] and enter DEBUGGING mode",
+        "Then type [redacted-code] in the browser",
+        "[redacted-code]",
+        "[redacted-code]",
+        "[redacted-code]",
+      ].join("\n"),
     );
   });
 
@@ -166,8 +250,13 @@ describe("cron command output summaries", () => {
   });
 
   it("does not redact bare codes after prompt context expires", () => {
-    const summary =
-      "Enter code Z9X8-Y7W6\nbuild completed\n654321\nAB12CD34\nA1B2-C3D4";
+    const summary = [
+      "Enter code Z9X8-Y7W6",
+      "build completed",
+      "654321",
+      "AB12CD34",
+      "A1B2-C3D4",
+    ].join("\n");
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       "Enter code [redacted-code]\nbuild completed\n654321\nAB12CD34\nA1B2-C3D4",
@@ -218,6 +307,7 @@ describe("cron command output summaries", () => {
     expect(isCronCommandActionCriticalLine("Your code is 482913")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your device code is ABCD-EFGH")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your device code is WDJBMJHT")).toBe(true);
+    expect(isCronCommandActionCriticalLine("Open this URL to continue:")).toBe(true);
     expect(isCronCommandActionCriticalLine("Use the code from the previous step")).toBe(false);
     expect(isCronCommandActionCriticalLine("Your code compiles successfully")).toBe(false);
     expect(isCronCommandActionCriticalLine("Your code is already formatted")).toBe(false);

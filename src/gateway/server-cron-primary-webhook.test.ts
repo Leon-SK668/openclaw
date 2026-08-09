@@ -27,6 +27,17 @@ function createWebhookJob(): CronJob {
   };
 }
 
+function webhookRequestBody() {
+  const request = mocks.fetchWithSsrFGuard.mock.calls[0]?.[0] as
+    | { init?: { body?: unknown } }
+    | undefined;
+  const body = request?.init?.body;
+  if (typeof body !== "string") {
+    throw new Error("expected webhook request body");
+  }
+  return JSON.parse(body) as { summary?: string };
+}
+
 describe("sendGatewayCronWebhook", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -74,5 +85,36 @@ describe("sendGatewayCronWebhook", () => {
     controller.abort("Cancelled by operator.");
     await expect(delivery).rejects.toBeDefined();
     expect(mocks.fetchWithSsrFGuard).toHaveBeenCalledOnce();
+  });
+
+  it("redacts command summaries before primary webhook delivery", async () => {
+    mocks.fetchWithSsrFGuard.mockResolvedValueOnce({
+      response: new Response(null, { status: 204 }),
+      finalUrl: "https://example.invalid/cron",
+      release: vi.fn(async () => {}),
+    });
+    const summary = [
+      "Visit https://example.com/device",
+      "SUCCESS",
+      "Then type WDJBMJHT in the browser",
+      "Log in with token=opaque-secret-value",
+    ].join("\n");
+    const job = {
+      ...createWebhookJob(),
+      payload: { kind: "command", argv: ["echo", "ok"] },
+    } satisfies CronJob;
+
+    await sendGatewayCronWebhook({
+      event: { jobId: job.id, action: "finished", status: "ok", summary },
+      job,
+    });
+
+    const body = webhookRequestBody();
+    expect(body.summary).toContain("Visit [redacted-url]");
+    expect(body.summary).toContain("Then type [redacted-code] in the browser");
+    expect(body.summary).toContain("token=***");
+    expect(body.summary).not.toContain("https://example.com/device");
+    expect(body.summary).not.toContain("WDJBMJHT");
+    expect(body.summary).not.toContain("opaque-secret-value");
   });
 });

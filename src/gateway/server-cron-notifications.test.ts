@@ -902,8 +902,15 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
 
   it("redacts command summaries before webhook completion delivery", async () => {
     const logger = { warn: vi.fn() };
-    const sensitiveSummary =
-      "Visit https://example.com/device\nThen type WDJBMJHT in the browser\nEnter code Z9X8-Y7W6\nbuild completed\n654321\nLog in with token=opaque-secret-value";
+    const sensitiveSummary = [
+      "Visit https://example.com/device",
+      "SUCCESS",
+      "Then type WDJBMJHT in the browser",
+      "Enter code Z9X8-Y7W6",
+      "build completed",
+      "654321",
+      "Log in with token=opaque-secret-value",
+    ].join("\n");
     const job = {
       id: "cron-command-webhook-redact",
       name: "command webhook redact",
