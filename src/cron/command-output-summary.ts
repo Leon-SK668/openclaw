@@ -14,16 +14,21 @@ const CODE_PROMPT_PATTERNS = [
   /\b(?:enter|copy)\s+(?:(?:the|this|your)\s+)?(?:(?:following|one[- ]time|verification|device)\s+)?code(?:\s+to\s+continue)?\b/i,
   /\buse\s+(?:(?:this|your)\s+)?(?:(?:one[- ]time|verification|device)\s+)?code\b/i,
 ];
+const URL_HANDOFF_LINE_PATTERN =
+  /\b(?:visit|open)\s+(?:this|the)\s+(?:url|link)(?:\s+to\s+continue)?\b/i;
 const ACTION_LINE_PATTERNS = [
   ...CODE_PROMPT_PATTERNS,
   /\bvisit\s+(?:https?:\/\/|www\.)/i,
   /\bopen\s+(?:https?:\/\/|www\.)/i,
+  URL_HANDOFF_LINE_PATTERN,
   /\bbrowser\s+(?:to|at)\s+(?:https?:\/\/|www\.)/i,
   /\blog(?:\s|-)?in\s+(?:at|to|with)\b/i,
   /\bauth(?:enticate|orize)\s+(?:at|with|using)\b/i,
   /\bhttps?:\/\/[^\s]+\/(?:device|activate|login|oauth|authorize|auth)\b/i,
 ];
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
+const STANDALONE_URL_LINE_PATTERN = /^\s*(?:https?:\/\/|www\.)\S+\s*$/i;
+const GENERATED_OUTPUT_SECTION_HEADER_PATTERN = /^stdout:$/i;
 const CODE_CANDIDATE_PATTERN = /\b(?:[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})\b/g;
 const BARE_SEPARATED_CODE_PATTERN =
   /^(\s*)(?=[A-Z0-9 -]*(?:\d|-))[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}(\s*)$/;
@@ -72,6 +77,11 @@ function isCronCommandCodePromptExplanationLine(line: string): boolean {
 function isCronCommandTerminalStatusLine(line: string): boolean {
   const normalized = normalizeOptionalString(line);
   return Boolean(normalized && CRON_OUTPUT_STATUS_LINE_PATTERN.test(normalized));
+}
+
+function isCronCommandUrlHandoffLine(line: string): boolean {
+  const normalized = normalizeOptionalString(line);
+  return Boolean(normalized && URL_HANDOFF_LINE_PATTERN.test(normalized));
 }
 
 function normalizeLines(lines: string[] | undefined): string[] {
@@ -139,6 +149,7 @@ function cronCommandSummaryNeedsExternalRedaction(summary: string | undefined): 
 }
 
 type EmbeddedCodeRedactionMode = "action" | "continuation" | "preserved" | "none";
+type ActionPromptCarry = "none" | "code-or-explanation" | "code-only" | "url-handoff";
 
 function maskCodePromptTextForScan(line: string): string {
   let masked = line;
@@ -165,18 +176,13 @@ function maskCodePromptTextForScan(line: string): string {
   return masked;
 }
 
-function isCodeCandidateAttachedToPrompt(
-  scan: string,
-  start: number,
-  end: number,
-  mode: EmbeddedCodeRedactionMode,
-): boolean {
+function isCodeCandidateAttachedToPrompt(scan: string, start: number, end: number): boolean {
   const prefix = scan.slice(0, start);
   const suffix = scan.slice(end);
   if (
     DIRECT_CODE_VALUE_PREFIX_PATTERN.test(prefix) &&
     (DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(suffix) ||
-      (mode === "continuation" && CONTINUATION_CODE_VALUE_SUFFIX_PATTERN.test(suffix)))
+      CONTINUATION_CODE_VALUE_SUFFIX_PATTERN.test(suffix))
   ) {
     return true;
   }
@@ -205,12 +211,13 @@ function redactEmbeddedCodeCandidates(
     const start = match.index;
     const end = start + match[0].length;
     const candidate = line.slice(start, end);
-    const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end, mode);
+    const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end);
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
     const shouldRedact =
       attachedToPrompt ||
       (!isCronCommandTerminalStatusLine(candidate) &&
-        (mode === "preserved" || (mode === "action" && isUnambiguousCodeShape)));
+        (mode === "action" || mode === "preserved") &&
+        isUnambiguousCodeShape);
     result += line.slice(cursor, start);
     result += shouldRedact ? "[redacted-code]" : candidate;
     if (shouldRedact) {
@@ -272,7 +279,8 @@ export function redactCronCommandSummaryForExternalDelivery(
     return summary;
   }
   let inPreservedActionBlock = false;
-  let actionPromptCarry: "none" | "code-or-explanation" | "code-only" = "none";
+  let actionPromptCarry: ActionPromptCarry = "none";
+  let pendingPreservedOutputHeader = false;
   const redactedCodes = new Set<string>();
   let redactedSummary = summary
     .split(/(\r?\n)/)
@@ -284,21 +292,33 @@ export function redactCronCommandSummaryForExternalDelivery(
         if (inPreservedActionBlock) {
           // normalizeLines removes blank entries, so this is the block/tail delimiter.
           inPreservedActionBlock = false;
+          pendingPreservedOutputHeader = actionPromptCarry === "url-handoff";
         }
         return part;
       }
+      const isGeneratedOutputHeader =
+        pendingPreservedOutputHeader && GENERATED_OUTPUT_SECTION_HEADER_PATTERN.test(part);
+      pendingPreservedOutputHeader = false;
       if (part.startsWith(ACTION_REQUIRED_OUTPUT_HEADER)) {
         inPreservedActionBlock = true;
       }
       const isActionLine = isCronCommandActionCriticalLine(part);
+      const isUrlHandoffLine = isCronCommandUrlHandoffLine(part);
       const promptCarry = actionPromptCarry;
+      // An explicit URL handoff remains action context only through its
+      // standalone URL line; arbitrary output still expires the prompt.
+      const isPromptCarriedUrlLine =
+        promptCarry === "url-handoff" && STANDALONE_URL_LINE_PATTERN.test(part);
+      const isPromptActionLine = isActionLine || isPromptCarriedUrlLine;
       const hasActivePromptContinuation =
-        promptCarry !== "none" && !isCronCommandTerminalStatusLine(part);
+        promptCarry !== "none" &&
+        promptCarry !== "url-handoff" &&
+        !isCronCommandTerminalStatusLine(part);
       // The first non-status continuation belongs to the preceding action prompt;
       // otherwise an embedded one-time code bypasses the bare-code redaction path.
       const embeddedCodeMode: EmbeddedCodeRedactionMode = inPreservedActionBlock
         ? "preserved"
-        : isActionLine
+        : isPromptActionLine
           ? "action"
           : hasActivePromptContinuation
             ? "continuation"
@@ -310,7 +330,8 @@ export function redactCronCommandSummaryForExternalDelivery(
         hasActivePromptContinuation,
         inPreservedActionBlock || hasActivePromptContinuation,
         (code, satisfiesPrompt) => {
-          lineSatisfiedPrompt ||= satisfiesPrompt || (!isActionLine && promptCarry !== "none");
+          lineSatisfiedPrompt ||=
+            satisfiesPrompt || (!isPromptActionLine && hasActivePromptContinuation);
           // Status-shaped values on prompt lines are redacted locally but are too
           // ambiguous to replace throughout otherwise unrelated command output.
           if (
@@ -321,12 +342,21 @@ export function redactCronCommandSummaryForExternalDelivery(
           }
         },
       );
-      // Keep the prompt cue only across a short parenthetical explanation;
+      // Terminal statuses and one short parenthetical do not consume the cue;
       // arbitrary output must not turn a later status word into a code.
       if (lineSatisfiedPrompt) {
         actionPromptCarry = "none";
+      } else if (isPromptCarriedUrlLine) {
+        actionPromptCarry = "code-or-explanation";
+      } else if (isUrlHandoffLine) {
+        actionPromptCarry = "url-handoff";
       } else if (isActionLine) {
         actionPromptCarry = "code-or-explanation";
+      } else if (isGeneratedOutputHeader && promptCarry === "url-handoff") {
+        // buildCronCommandSummary inserts stdout: between preserved lines and tail output.
+        actionPromptCarry = promptCarry;
+      } else if (promptCarry !== "none" && isCronCommandTerminalStatusLine(part)) {
+        actionPromptCarry = promptCarry;
       } else if (
         promptCarry === "code-or-explanation" &&
         isCronCommandCodePromptExplanationLine(part)
