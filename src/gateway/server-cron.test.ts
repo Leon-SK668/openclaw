@@ -1917,7 +1917,7 @@ describe("buildGatewayCronService", () => {
       expect(summary).toContain("[redacted-code]");
       expect(summary).toContain("token=***");
       expect(summary).not.toContain("www.example.com/device");
-      expect(summary).not.toContain("SUCCESS");
+      expect(summary).toContain("SUCCESS");
       expect(summary).not.toContain("WDJBMJHT");
       expect(summary).not.toContain("opaque-secret-value");
     } finally {
@@ -1947,7 +1947,7 @@ describe("buildGatewayCronService", () => {
           argv: [
             process.execPath,
             "-e",
-            "process.stdout.write('Visit https://example.com/device\\nFAILED\\nWDJBMJHT\\nLog in with token=opaque-secret-value\\n')",
+            "process.stdout.write('Visit https://example.com/device\\nSUCCESS\\nWDJBMJHT\\nLog in with token=opaque-secret-value\\n')",
           ],
         },
         delivery: {
@@ -1969,7 +1969,7 @@ describe("buildGatewayCronService", () => {
       expect(message).toContain("[redacted-code]");
       expect(message).toContain("token=***");
       expect(message).not.toContain("https://example.com/device");
-      expect(message).not.toContain("FAILED");
+      expect(message).toContain("SUCCESS");
       expect(message).not.toContain("WDJBMJHT");
       expect(message).not.toContain("opaque-secret-value");
       expect(state.cron.getJob(job.id)?.state.lastRunStatus).toBe("ok");

@@ -969,7 +969,7 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
     expect(body.summary).toContain("token=***");
     expect(body.summary).toContain("build completed\n654321");
     expect(body.summary).not.toContain("https://example.com/device");
-    expect(body.summary).not.toContain("SUCCESS");
+    expect(body.summary).toContain("SUCCESS");
     expect(body.summary).not.toContain("WDJBMJHT");
     expect(body.summary).not.toContain("Z9X8-Y7W6");
     expect(body.summary).not.toContain("opaque-secret-value");
@@ -978,7 +978,7 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
     expect(body.diagnostics.entries[0].message).toContain("[redacted-code]");
     expect(body.diagnostics.entries[0].message).toContain("token=***");
     expect(body.diagnostics.entries[0].message).not.toContain("https://example.com/device");
-    expect(body.diagnostics.entries[0].message).not.toContain("SUCCESS");
+    expect(body.diagnostics.entries[0].message).toContain("SUCCESS");
     expect(body.diagnostics.entries[0].message).not.toContain("WDJBMJHT");
     expect(body.diagnostics.entries[0].message).not.toContain("opaque-secret-value");
     expect(body.job.state).not.toHaveProperty("lastDiagnosticSummary");

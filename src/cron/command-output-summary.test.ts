@@ -144,21 +144,21 @@ describe("cron command output summaries", () => {
     ["Enter this code:", "SUCCESS", "Enter this code:"],
     ["Visit https://example.com/device", "FAILED", "Visit [redacted-url]"],
   ])(
-    "redacts a status-shaped code after action prompt %s",
-    (prompt, code, redactedPrompt) => {
-      const summary = `${prompt}\n${code}`;
+    "preserves terminal status after action prompt %s",
+    (prompt, status, redactedPrompt) => {
+      const summary = `${prompt}\n${status}`;
 
       expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-        `${redactedPrompt}\n[redacted-code]`,
+        `${redactedPrompt}\n${status}`,
       );
     },
   );
 
-  it("keeps bounded prompt context after redacting a status-shaped code", () => {
+  it("keeps bounded prompt context across a visible terminal status", () => {
     const summary = "Visit https://example.com/device\nSUCCESS\nWDJBMJHT\nDEBUGGING";
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      "Visit [redacted-url]\n[redacted-code]\n[redacted-code]\nDEBUGGING",
+      "Visit [redacted-url]\nSUCCESS\n[redacted-code]\nDEBUGGING",
     );
   });
 
@@ -304,12 +304,10 @@ describe("cron command output summaries", () => {
     "QUEUED",
     "STARTED",
     "WAITING",
-  ])("redacts code-shaped terminal status %s after a prompt explanation", (status) => {
+  ])("preserves terminal status %s after a prompt explanation", (status) => {
     const summary = `Enter this code:\n(waiting for approval)\n${status}`;
 
-    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      `Enter this code:\n(waiting for approval)\n[redacted-code]`,
-    );
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(summary);
   });
 
   it.each(["STATUS FAILED", "TASK FAILED", "TEST FAILED", "MAKE ERROR"])(

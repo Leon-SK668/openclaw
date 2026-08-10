@@ -272,7 +272,7 @@ function redactCronCommandSummaryLine(
     bareRedacted = redactBareCode(bareRedacted, BARE_MIXED_CODE_PATTERN);
     bareRedacted = redactBareCode(bareRedacted, BARE_NUMERIC_CODE_PATTERN);
   }
-  if (!hasActivePromptContinuation) {
+  if (!hasActivePromptContinuation || isCronCommandTerminalStatusLine(bareCode)) {
     return bareRedacted;
   }
   bareRedacted = redactBareCode(bareRedacted, BARE_SPACE_SEPARATED_LETTERS_CODE_PATTERN);
@@ -359,8 +359,8 @@ export function redactCronCommandSummaryForExternalDelivery(
           }
         },
       );
-      // A status-shaped token is masked but does not consume the cue: command
-      // output can emit a status before the actual one-time credential.
+      // A terminal status remains visible and does not consume the cue: command
+      // output can emit status before the actual one-time credential.
       if (lineSatisfiedPrompt) {
         actionPromptCarry = "none";
       } else if (isPromptCarriedUrlLine) {

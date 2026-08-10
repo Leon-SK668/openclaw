@@ -95,7 +95,7 @@ describe("sendGatewayCronWebhook", () => {
     });
     const summary = [
       "Visit https://example.com/device",
-      "FAILED",
+      "SUCCESS",
       "WDJBMJHT",
       "Log in with token=opaque-secret-value",
     ].join("\n");
@@ -114,7 +114,7 @@ describe("sendGatewayCronWebhook", () => {
     expect(body.summary).toContain("[redacted-code]");
     expect(body.summary).toContain("token=***");
     expect(body.summary).not.toContain("https://example.com/device");
-    expect(body.summary).not.toContain("FAILED");
+    expect(body.summary).toContain("SUCCESS");
     expect(body.summary).not.toContain("WDJBMJHT");
     expect(body.summary).not.toContain("opaque-secret-value");
   });
