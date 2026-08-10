@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_SHA: 45949f9f86f04da5e5bd063f192addb791b8342a
+      TARGET_SHA: e0fbc6f173fcc30fa1e82d71560a14be87be6bbb
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
