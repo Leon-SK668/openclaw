@@ -1,0 +1,210 @@
+name: PR 121156 exact-head retained npm cleanup proof
+
+on:
+  push:
+    branches:
+      - proof/pr121156-exact-head-20260810
+
+permissions: {}
+
+jobs:
+  runtime-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: 3e8e2ed4e5f3868699e28619a98888bd681468ca
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/121156/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove Gateway cleanup owner on real managed npm generations
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_script=".local/pr121156-retained-npm-proof.ts"
+          mkdir -p "$(dirname "$proof_script")"
+          trap 'rm -f "$proof_script"' EXIT
+          cat >"$proof_script" <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+
+          const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pr121156-proof-"));
+          process.env.OPENCLAW_STATE_DIR = stateDir;
+
+          const { cleanupRetainedPluginInstallGenerations } = await import(
+            "../src/gateway/server-retained-plugin-cleanup.js"
+          );
+          const { resolvePluginNpmGenerationProjectDir } = await import(
+            "../src/plugins/install-paths.js"
+          );
+          const {
+            hasRetainedManagedNpmInstallMarker,
+            markRetainedManagedNpmInstall,
+            resolveRetainedManagedNpmInstallMarkerPath,
+          } = await import("../src/plugins/managed-npm-retention.js");
+          const { RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON } = await import(
+            "../src/plugins/managed-npm-retention-contract.js"
+          );
+
+          const npmDir = path.join(stateDir, "npm");
+          const writeManagedGeneration = (params: {
+            generationKey: string;
+            packageName: string;
+            pluginId: string;
+          }) => {
+            const projectRoot = resolvePluginNpmGenerationProjectDir({
+              npmDir,
+              packageName: params.packageName,
+              generationKey: params.generationKey,
+            });
+            const packageDir = path.join(
+              projectRoot,
+              "node_modules",
+              ...params.packageName.split("/"),
+            );
+            fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
+            fs.writeFileSync(
+              path.join(projectRoot, "package.json"),
+              JSON.stringify({ private: true, dependencies: { [params.packageName]: "1.0.0" } }),
+              "utf8",
+            );
+            fs.writeFileSync(
+              path.join(packageDir, "package.json"),
+              JSON.stringify({
+                name: params.packageName,
+                version: "1.0.0",
+                openclaw: { extensions: ["./dist/index.js"] },
+              }),
+              "utf8",
+            );
+            fs.writeFileSync(
+              path.join(packageDir, "openclaw.plugin.json"),
+              JSON.stringify({ id: params.pluginId, configSchema: { type: "object" } }),
+              "utf8",
+            );
+            fs.writeFileSync(path.join(packageDir, "dist", "index.js"), "export {};\n", "utf8");
+            return { packageDir, projectRoot };
+          };
+
+          try {
+            const invalid = writeManagedGeneration({
+              packageName: "@openclaw/invalid-proof-plugin",
+              pluginId: "invalid-proof-plugin",
+              generationKey: "invalid-marker-generation",
+            });
+            assert.equal(
+              await markRetainedManagedNpmInstall({
+                packageDir: invalid.packageDir,
+                pluginId: "invalid-proof-plugin",
+                reason: "replaced-by-managed-npm-generation-update",
+              }),
+              true,
+            );
+            fs.writeFileSync(
+              resolveRetainedManagedNpmInstallMarkerPath(invalid.packageDir),
+              "{",
+              "utf8",
+            );
+
+            const stagedCodex = writeManagedGeneration({
+              packageName: "@openclaw/codex",
+              pluginId: "codex",
+              generationKey: "staged-codex-inference-generation",
+            });
+            assert.equal(
+              await markRetainedManagedNpmInstall({
+                packageDir: stagedCodex.packageDir,
+                pluginId: "codex",
+                reason: RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON,
+              }),
+              true,
+            );
+            const stagedMarkerBeforeCleanup = JSON.parse(
+              fs.readFileSync(
+                resolveRetainedManagedNpmInstallMarkerPath(stagedCodex.packageDir),
+                "utf8",
+              ),
+            );
+            assert.equal(
+              stagedMarkerBeforeCleanup.reason,
+              "openclaw-inference-activation-not-committed",
+            );
+
+            const info: string[] = [];
+            const warn: string[] = [];
+            await cleanupRetainedPluginInstallGenerations({
+              log: {
+                info: (message) => info.push(message),
+                warn: (message) => warn.push(message),
+              },
+            });
+
+            const invalidPackagePreserved = fs.existsSync(invalid.packageDir);
+            const invalidMarkerPreserved = hasRetainedManagedNpmInstallMarker(invalid.packageDir);
+            const stagedCodexProjectRemoved = !fs.existsSync(stagedCodex.projectRoot);
+
+            assert.equal(invalidPackagePreserved, true);
+            assert.equal(invalidMarkerPreserved, true);
+            assert.equal(stagedCodexProjectRemoved, true);
+            assert.equal(warn.length, 1);
+            assert.match(warn[0] ?? "", /^failed to clean retained npm generation /);
+            assert.match(warn[0] ?? "", /SyntaxError/);
+            assert.deepEqual(info, ["cleaned 1 retained npm plugin generation(s)"]);
+
+            const redactStateDir = (message: string) => message.split(stateDir).join("$STATE");
+            const runtimeLog = {
+              info,
+              warn: warn.map(redactStateDir),
+            };
+            const runtimeLogJson = JSON.stringify(runtimeLog);
+            assert.equal(runtimeLogJson.includes(stateDir), false);
+
+            console.log("PR121156_CLEANUP_OWNER_RUNTIME_LOG", runtimeLogJson);
+            console.log(
+              "PR121156_RETAINED_NPM_PROOF",
+              JSON.stringify({
+                head: process.env.TARGET_SHA,
+                invalidPackagePreserved,
+                invalidMarkerPreserved,
+                warningCount: warn.length,
+                stagedCodexReason: stagedMarkerBeforeCleanup.reason,
+                stagedCodexProjectRemoved,
+                cleanedGenerationCount: 1,
+              }),
+            );
+          } finally {
+            fs.rmSync(stateDir, { recursive: true, force: true });
+          }
+          NODE
+
+          node --import tsx "$proof_script" 2>&1 | tee .local/pr121156-retained-npm-proof.log
+          grep -F "PR121156_CLEANUP_OWNER_RUNTIME_LOG" .local/pr121156-retained-npm-proof.log
+          grep -F "PR121156_RETAINED_NPM_PROOF" .local/pr121156-retained-npm-proof.log
