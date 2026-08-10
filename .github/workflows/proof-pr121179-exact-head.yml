@@ -1,4 +1,4 @@
-name: PR 121179 exact-head durable approval proof
+name: PR 121179 exact-head ephemeral Gateway proof
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 jobs:
-  local-delivery-proof:
+  ephemeral-gateway-proof:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -29,8 +29,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          test -f src/auto-reply/reply/dispatch-from-config.payloads.ts
-          grep -q "export function requiresDurableToolResultDelivery" \
+          test -f extensions/qa-channel/src/gateway.ts
+          test -f src/channels/turn/kernel.ts
+          grep -q "hasExecApprovalUnavailablePayload" \
             src/auto-reply/reply/dispatch-from-config.payloads.ts
 
       - name: Set up Node 24
@@ -46,62 +47,238 @@ jobs:
           corepack pnpm --version
           corepack pnpm install --frozen-lockfile
 
-      - name: Prove unavailable approval delivery through the production dispatcher
+      - name: Prove one durable channel send through the ephemeral Gateway owner
         shell: bash
         run: |
           set -euo pipefail
-          proof_script="src/auto-reply/reply/approval-unavailable.local-proof.test.ts"
-          trap 'rm -f "$proof_script"' EXIT
+          proof_script=".tmp-pr121179-ephemeral-gateway-proof.ts"
+          proof_state="$(mktemp -d)"
+          trap 'rm -f "$proof_script"; rm -rf "$proof_state"' EXIT
+          export OPENCLAW_STATE_DIR="$proof_state/state"
+          export OPENCLAW_CONFIG_PATH="$proof_state/openclaw.json"
           cat >"$proof_script" <<'NODE'
           import assert from "node:assert/strict";
-          import { test } from "vitest";
-          import { buildExecApprovalUnavailableReplyPayload } from "../../infra/exec-approval-reply.js";
-          import { requiresDurableToolResultDelivery } from "./dispatch-from-config.payloads.js";
-          import { createReplyDispatcher } from "./reply-dispatcher.js";
+          import { mkdtemp, rm } from "node:fs/promises";
+          import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+          import { tmpdir } from "node:os";
+          import path from "node:path";
 
-          test("classifies and delivers approval-unavailable payloads durably", async () => {
-            const delivered = [];
-            const payload = buildExecApprovalUnavailableReplyPayload({
-              reason: "no-approval-route",
+          const targetSha = process.env.TARGET_SHA;
+          assert.equal(targetSha, "3a784b4404e443beec96cef4f8fa90c5949823f3");
+
+          const runtimeDir = await mkdtemp(path.join(tmpdir(), "pr121179-gateway-"));
+          const outboundRequests: Array<Record<string, unknown>> = [];
+          let pollCount = 0;
+          let inboundPublished = false;
+          let resolveOutbound!: () => void;
+          const outboundObserved = new Promise<void>((resolve) => {
+            resolveOutbound = resolve;
+          });
+
+          const inboundMessage = {
+            id: "inbound-redacted-1",
+            accountId: "default",
+            direction: "inbound",
+            conversation: { kind: "direct", id: "proof-user" },
+            senderId: "proof-user",
+            senderName: "Proof User",
+            text: "request requiring unavailable approval",
+            timestamp: 1_787_000_000_000,
+            reactions: [],
+          } as const;
+
+          async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            }
+            const text = Buffer.concat(chunks).toString("utf8");
+            return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+          }
+
+          function writeJson(res: ServerResponse, status: number, value: unknown): void {
+            const body = JSON.stringify(value);
+            res.writeHead(status, {
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(body),
             });
-            assert.equal(requiresDurableToolResultDelivery(payload), true);
+            res.end(body);
+          }
 
-            const dispatcher = createReplyDispatcher({
-              deliver: async (deliveredPayload, info) => {
-                delivered.push({ payload: deliveredPayload, kind: info.kind });
+          const bus = createServer(async (req, res) => {
+            try {
+              if (req.method === "POST" && req.url === "/v1/poll") {
+                pollCount += 1;
+                await readJson(req);
+                if (!inboundPublished) {
+                  inboundPublished = true;
+                  writeJson(res, 200, {
+                    cursor: 1,
+                    events: [
+                      {
+                        cursor: 1,
+                        kind: "inbound-message",
+                        accountId: "default",
+                        message: inboundMessage,
+                      },
+                    ],
+                  });
+                  return;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 20));
+                writeJson(res, 200, { cursor: 1, events: [] });
+                return;
+              }
+              if (req.method === "POST" && req.url === "/v1/outbound/message") {
+                const body = await readJson(req);
+                outboundRequests.push(body);
+                writeJson(res, 200, {
+                  message: {
+                    id: `outbound-redacted-${outboundRequests.length}`,
+                    accountId: "default",
+                    direction: "outbound",
+                    conversation: { kind: "direct", id: "proof-user" },
+                    senderId: "openclaw",
+                    senderName: "OpenClaw QA",
+                    text: body.text,
+                    timestamp: 1_787_000_000_001,
+                    replyToId: body.replyToId,
+                    reactions: [],
+                  },
+                });
+                resolveOutbound();
+                return;
+              }
+              writeJson(res, 404, { error: "unsupported proof endpoint" });
+            } catch (error) {
+              writeJson(res, 500, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          });
+
+          await new Promise<void>((resolve, reject) => {
+            bus.once("error", reject);
+            bus.listen(0, "127.0.0.1", () => resolve());
+          });
+          const address = bus.address();
+          assert(address && typeof address === "object");
+          const baseUrl = `http://127.0.0.1:${address.port}`;
+
+          const [{ createPluginRuntime }, qaApi, approvalReply] = await Promise.all([
+            import("./src/plugins/runtime/index.js"),
+            import("./extensions/qa-channel/api.js"),
+            import("./src/infra/exec-approval-reply.js"),
+          ]);
+          const runtime = createPluginRuntime();
+          const productionDispatch = runtime.channel.inbound.dispatch;
+          let providerCalls = 0;
+          runtime.channel.inbound.dispatch = async (plan) =>
+            await productionDispatch({
+              ...plan,
+              replyResolver: async (_ctx, options) => {
+                providerCalls += 1;
+                const onToolResult = options?.onToolResult;
+                assert(onToolResult, "production dispatch did not expose onToolResult");
+                await onToolResult(
+                  approvalReply.buildExecApprovalUnavailableReplyPayload({
+                    reason: "no-approval-route",
+                  }),
+                );
+                return undefined;
               },
             });
-            assert.equal(dispatcher.sendToolResult(payload), true);
-            dispatcher.markComplete();
-            await dispatcher.waitForIdle();
+          qaApi.setQaChannelRuntime(runtime);
 
-            assert.equal(delivered.length, 1);
-            assert.equal(delivered[0]?.kind, "tool");
-            assert.equal(
-              delivered[0]?.payload.channelData?.execApprovalUnavailable?.reason,
-              "no-approval-route",
-            );
-            assert.match(
-              delivered[0]?.payload.text ?? "",
-              /no interactive approval client is currently available/,
-            );
+          const cfg = {
+            agents: { defaults: { verboseDefault: "off" } },
+            channels: {
+              "qa-channel": {
+                enabled: true,
+                baseUrl,
+                botUserId: "openclaw",
+                botDisplayName: "OpenClaw QA",
+                allowFrom: ["*"],
+                pollTimeoutMs: 50,
+              },
+            },
+            session: { store: path.join(runtimeDir, "sessions.json") },
+          };
+          const account = qaApi.qaChannelPlugin.config.resolveAccount(cfg, "default");
+          const abort = new AbortController();
+          const statuses: Array<Record<string, unknown>> = [];
+          const gatewayTask = Promise.resolve().then(async () => {
+            await qaApi.qaChannelPlugin.gateway?.startAccount?.({
+              accountId: account.accountId,
+              account,
+              cfg,
+              runtime: {
+                log: () => undefined,
+                error: () => undefined,
+                exit: () => undefined,
+              },
+              abortSignal: abort.signal,
+              log: {
+                info: () => undefined,
+                warn: () => undefined,
+                error: () => undefined,
+                debug: () => undefined,
+              },
+              getStatus: () => ({
+                accountId: account.accountId,
+                configured: true,
+                enabled: true,
+                running: true,
+              }),
+              setStatus: (status) => statuses.push(status as Record<string, unknown>),
+            });
+          });
+
+          try {
+            await Promise.race([
+              outboundObserved,
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("timed out waiting for durable channel send")), 20_000),
+              ),
+            ]);
+            abort.abort();
+            await gatewayTask;
+
+            assert.equal(providerCalls, 1);
+            assert.equal(outboundRequests.length, 1);
+            const delivered = outboundRequests[0];
+            assert.equal(delivered?.accountId, "default");
+            assert.equal(delivered?.to, "dm:proof-user");
+            assert.equal(delivered?.replyToId, "inbound-redacted-1");
+            assert.match(String(delivered?.text ?? ""), /no interactive approval client/i);
+            assert(pollCount >= 1);
+            assert(statuses.some((status) => status.running === true));
+            assert(statuses.some((status) => status.lifecycle === "stopped"));
+
             console.log(
-              "APPROVAL_UNAVAILABLE_LOCAL_PROOF_121179",
+              "PR121179_EPHEMERAL_GATEWAY_DURABLE_SEND_PROOF",
               JSON.stringify({
-                head: process.env.TARGET_SHA,
-                durable: true,
-                deliveries: delivered.length,
-                kind: delivered[0]?.kind,
+                head: targetSha,
+                gatewayOwner: "qaChannelPlugin.gateway.startAccount",
+                dispatchOwner: "runtime.channel.inbound.dispatch",
+                providerEdge: "mock-replyResolver",
+                channelApiEdge: "loopback-http",
+                inboundEvents: 1,
+                providerCalls,
+                durableChannelSends: outboundRequests.length,
+                target: "dm:[redacted]",
+                replyTo: "[redacted]",
                 reason: "no-approval-route",
+                privateDataPrinted: false,
               }),
             );
-          });
+          } finally {
+            abort.abort();
+            await gatewayTask.catch(() => undefined);
+            await new Promise<void>((resolve, reject) =>
+              bus.close((error) => (error ? reject(error) : resolve())),
+            );
+            await rm(runtimeDir, { recursive: true, force: true });
+          }
           NODE
-          corepack pnpm test "$proof_script"
-
-      - name: Prove the quiet-mode owner gate routes the notice
-        shell: bash
-        run: |
-          set -euo pipefail
-          corepack pnpm test src/auto-reply/reply/dispatch-from-config.test.ts \
-            -t "delivers approval-unavailable notices when verbose tool progress is disabled"
+          node --import tsx "$proof_script"
