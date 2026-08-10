@@ -52,12 +52,18 @@ jobs:
             src/gateway/server-cron-notifications.test.ts \
             src/gateway/server-cron-primary-webhook.test.ts \
             src/gateway/server-cron.test.ts
-          ./node_modules/.bin/oxfmt --check \
-            src/cron/command-output-summary.ts \
-            src/cron/command-output-summary.test.ts \
-            src/gateway/server-cron-notifications.test.ts \
-            src/gateway/server-cron-primary-webhook.test.ts \
+          touched_files=(
+            src/cron/command-output-summary.ts
+            src/cron/command-output-summary.test.ts
+            src/gateway/server-cron-notifications.test.ts
+            src/gateway/server-cron-primary-webhook.test.ts
             src/gateway/server-cron.test.ts
+          )
+          if ! ./node_modules/.bin/oxfmt --check "${touched_files[@]}"; then
+            ./node_modules/.bin/oxfmt "${touched_files[@]}"
+            git --no-pager diff -- "${touched_files[@]}"
+            exit 1
+          fi
 
       - name: Prove status-shaped codes are redacted at the real webhook boundary
         shell: bash
