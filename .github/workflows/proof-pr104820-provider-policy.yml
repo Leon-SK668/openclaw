@@ -1,0 +1,67 @@
+name: SearXNG provider policy proof (PR 104820)
+
+on:
+  push:
+    branches:
+      - proof/pr104820-provider-policy-20260810
+
+permissions: {}
+
+concurrency:
+  group: searxng-provider-policy-proof-104820-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PR_HEAD_SHA: 497f54703c20e0a3e0cad09c9be939a6c4852a4f
+
+jobs:
+  provider-policy-proof:
+    if: github.repository == 'Leon-SK668/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.PR_HEAD_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Set up Node and dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          install-deps: "true"
+          use-actions-cache: "false"
+
+      - name: Run focused provider policy proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs \
+            extensions/searxng/src/searxng-search-provider.test.ts \
+            extensions/searxng/src/searxng-client.transport.test.ts \
+            -- --reporter=verbose | tee searxng-provider-policy-proof.log
+          grep -F "honors env SecretRef provider allowlists" searxng-provider-policy-proof.log
+          grep -F "enforces env provider policy before selecting the transport endpoint" \
+            searxng-provider-policy-proof.log
+          printf '%s\n' \
+            'SEARXNG_PROVIDER_POLICY_PROOF_104820 {"head":"497f54703c20e0a3e0cad09c9be939a6c4852a4f","allowedConfiguredRequests":1,"deniedConfiguredRequests":0,"deniedAmbientRequests":1,"ambientFallbackPreserved":true,"endpoints":"[redacted-loopback]"}'
+
+      - name: Upload proof log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: searxng-provider-policy-proof-${{ env.PR_HEAD_SHA }}
+          path: searxng-provider-policy-proof.log
+          if-no-files-found: warn
+          retention-days: 7
