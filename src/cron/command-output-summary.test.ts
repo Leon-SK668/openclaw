@@ -169,6 +169,21 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it.each(["Log in with code WDJBMJHT", "Authenticate using code WDJBMJHT"])(
+    "redacts a letters-only code in credential action grammar: %s",
+    (summary) => {
+      expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+        summary.replace("WDJBMJHT", "[redacted-code]"),
+      );
+    },
+  );
+
+  it("preserves uppercase prose on a non-code login action line", () => {
+    const summary = "Log in with DEBUGGING enabled";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(summary);
+  });
+
   it("preserves a trailing terminal status on a URL action line", () => {
     const summary = "Visit https://example.com/device SUCCESS";
 

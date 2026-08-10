@@ -11,6 +11,7 @@ const YOUR_CODE_IS_PATTERN =
   /\byour\s+code\s+is\s*:?\s*(\S+?)(?=[.,;!?]?(?:\s|$))/i;
 const CODE_PROMPT_PATTERNS = [
   /\b(device|user|verification|authorization|auth|login|one[- ]time|otp)\s+code\b/i,
+  /\b(?:log(?:\s|-)?in|auth(?:enticate|orize))\s+(?:with|using)\s+(?:this\s+)?code\b/i,
   /\byour\s+(?:(?:one[- ]time|verification|device)\s+)?code\s*[:=]/i,
   /\b(?:enter|copy)\s+(?:(?:the|this|your)\s+)?(?:(?:following|one[- ]time|verification|device)\s+)?code(?:\s+to\s+continue)?\b/i,
   /\buse\s+(?:(?:this|your)\s+)?(?:(?:one[- ]time|verification|device)\s+)?code\b/i,
