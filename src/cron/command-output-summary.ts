@@ -275,12 +275,13 @@ function redactKnownGroupedCodes(value: string, knownCodes: ReadonlySet<string>)
   const groups = value.split(/[- ]/);
   const separators = value.match(/[- ]/g) ?? [];
   const redactedSpans: Array<{ start: number; end: number }> = [];
-  for (let start = 0; start < groups.length; start += 1) {
-    let candidate = groups[start];
+  for (const [start, firstGroup] of groups.entries()) {
+    let candidate = firstGroup;
     let matchedEnd = knownCodes.has(candidate) ? start + 1 : -1;
     const endLimit = Math.min(groups.length, start + MAX_CODE_TOKEN_GROUPS);
     for (let end = start + 1; end < endLimit; end += 1) {
-      candidate += `${separators[end - 1]}${groups[end]}`;
+      // split and match above produce one separator between each adjacent group.
+      candidate += `${separators[end - 1]!}${groups[end]!}`;
       if (knownCodes.has(candidate)) {
         matchedEnd = end + 1;
       }
