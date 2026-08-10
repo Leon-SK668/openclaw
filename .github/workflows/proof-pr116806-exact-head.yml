@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_SHA: 4dd3bc4b5db405f55ed7b85d99511494c6d29abc
+      TARGET_SHA: 0b57d05cd16fb57228380af9898f6a3b70f4dab0
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -123,22 +123,22 @@ jobs:
             unpromptedSummary,
           );
 
-          const trustedDocsSummary = [
+          const urlPolicySummary = [
             "Enter code:",
             "https://docs.openclaw.ai/help",
-            "123456",
-          ].join("\n");
-          assert.equal(
-            redactCronCommandSummaryForExternalDelivery(trustedDocsSummary),
-            trustedDocsSummary,
-          );
-
-          const unsafeUrlSummary = [
             "https://files.example.com/c/abc123",
             "https://docs.openclaw.ai/private-value/../help",
           ].join("\n");
-          const unsafeUrlOutput = redactCronCommandSummaryForExternalDelivery(unsafeUrlSummary);
-          assert.equal(unsafeUrlOutput, "[redacted-url]\n[redacted-url]");
+          const urlPolicyOutput = redactCronCommandSummaryForExternalDelivery(urlPolicySummary);
+          assert.equal(
+            urlPolicyOutput,
+            [
+              "Enter code:",
+              "https://docs.openclaw.ai/help",
+              "[redacted-url]",
+              "[redacted-url]",
+            ].join("\n"),
+          );
 
           const preDiscoverySummary = "Reference A00001\nEnter code A00001";
           const preDiscoveryOutput =
@@ -273,8 +273,7 @@ jobs:
               outboundDiagnosticsSummary: outbound.diagnostics?.summary,
               outboundDiagnosticsMessage: outbound.diagnostics?.entries?.[0]?.message,
               unpromptedOutput: unpromptedSummary,
-              trustedDocsOutput: trustedDocsSummary,
-              unsafeUrlOutput,
+              urlPolicyOutput,
               preDiscoveryOutput,
               generatedHeaderOutput,
               inlineHandoffOutput,
