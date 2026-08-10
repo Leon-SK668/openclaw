@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runSearxngSearch, testing } from "./searxng-client.js";
 
 const servers = new Set<Server>();
@@ -28,6 +28,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   testing.SEARXNG_SEARCH_CACHE.clear();
   await Promise.all([...servers].map(closeServer));
   servers.clear();
@@ -61,6 +62,79 @@ describe("searxng real transport", () => {
       provider: "searxng",
       count: 1,
       results: [{ url: "https://docs.openclaw.ai/" }],
+    });
+  });
+
+  it("enforces env provider policy before selecting the transport endpoint", async () => {
+    let configuredRequests = 0;
+    let ambientRequests = 0;
+    const createEndpoint = (onRequest: () => void, title: string) =>
+      createServer((_request, response) => {
+        onRequest();
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            results: [{ title, url: `https://example.com/${title}`, content: title }],
+          }),
+        );
+      });
+    const configuredBaseUrl = await listen(
+      createEndpoint(() => {
+        configuredRequests += 1;
+      }, "configured"),
+    );
+    const ambientBaseUrl = await listen(
+      createEndpoint(() => {
+        ambientRequests += 1;
+      }, "ambient"),
+    );
+    vi.stubEnv("CUSTOM_SEARXNG_BASE_URL", configuredBaseUrl);
+    vi.stubEnv("SEARXNG_BASE_URL", ambientBaseUrl);
+
+    const createConfig = (allowlist: string[]) =>
+      ({
+        secrets: {
+          providers: {
+            "searxng-env": { source: "env", allowlist },
+          },
+        },
+        plugins: {
+          entries: {
+            searxng: {
+              config: {
+                webSearch: {
+                  baseUrl: {
+                    source: "env",
+                    provider: "searxng-env",
+                    id: "CUSTOM_SEARXNG_BASE_URL",
+                  },
+                },
+              },
+            },
+          },
+        },
+      }) as never;
+
+    await expect(
+      runSearxngSearch({
+        config: createConfig(["CUSTOM_SEARXNG_BASE_URL"]),
+        query: "allowed provider",
+      }),
+    ).resolves.toMatchObject({ results: [{ title: "configured" }] });
+    expect({ configuredRequests, ambientRequests }).toEqual({
+      configuredRequests: 1,
+      ambientRequests: 0,
+    });
+
+    await expect(
+      runSearxngSearch({
+        config: createConfig(["OTHER_SEARXNG_BASE_URL"]),
+        query: "denied provider",
+      }),
+    ).resolves.toMatchObject({ results: [{ title: "ambient" }] });
+    expect({ configuredRequests, ambientRequests }).toEqual({
+      configuredRequests: 1,
+      ambientRequests: 1,
     });
   });
 

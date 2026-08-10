@@ -166,6 +166,78 @@ describe("searxng web search provider", () => {
     expect(resolveSearxngBaseUrl({} as never, {})).toBeUndefined();
   });
 
+  it("honors env SecretRef provider allowlists", () => {
+    const createConfig = (allowlist: string[]) =>
+      ({
+        secrets: {
+          providers: {
+            "searxng-env": { source: "env", allowlist },
+          },
+        },
+        plugins: {
+          entries: {
+            searxng: {
+              config: {
+                webSearch: {
+                  baseUrl: {
+                    source: "env",
+                    provider: "searxng-env",
+                    id: "CUSTOM_SEARXNG_BASE_URL",
+                  },
+                },
+              },
+            },
+          },
+        },
+      }) as never;
+    const env = {
+      CUSTOM_SEARXNG_BASE_URL: "https://configured.search///",
+      SEARXNG_BASE_URL: "https://ambient.search///",
+    };
+
+    expect(resolveSearxngBaseUrl(createConfig(["CUSTOM_SEARXNG_BASE_URL"]), env)).toBe(
+      "https://configured.search",
+    );
+    expect(resolveSearxngBaseUrl(createConfig(["OTHER_SEARXNG_BASE_URL"]), env)).toBe(
+      "https://ambient.search",
+    );
+  });
+
+  it("does not read env values through a non-env provider", () => {
+    const config = {
+      secrets: {
+        providers: {
+          "searxng-file": {
+            source: "file",
+            path: "/secrets/searxng.json",
+          },
+        },
+      },
+      plugins: {
+        entries: {
+          searxng: {
+            config: {
+              webSearch: {
+                baseUrl: {
+                  source: "env",
+                  provider: "searxng-file",
+                  id: "CUSTOM_SEARXNG_BASE_URL",
+                },
+              },
+            },
+          },
+        },
+      },
+    } as never;
+
+    expect(
+      resolveSearxngBaseUrl(config, {
+        CUSTOM_SEARXNG_BASE_URL: "https://configured.search",
+        SEARXNG_BASE_URL: "https://ambient.search",
+      }),
+    ).toBe("https://ambient.search");
+  });
+
   it("reads categories and language from plugin config", () => {
     const config = {
       plugins: {
