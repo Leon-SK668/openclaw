@@ -1,0 +1,214 @@
+name: PR 121181 exact-head ACP skill memo proof
+
+on:
+  push:
+    branches:
+      - proof/pr121181-exact-head-20260810
+
+permissions: {}
+
+jobs:
+  runtime-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: 62a03718667453ce5fab2e560df9cf2d38fcb331
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/121181/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove ACP registry transitions invalidate only the skill memo identity
+        shell: bash
+        env:
+          OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1"
+        run: |
+          set -euo pipefail
+          proof_root="$RUNNER_TEMP/pr121181-runtime"
+          proof_script="$RUNNER_TEMP/pr121181-runtime-proof.mts"
+          mkdir -p "$proof_root/home" "$proof_root/state"
+          cat >"$proof_script" <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs/promises";
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const repoRoot = process.cwd();
+          const proofRoot = process.env.PROOF_ROOT;
+          assert(proofRoot, "PROOF_ROOT is required");
+          const workspaceDir = path.join(proofRoot, "workspace");
+          const acpxRoot = path.join(proofRoot, "plugins", "acpx");
+          const helperRoot = path.join(proofRoot, "plugins", "helper");
+
+          async function importSource(relativePath: string) {
+            return import(pathToFileURL(path.join(repoRoot, relativePath)).href);
+          }
+
+          async function writePlugin(rootDir: string, id: string): Promise<void> {
+            await fs.mkdir(path.join(rootDir, "skills"), { recursive: true });
+            await fs.writeFile(
+              path.join(rootDir, "package.json"),
+              JSON.stringify({
+                name: `@proof/${id}`,
+                version: "1.0.0",
+                type: "module",
+                openclaw: { extensions: ["./index.js"] },
+              }),
+            );
+            await fs.writeFile(
+              path.join(rootDir, "openclaw.plugin.json"),
+              JSON.stringify({
+                id,
+                name: `${id} proof plugin`,
+                description: "Exact-head runtime proof fixture",
+                skills: ["./skills"],
+                configSchema: { type: "object", additionalProperties: false, properties: {} },
+              }),
+            );
+            await fs.writeFile(path.join(rootDir, "index.js"), "export default function () {}\n");
+            await fs.writeFile(
+              path.join(rootDir, "skills", "SKILL.md"),
+              `---\nname: ${id}-proof\ndescription: Runtime proof fixture.\n---\n`,
+            );
+          }
+
+          await fs.mkdir(workspaceDir, { recursive: true });
+          await writePlugin(acpxRoot, "acpx");
+          await writePlugin(helperRoot, "helper");
+
+          const config = {
+            acp: { enabled: true, backend: "acpx" },
+            plugins: {
+              allow: ["acpx", "helper"],
+              load: { paths: [acpxRoot, helperRoot] },
+              entries: {
+                acpx: { enabled: true },
+                helper: { enabled: true },
+              },
+            },
+          };
+
+          const { registerAcpRuntimeBackend, unregisterAcpRuntimeBackend } =
+            await importSource("src/acp/runtime/registry.ts");
+          const { setCurrentPluginMetadataSnapshot } = await importSource(
+            "src/plugins/current-plugin-metadata-snapshot.ts",
+          );
+          const { clearCurrentPluginMetadataSnapshot } = await importSource(
+            "src/plugins/current-plugin-metadata-state.ts",
+          );
+          const { loadPluginMetadataSnapshot, resolvePluginMetadataSnapshot } = await importSource(
+            "src/plugins/plugin-metadata-snapshot.ts",
+          );
+          const { resolvePluginSkillDirs } = await importSource(
+            "src/skills/loading/plugin-skills.ts",
+          );
+
+          const expectedAcpxDir = path.join(acpxRoot, "skills");
+          const expectedHelperDir = path.join(helperRoot, "skills");
+          const summarize = (dirs: string[]) => ({
+            count: dirs.length,
+            acpx: dirs.includes(expectedAcpxDir),
+            helper: dirs.includes(expectedHelperDir),
+          });
+
+          unregisterAcpRuntimeBackend("acpx");
+          try {
+            const snapshot = loadPluginMetadataSnapshot({
+              config,
+              env: process.env,
+              workspaceDir,
+            });
+            assert.deepEqual(
+              snapshot.plugins.map((plugin: { id: string }) => plugin.id).toSorted(),
+              ["acpx", "helper"],
+            );
+            setCurrentPluginMetadataSnapshot(snapshot, {
+              config,
+              env: process.env,
+              workspaceDir,
+            });
+            assert.strictEqual(
+              resolvePluginMetadataSnapshot({
+                config,
+                env: process.env,
+                workspaceDir,
+                allowWorkspaceScopedCurrent: true,
+              }),
+              snapshot,
+            );
+
+            const unavailable = resolvePluginSkillDirs({ workspaceDir, config });
+            assert.deepEqual(summarize(unavailable), { count: 1, acpx: false, helper: true });
+
+            registerAcpRuntimeBackend({ id: "acpx", runtime: {}, healthy: () => true });
+            const available = resolvePluginSkillDirs({ workspaceDir, config });
+            assert.deepEqual(summarize(available), { count: 2, acpx: true, helper: true });
+            const availableStable = resolvePluginSkillDirs({ workspaceDir, config });
+            assert.strictEqual(availableStable, available);
+
+            unregisterAcpRuntimeBackend("acpx");
+            const unavailableAgain = resolvePluginSkillDirs({ workspaceDir, config });
+            assert.deepEqual(summarize(unavailableAgain), {
+              count: 1,
+              acpx: false,
+              helper: true,
+            });
+            const unavailableStable = resolvePluginSkillDirs({ workspaceDir, config });
+            assert.strictEqual(unavailableStable, unavailableAgain);
+
+            console.log(
+              "ACP_SKILL_MEMO_RUNTIME_PROOF_121181",
+              JSON.stringify({
+                head: process.env.TARGET_SHA,
+                metadataSnapshotStable: true,
+                unavailableToAvailable: {
+                  before: summarize(unavailable),
+                  after: summarize(available),
+                },
+                availableToUnavailable: {
+                  before: summarize(available),
+                  after: summarize(unavailableAgain),
+                },
+                stableMemoHits: {
+                  available: availableStable === available,
+                  unavailable: unavailableStable === unavailableAgain,
+                },
+                registryLifecycle: "unregister-register-unregister",
+                fixturePaths: "[redacted-temporary]",
+              }),
+            );
+          } finally {
+            unregisterAcpRuntimeBackend("acpx");
+            clearCurrentPluginMetadataSnapshot();
+            await fs.rm(proofRoot, { recursive: true, force: true });
+          }
+          NODE
+          HOME="$proof_root/home" \
+            OPENCLAW_STATE_DIR="$proof_root/state" \
+            PROOF_ROOT="$proof_root" \
+            node --import tsx "$proof_script"
