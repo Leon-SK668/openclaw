@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_SHA: e0fbc6f173fcc30fa1e82d71560a14be87be6bbb
+      TARGET_SHA: 834ec0afa025941cfca4d234c2fd9fc24bde503f
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -70,9 +70,12 @@ jobs:
             markRetainedManagedNpmInstall,
             resolveRetainedManagedNpmInstallMarkerPath,
           } = await import("../src/plugins/managed-npm-retention.js");
-          const { RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON } = await import(
-            "../src/plugins/managed-npm-retention-contract.js"
-          );
+          const {
+            RETAINED_MANAGED_NPM_DOCTOR_REPAIR_REASON,
+            RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
+            RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON,
+            RETAINED_MANAGED_NPM_PLUGIN_SOURCE_CHANGE_REASON,
+          } = await import("../src/plugins/managed-npm-retention-contract.js");
 
           const npmDir = path.join(stateDir, "npm");
           const writeManagedGeneration = (params: {
@@ -153,7 +156,7 @@ jobs:
               await markRetainedManagedNpmInstall({
                 packageDir: invalid.packageDir,
                 pluginId: "invalid-proof-plugin",
-                reason: "replaced-by-managed-npm-generation-update",
+                reason: RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
               }),
               true,
             );
@@ -187,6 +190,39 @@ jobs:
               "openclaw-inference-activation-not-committed",
             );
 
+            const canonicalRetired = [
+              {
+                key: "doctor-repair",
+                reason: RETAINED_MANAGED_NPM_DOCTOR_REPAIR_REASON,
+              },
+              {
+                key: "generation-update",
+                reason: RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
+              },
+              {
+                key: "plugin-source-change",
+                reason: RETAINED_MANAGED_NPM_PLUGIN_SOURCE_CHANGE_REASON,
+              },
+            ].map(({ key, reason }) => ({
+              ...writeManagedGeneration({
+                packageName: `@openclaw/${key}-proof-plugin`,
+                pluginId: `${key}-proof-plugin`,
+                generationKey: `${key}-generation`,
+              }),
+              key,
+              reason,
+            }));
+            for (const generation of canonicalRetired) {
+              assert.equal(
+                await markRetainedManagedNpmInstall({
+                  packageDir: generation.packageDir,
+                  pluginId: `${generation.key}-proof-plugin`,
+                  reason: generation.reason,
+                }),
+                true,
+              );
+            }
+
             const inaccessibleLegacy = writeLegacyManagedPackage({
               packageName: "@openclaw/inaccessible-proof-plugin",
               pluginId: "inaccessible-proof-plugin",
@@ -195,7 +231,7 @@ jobs:
               await markRetainedManagedNpmInstall({
                 packageDir: inaccessibleLegacy.packageDir,
                 pluginId: "inaccessible-proof-plugin",
-                reason: "replaced-by-managed-npm-generation-update",
+                reason: RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
               }),
               true,
             );
@@ -221,6 +257,9 @@ jobs:
             const invalidPackagePreserved = fs.existsSync(invalid.packageDir);
             const invalidMarkerPreserved = hasRetainedManagedNpmInstallMarker(invalid.packageDir);
             const stagedCodexProjectRemoved = !fs.existsSync(stagedCodex.projectRoot);
+            const canonicalRetiredProjectsRemoved = canonicalRetired.every(
+              (generation) => !fs.existsSync(generation.projectRoot),
+            );
             const inaccessibleLegacyPackagePreserved = fs.existsSync(inaccessibleLegacy.packageDir);
             const inaccessibleLegacyMarkerPreserved = fs.existsSync(inaccessibleLegacyMarkerPath);
             const inaccessibleLegacyWarning = warn.find((message) =>
@@ -230,13 +269,14 @@ jobs:
             assert.equal(invalidPackagePreserved, true);
             assert.equal(invalidMarkerPreserved, true);
             assert.equal(stagedCodexProjectRemoved, true);
+            assert.equal(canonicalRetiredProjectsRemoved, true);
             assert.equal(inaccessibleLegacyPackagePreserved, true);
             assert.equal(inaccessibleLegacyMarkerPreserved, true);
             assert.equal(warn.length, 2);
             assert.ok(warn.some((message) => /SyntaxError/.test(message)));
             assert.match(inaccessibleLegacyWarning ?? "", /^failed to clean retained npm generation /);
             assert.match(inaccessibleLegacyWarning ?? "", /EACCES|EPERM/);
-            assert.deepEqual(info, ["cleaned 1 retained npm plugin generation(s)"]);
+            assert.deepEqual(info, ["cleaned 4 retained npm plugin generation(s)"]);
 
             const redactStateDir = (message: string) => message.split(stateDir).join("$STATE");
             const runtimeLog = {
@@ -257,9 +297,11 @@ jobs:
                 inaccessibleLegacyMarkerPreserved,
                 inaccessibleLegacyWarned: Boolean(inaccessibleLegacyWarning),
                 warningCount: warn.length,
+                canonicalCleanupReasons: canonicalRetired.map((generation) => generation.reason),
+                canonicalRetiredProjectsRemoved,
                 stagedCodexReason: stagedMarkerBeforeCleanup.reason,
                 stagedCodexProjectRemoved,
-                cleanedGenerationCount: 1,
+                cleanedGenerationCount: 4,
               }),
             );
           } finally {
