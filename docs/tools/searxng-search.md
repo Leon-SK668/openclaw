@@ -98,6 +98,11 @@ Resolution order: configured `baseUrl` string, then an inline env SecretRef on
 `SEARXNG_BASE_URL` is present with no explicit provider chosen, auto-detection
 picks SearXNG.
 
+An inline SecretRef reads its target variable only when it is an `env` ref and
+the configured SecretRef provider policy allows the read. If the ref is
+unavailable, uses another source, or is denied by provider policy, OpenClaw does
+not read its target and continues to the ambient `SEARXNG_BASE_URL` fallback.
+
 ## Plugin config reference
 
 | Field        | Description                                                        |
