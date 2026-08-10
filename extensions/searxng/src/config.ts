@@ -1,9 +1,7 @@
 // Searxng helper module supports config behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import {
-  normalizeResolvedSecretInputString,
-  normalizeSecretInput,
-} from "openclaw/plugin-sdk/secret-input";
+import { canResolveEnvSecretRefInReadOnlyPath } from "openclaw/plugin-sdk/extension-shared";
+import { normalizeSecretInput, resolveSecretInputString } from "openclaw/plugin-sdk/secret-input";
 
 type SearxngPluginConfig = {
   webSearch?: {
@@ -13,28 +11,35 @@ type SearxngPluginConfig = {
   };
 };
 
-function normalizeConfiguredString(value: unknown, path: string): string | undefined {
-  try {
-    return normalizeSecretInput(
-      normalizeResolvedSecretInputString({
-        value,
-        path,
-      }),
-    );
-  } catch {
+function resolveConfiguredBaseUrl(
+  value: unknown,
+  config: OpenClawConfig | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const resolved = resolveSecretInputString({
+    value,
+    path: "plugins.entries.searxng.config.webSearch.baseUrl",
+    defaults: config?.secrets?.defaults,
+    mode: "inspect",
+  });
+  if (resolved.status === "available") {
+    return normalizeSecretInput(resolved.value);
+  }
+  if (resolved.status !== "configured_unavailable" || resolved.ref.source !== "env") {
     return undefined;
   }
-}
-
-function readInlineEnvSecretRefValue(value: unknown, env: NodeJS.ProcessEnv): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  // Read-only plugin resolution may inspect env only through the configured provider contract.
+  // A denial still falls through to the shipped ambient SEARXNG_BASE_URL path below.
+  if (
+    !canResolveEnvSecretRefInReadOnlyPath({
+      cfg: config,
+      provider: resolved.ref.provider,
+      id: resolved.ref.id,
+    })
+  ) {
     return undefined;
   }
-  const record = value as { source?: unknown; id?: unknown };
-  if (record.source !== "env" || typeof record.id !== "string") {
-    return undefined;
-  }
-  return normalizeSecretInput(env[record.id]);
+  return normalizeSecretInput(env[resolved.ref.id]);
 }
 
 function normalizeTrimmedString(value: unknown): string | undefined {
@@ -66,13 +71,7 @@ export function resolveSearxngBaseUrl(
 ): string | undefined {
   const webSearch = resolveSearxngWebSearchConfig(config);
   return (
-    normalizeBaseUrl(
-      normalizeConfiguredString(
-        webSearch?.baseUrl,
-        "plugins.entries.searxng.config.webSearch.baseUrl",
-      ),
-    ) ??
-    normalizeBaseUrl(readInlineEnvSecretRefValue(webSearch?.baseUrl, env)) ??
+    normalizeBaseUrl(resolveConfiguredBaseUrl(webSearch?.baseUrl, config, env)) ??
     normalizeBaseUrl(normalizeSecretInput(env.SEARXNG_BASE_URL))
   );
 }
