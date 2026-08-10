@@ -1,0 +1,191 @@
+name: PR 116806 exact-head cron webhook redaction proof
+
+on:
+  push:
+    branches:
+      - proof/pr116806-exact-head-20260810
+
+permissions: {}
+
+jobs:
+  runtime-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: 3176bc14dd5c5edd1437af34f79b4da1d99992b4
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/116806/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove status-shaped codes are redacted at the real webhook boundary
+        shell: bash
+        env:
+          OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1"
+        run: |
+          set -euo pipefail
+          proof_root="$RUNNER_TEMP/pr116806-runtime"
+          proof_script="$RUNNER_TEMP/pr116806-runtime-proof.mts"
+          mkdir -p "$proof_root/home" "$proof_root/state"
+          cat >"$proof_script" <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs/promises";
+          import path from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const repoRoot = process.cwd();
+          const proofRoot = process.env.PROOF_ROOT;
+          assert(proofRoot, "PROOF_ROOT is required");
+
+          async function importSource(relativePath: string) {
+            return import(pathToFileURL(path.join(repoRoot, relativePath)).href);
+          }
+
+          const { redactCronCommandSummaryForExternalDelivery } = await importSource(
+            "src/cron/command-output-summary.ts",
+          );
+          const { sendGatewayCronWebhook } = await importSource(
+            "src/gateway/server-cron-notifications.ts",
+          );
+
+          const inputSummary = [
+            "Visit https://example.com/device",
+            "SUCCESS",
+            "WDJBMJHT",
+            "DEBUGGING",
+            "Log in with token=synthetic-proof-value",
+          ].join("\n");
+          const redactedSummary = redactCronCommandSummaryForExternalDelivery(inputSummary);
+          assert.equal(
+            redactedSummary,
+            [
+              "Visit [redacted-url]",
+              "SUCCESS",
+              "[redacted-code]",
+              "DEBUGGING",
+              "Log in with token=***",
+            ].join("\n"),
+          );
+
+          const unpromptedSummary = "SUCCESS\nFAILED\nDEBUGGING";
+          assert.equal(
+            redactCronCommandSummaryForExternalDelivery(unpromptedSummary),
+            unpromptedSummary,
+          );
+
+          const interceptedRequests: Array<{ url: string; body: string }> = [];
+          const interceptedFetch = Object.assign(
+            async (input: RequestInfo | URL, init?: RequestInit) => {
+              assert.equal(typeof init?.body, "string");
+              interceptedRequests.push({ url: String(input), body: init.body });
+              return new Response(null, { status: 204 });
+            },
+            // Production guarded fetch recognizes this standard mock shape and
+            // keeps the proof at the transport boundary without external services.
+            { mock: { calls: interceptedRequests } },
+          );
+          const originalFetch = globalThis.fetch;
+          globalThis.fetch = interceptedFetch as typeof fetch;
+
+          const now = Date.now();
+          const job = {
+            id: "cron-redaction-proof",
+            name: "Cron redaction proof",
+            enabled: true,
+            createdAtMs: now,
+            updatedAtMs: now,
+            schedule: { kind: "at", at: new Date(now + 60_000).toISOString() },
+            sessionTarget: "isolated",
+            wakeMode: "now",
+            payload: { kind: "command", argv: ["synthetic-proof"] },
+            delivery: { mode: "webhook", to: "https://proof.invalid/cron" },
+            state: {},
+          };
+          const event = {
+            jobId: job.id,
+            action: "finished",
+            status: "ok",
+            summary: inputSummary,
+            diagnostics: {
+              summary: inputSummary,
+              entries: [
+                {
+                  ts: now,
+                  source: "exec",
+                  severity: "info",
+                  message: inputSummary,
+                },
+              ],
+            },
+          };
+
+          try {
+            await sendGatewayCronWebhook({ event, job });
+          } finally {
+            globalThis.fetch = originalFetch;
+          }
+          assert.equal(interceptedRequests.length, 1);
+          assert.equal(interceptedRequests[0]?.url, "https://proof.invalid/cron");
+          const outbound = JSON.parse(interceptedRequests[0]?.body ?? "") as {
+            summary?: string;
+            diagnostics?: { summary?: string; entries?: Array<{ message?: string }> };
+          };
+          assert.equal(outbound.summary, redactedSummary);
+          assert.equal(outbound.diagnostics?.summary, redactedSummary);
+          assert.equal(outbound.diagnostics?.entries?.[0]?.message, redactedSummary);
+          const outboundJson = JSON.stringify(outbound);
+          assert.match(outboundJson, /\[redacted-url\]/);
+          assert.match(outboundJson, /\[redacted-code\]/);
+          assert.match(outboundJson, /token=\*\*\*/);
+          assert.doesNotMatch(outboundJson, /example\.com\/device/);
+          assert.match(outboundJson, /SUCCESS/);
+          assert.doesNotMatch(outboundJson, /WDJBMJHT/);
+          assert.doesNotMatch(outboundJson, /synthetic-proof-value/);
+
+          console.log(
+            "CRON_WEBHOOK_REDACTION_RUNTIME_PROOF_116806",
+            JSON.stringify({
+              head: process.env.TARGET_SHA,
+              productionWebhookAccepted: true,
+              guardedTransportIntercepted: true,
+              outboundSummary: outbound.summary,
+              outboundDiagnosticsSummary: outbound.diagnostics?.summary,
+              outboundDiagnosticsMessage: outbound.diagnostics?.entries?.[0]?.message,
+              unpromptedOutput: unpromptedSummary,
+              statusCarry: "visible-and-retained-until-following-code",
+              endpoint: "https://[redacted-proof-host]/cron",
+              fixturePaths: "[redacted-temporary]",
+            }),
+          );
+
+          await fs.rm(proofRoot, { recursive: true, force: true });
+          NODE
+          HOME="$proof_root/home" \
+            OPENCLAW_STATE_DIR="$proof_root/state" \
+            PROOF_ROOT="$proof_root" \
+            node --import tsx "$proof_script"
