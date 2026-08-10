@@ -1,6 +1,7 @@
 name: PR 121183 exact-head setup cleanup owner proof
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - proof/pr121183-setup-cleanup-20260810
