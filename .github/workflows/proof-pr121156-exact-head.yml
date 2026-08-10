@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_SHA: 3e8e2ed4e5f3868699e28619a98888bd681468ca
+      TARGET_SHA: 45949f9f86f04da5e5bd063f192addb791b8342a
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -114,6 +114,35 @@ jobs:
             return { packageDir, projectRoot };
           };
 
+          const writeLegacyManagedPackage = (params: {
+            packageName: string;
+            pluginId: string;
+          }) => {
+            const packageDir = path.join(npmDir, "node_modules", ...params.packageName.split("/"));
+            fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
+            fs.writeFileSync(
+              path.join(npmDir, "package.json"),
+              JSON.stringify({ private: true, dependencies: { [params.packageName]: "1.0.0" } }),
+              "utf8",
+            );
+            fs.writeFileSync(
+              path.join(packageDir, "package.json"),
+              JSON.stringify({
+                name: params.packageName,
+                version: "1.0.0",
+                openclaw: { extensions: ["./dist/index.js"] },
+              }),
+              "utf8",
+            );
+            fs.writeFileSync(
+              path.join(packageDir, "openclaw.plugin.json"),
+              JSON.stringify({ id: params.pluginId, configSchema: { type: "object" } }),
+              "utf8",
+            );
+            fs.writeFileSync(path.join(packageDir, "dist", "index.js"), "export {};\n", "utf8");
+            return { packageDir };
+          };
+
           try {
             const invalid = writeManagedGeneration({
               packageName: "@openclaw/invalid-proof-plugin",
@@ -158,25 +187,55 @@ jobs:
               "openclaw-inference-activation-not-committed",
             );
 
+            const inaccessibleLegacy = writeLegacyManagedPackage({
+              packageName: "@openclaw/inaccessible-proof-plugin",
+              pluginId: "inaccessible-proof-plugin",
+            });
+            assert.equal(
+              await markRetainedManagedNpmInstall({
+                packageDir: inaccessibleLegacy.packageDir,
+                pluginId: "inaccessible-proof-plugin",
+                reason: "replaced-by-managed-npm-generation-update",
+              }),
+              true,
+            );
+            const inaccessibleLegacyMarkerPath = resolveRetainedManagedNpmInstallMarkerPath(
+              inaccessibleLegacy.packageDir,
+            );
+            const inaccessibleLegacyMarkerDir = path.dirname(inaccessibleLegacyMarkerPath);
+            fs.chmodSync(inaccessibleLegacyMarkerDir, 0o000);
+
             const info: string[] = [];
             const warn: string[] = [];
-            await cleanupRetainedPluginInstallGenerations({
-              log: {
-                info: (message) => info.push(message),
-                warn: (message) => warn.push(message),
-              },
-            });
+            try {
+              await cleanupRetainedPluginInstallGenerations({
+                log: {
+                  info: (message) => info.push(message),
+                  warn: (message) => warn.push(message),
+                },
+              });
+            } finally {
+              fs.chmodSync(inaccessibleLegacyMarkerDir, 0o700);
+            }
 
             const invalidPackagePreserved = fs.existsSync(invalid.packageDir);
             const invalidMarkerPreserved = hasRetainedManagedNpmInstallMarker(invalid.packageDir);
             const stagedCodexProjectRemoved = !fs.existsSync(stagedCodex.projectRoot);
+            const inaccessibleLegacyPackagePreserved = fs.existsSync(inaccessibleLegacy.packageDir);
+            const inaccessibleLegacyMarkerPreserved = fs.existsSync(inaccessibleLegacyMarkerPath);
+            const inaccessibleLegacyWarning = warn.find((message) =>
+              message.includes(inaccessibleLegacy.packageDir),
+            );
 
             assert.equal(invalidPackagePreserved, true);
             assert.equal(invalidMarkerPreserved, true);
             assert.equal(stagedCodexProjectRemoved, true);
-            assert.equal(warn.length, 1);
-            assert.match(warn[0] ?? "", /^failed to clean retained npm generation /);
-            assert.match(warn[0] ?? "", /SyntaxError/);
+            assert.equal(inaccessibleLegacyPackagePreserved, true);
+            assert.equal(inaccessibleLegacyMarkerPreserved, true);
+            assert.equal(warn.length, 2);
+            assert.ok(warn.some((message) => /SyntaxError/.test(message)));
+            assert.match(inaccessibleLegacyWarning ?? "", /^failed to clean retained npm generation /);
+            assert.match(inaccessibleLegacyWarning ?? "", /EACCES|EPERM/);
             assert.deepEqual(info, ["cleaned 1 retained npm plugin generation(s)"]);
 
             const redactStateDir = (message: string) => message.split(stateDir).join("$STATE");
@@ -194,6 +253,9 @@ jobs:
                 head: process.env.TARGET_SHA,
                 invalidPackagePreserved,
                 invalidMarkerPreserved,
+                inaccessibleLegacyPackagePreserved,
+                inaccessibleLegacyMarkerPreserved,
+                inaccessibleLegacyWarned: Boolean(inaccessibleLegacyWarning),
                 warningCount: warn.length,
                 stagedCodexReason: stagedMarkerBeforeCleanup.reason,
                 stagedCodexProjectRemoved,
