@@ -91,15 +91,21 @@ jobs:
             workspaceDir,
             env: process.env,
           });
-          assert.deepEqual(
-            resolution.config?.plugins?.entries,
-            {
-              google: {
-                enabled: false,
-                config: { webSearch: { model: "gemini-3-flash-preview" } },
-              },
-            },
+          const resolvedEntries = resolution.config?.plugins?.entries ?? {};
+          assert.equal(
+            Object.hasOwn(resolvedEntries, "GOOGLE-GEMINI-CLI"),
+            false,
+            "bundled compat retained the legacy alias entry",
+          );
+          assert.equal(
+            resolvedEntries.google?.enabled,
+            false,
             "bundled compat did not preserve the canonicalized explicit disable",
+          );
+          assert.deepEqual(
+            resolvedEntries.google?.config,
+            { webSearch: { model: "gemini-3-flash-preview" } },
+            "bundled compat did not preserve the canonicalized plugin config",
           );
 
           const enabledProviders = resolvePluginWebSearchProviders({
@@ -130,7 +136,7 @@ jobs:
             JSON.stringify({
               head: process.env.TARGET_SHA,
               boundary: "resolvePluginWebSearchProviders",
-              canonicalEntry: resolution.config?.plugins?.entries?.google,
+              canonicalEntry: resolvedEntries.google,
               positiveControl: "google:gemini",
               disabledAliasProviderCount: disabledProviders.length,
               credentials: "none",
