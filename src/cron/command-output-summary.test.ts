@@ -403,6 +403,14 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it.each([
+    ["Your code is 482913.", "Your code is [redacted-code]."],
+    ["Your code is ABCD-EFGH, paste it", "Your code is [redacted-code], paste it"],
+    ["Your code is: 739214", "Your code is: [redacted-code]"],
+  ])("redacts a punctuated generic code prompt: %s", (summary, expected) => {
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(expected);
+  });
+
   it("uses preserved-block redaction for prompt-bearing lines", () => {
     const summary =
       "action-required output preserved:\nThen enter your code, type WDJBMJHT\nYour device code is ABCDEFGH\n\nReference WDJBMJHT";

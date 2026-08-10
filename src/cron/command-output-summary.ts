@@ -6,8 +6,9 @@ const MAX_PRESERVED_ACTION_LINES = 12;
 const ACTION_REQUIRED_OUTPUT_HEADER = "action-required output preserved:";
 const CODE_PROMPT_MASK_CHAR = "\0";
 const QUALIFIED_YOUR_CODE_IS_PATTERN =
-  /\byour\s+(?:(?:one[- ]time|verification|device|user|authorization|auth|login|otp)\s+)code\s+is\s+(\S+)/i;
-const YOUR_CODE_IS_PATTERN = /\byour\s+code\s+is\s+(\S+)/i;
+  /\byour\s+(?:(?:one[- ]time|verification|device|user|authorization|auth|login|otp)\s+)code\s+is\s*:?\s*(\S+?)(?=[.,;!?]?(?:\s|$))/i;
+const YOUR_CODE_IS_PATTERN =
+  /\byour\s+code\s+is\s*:?\s*(\S+?)(?=[.,;!?]?(?:\s|$))/i;
 const CODE_PROMPT_PATTERNS = [
   /\b(device|user|verification|authorization|auth|login|one[- ]time|otp)\s+code\b/i,
   /\byour\s+(?:(?:one[- ]time|verification|device)\s+)?code\s*[:=]/i,
