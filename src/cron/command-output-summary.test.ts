@@ -161,6 +161,22 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("redacts a trailing letters-only code on a URL action line", () => {
+    const summary = "Visit https://example.com/device WDJBMJHT";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url] [redacted-code]",
+    );
+  });
+
+  it("preserves a trailing terminal status on a URL action line", () => {
+    const summary = "Visit https://example.com/device SUCCESS";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url] SUCCESS",
+    );
+  });
+
   it.each([
     ["Enter this code:", "SUCCESS", "Enter this code:"],
     ["Visit https://example.com/device", "FAILED", "Visit [redacted-url]"],

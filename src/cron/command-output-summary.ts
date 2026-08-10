@@ -27,6 +27,7 @@ const ACTION_LINE_PATTERNS = [
   /\bhttps?:\/\/[^\s]+\/(?:device|activate|login|oauth|authorize|auth)\b/i,
 ];
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
+const REDACTED_URL = "[redacted-url]";
 const STANDALONE_URL_LINE_PATTERN = /^\s*(?:https?:\/\/|www\.)\S+\s*$/i;
 const GENERATED_OUTPUT_SECTION_HEADER_PATTERN = /^stdout:$/i;
 const CODE_CANDIDATE_PATTERN = /\b(?:[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})\b/g;
@@ -226,11 +227,15 @@ function redactEmbeddedCodeCandidates(
     const candidate = line.slice(start, end);
     const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end, allowPlainCodeLabel);
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
+    const isTrailingUrlHandoffCode =
+      mode === "action" &&
+      line.includes(REDACTED_URL) &&
+      DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(line.slice(end));
     const shouldRedact =
       attachedToPrompt ||
       (!isCronCommandTerminalStatusLine(candidate) &&
         (mode === "action" || mode === "preserved") &&
-        isUnambiguousCodeShape);
+        (isUnambiguousCodeShape || isTrailingUrlHandoffCode));
     result += line.slice(cursor, start);
     result += shouldRedact ? "[redacted-code]" : candidate;
     if (shouldRedact) {
@@ -252,7 +257,7 @@ function redactCronCommandSummaryLine(
     .replace(SECRET_ASSIGNMENT_PATTERN, (_match, key: string, separator: string) => {
       return `${key}${separator}***`;
     })
-    .replace(URL_PATTERN, "[redacted-url]");
+    .replace(URL_PATTERN, REDACTED_URL);
   redacted = redactEmbeddedCodeCandidates(
     redacted,
     embeddedCodeMode,
