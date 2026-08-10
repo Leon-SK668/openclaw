@@ -7,8 +7,7 @@ const ACTION_REQUIRED_OUTPUT_HEADER = "action-required output preserved:";
 const CODE_PROMPT_MASK_CHAR = "\0";
 const QUALIFIED_YOUR_CODE_IS_PATTERN =
   /\byour\s+(?:(?:one[- ]time|verification|device|user|authorization|auth|login|otp)\s+)code\s+is\s*:?\s*(\S+?)(?=[.,;!?]?(?:\s|$))/i;
-const YOUR_CODE_IS_PATTERN =
-  /\byour\s+code\s+is\s*:?\s*(\S+?)(?=[.,;!?]?(?:\s|$))/i;
+const YOUR_CODE_IS_PATTERN = /\byour\s+code\s+is\s*:?\s*(\S+?)(?=[.,;!?]?(?:\s|$))/i;
 const CODE_PROMPT_PATTERNS = [
   /\b(device|user|verification|authorization|auth|login|one[- ]time|otp)\s+code\b/i,
   /\b(?:log(?:\s|-)?in|auth(?:enticate|orize))\s+(?:with|using)\s+(?:this\s+)?code\b/i,
@@ -229,15 +228,17 @@ function redactEmbeddedCodeCandidates(
     const candidate = line.slice(start, end);
     const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end, allowPlainCodeLabel);
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
-    const isTrailingUrlHandoffCode =
+    const candidateSuffix = line.slice(end);
+    const isUrlHandoffCode =
       mode === "action" &&
       line.includes(REDACTED_URL) &&
-      DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(line.slice(end));
+      (DIRECT_CODE_VALUE_SUFFIX_PATTERN.test(candidateSuffix) ||
+        CONTINUATION_CODE_VALUE_SUFFIX_PATTERN.test(candidateSuffix));
     const shouldRedact =
       attachedToPrompt ||
       (!isCronCommandTerminalStatusLine(candidate) &&
         (mode === "action" || mode === "preserved") &&
-        (isUnambiguousCodeShape || isTrailingUrlHandoffCode));
+        (isUnambiguousCodeShape || isUrlHandoffCode));
     result += line.slice(cursor, start);
     result += shouldRedact ? "[redacted-code]" : candidate;
     if (shouldRedact) {
@@ -337,8 +338,7 @@ export function redactCronCommandSummaryForExternalDelivery(
         promptCarry === "url-handoff" && STANDALONE_URL_LINE_PATTERN.test(part);
       const isPromptActionLine = isActionLine || isPromptCarriedUrlLine;
       const isTerminalStatusLine = isCronCommandTerminalStatusLine(part);
-      const hasActivePromptContinuation =
-        promptCarry !== "none" && promptCarry !== "url-handoff";
+      const hasActivePromptContinuation = promptCarry !== "none" && promptCarry !== "url-handoff";
       // The first bounded continuation belongs to the preceding action prompt;
       // otherwise an embedded one-time code bypasses the bare-code redaction path.
       const embeddedCodeMode: EmbeddedCodeRedactionMode = inPreservedActionBlock

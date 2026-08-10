@@ -169,6 +169,14 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("redacts a letters-only URL handoff code before continuation prose", () => {
+    const summary = "Visit https://example.com/device WDJBMJHT to continue";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Visit [redacted-url] [redacted-code] to continue",
+    );
+  });
+
   it.each(["Log in with code WDJBMJHT", "Authenticate using code WDJBMJHT"])(
     "redacts a letters-only code in credential action grammar: %s",
     (summary) => {
@@ -195,16 +203,13 @@ describe("cron command output summaries", () => {
   it.each([
     ["Enter this code:", "SUCCESS", "Enter this code:"],
     ["Visit https://example.com/device", "FAILED", "Visit [redacted-url]"],
-  ])(
-    "preserves terminal status after action prompt %s",
-    (prompt, status, redactedPrompt) => {
-      const summary = `${prompt}\n${status}`;
+  ])("preserves terminal status after action prompt %s", (prompt, status, redactedPrompt) => {
+    const summary = `${prompt}\n${status}`;
 
-      expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-        `${redactedPrompt}\n${status}`,
-      );
-    },
-  );
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      `${redactedPrompt}\n${status}`,
+    );
+  });
 
   it("keeps bounded prompt context across a visible terminal status", () => {
     const summary = "Visit https://example.com/device\nSUCCESS\nWDJBMJHT\nDEBUGGING";
