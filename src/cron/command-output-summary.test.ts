@@ -66,6 +66,27 @@ describe("cron command output summaries", () => {
     );
   });
 
+  it("carries a preserved code prompt through the generated stdout header", () => {
+    const summary = buildCronCommandSummary({
+      stdout: "12345678",
+      stderr: "diagnostic output",
+      preservedStdoutLines: ["Enter this code:"],
+    });
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      [
+        "action-required output preserved:",
+        "Enter this code:",
+        "",
+        "stdout:",
+        "[redacted-code]",
+        "",
+        "stderr:",
+        "diagnostic output",
+      ].join("\n"),
+    );
+  });
+
   it("redacts split URLs and bare codes after action lines in the captured tail", () => {
     const summary = buildCronCommandSummary({
       stdout:
@@ -267,21 +288,26 @@ describe("cron command output summaries", () => {
       "Enter code Z9X8-Y7W6",
       "build completed",
       "654321",
+      "12345678",
       "AB12CD34",
       "A1B2-C3D4",
     ].join("\n");
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      "Enter code [redacted-code]\nbuild completed\n654321\nAB12CD34\nA1B2-C3D4",
+      "Enter code [redacted-code]\nbuild completed\n654321\n12345678\nAB12CD34\nA1B2-C3D4",
     );
   });
 
   it("redacts bare unambiguous codes in an active prompt continuation", () => {
     const numeric = "Enter code:\n(expires in 15 minutes)\n123456";
+    const extendedNumeric = "Enter code:\n(expires in 15 minutes)\n12345678";
     const mixed = "Enter code:\n(expires in 15 minutes)\nAB12CD34";
     const separated = "Enter code:\n(expires in 15 minutes)\nA1B2-C3D4";
 
     expect(redactCronCommandSummaryForExternalDelivery(numeric)).toBe(
+      "Enter code:\n(expires in 15 minutes)\n[redacted-code]",
+    );
+    expect(redactCronCommandSummaryForExternalDelivery(extendedNumeric)).toBe(
       "Enter code:\n(expires in 15 minutes)\n[redacted-code]",
     );
     expect(redactCronCommandSummaryForExternalDelivery(mixed)).toBe(

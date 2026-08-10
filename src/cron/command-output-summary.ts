@@ -35,6 +35,7 @@ const BARE_SEPARATED_CODE_PATTERN =
 const BARE_MIXED_CODE_PATTERN =
   /^(\s*)(?=[A-Z0-9]{6,12}\s*$)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,12}(\s*)$/;
 const BARE_NUMERIC_CODE_PATTERN = /^(\s*)\d{6}(\s*)$/;
+const BARE_PROMPT_NUMERIC_CODE_PATTERN = /^(\s*)\d{6,12}(\s*)$/;
 const BARE_LETTERS_CODE_PATTERN = /^(\s*)[A-Z]{6,12}(\s*)$/;
 const BARE_SPACE_SEPARATED_LETTERS_CODE_PATTERN = /^(\s*)[A-Z]{4} [A-Z]{4}(\s*)$/;
 const CODE_PROMPT_EXPLANATION_PATTERN = /^\([^\r\n]{1,160}\)$/;
@@ -275,6 +276,7 @@ function redactCronCommandSummaryLine(
   if (!hasActivePromptContinuation || isCronCommandTerminalStatusLine(bareCode)) {
     return bareRedacted;
   }
+  bareRedacted = redactBareCode(bareRedacted, BARE_PROMPT_NUMERIC_CODE_PATTERN);
   bareRedacted = redactBareCode(bareRedacted, BARE_SPACE_SEPARATED_LETTERS_CODE_PATTERN);
   return redactBareCode(bareRedacted, BARE_LETTERS_CODE_PATTERN);
 }
@@ -309,7 +311,7 @@ export function redactCronCommandSummaryForExternalDelivery(
         if (inPreservedActionBlock) {
           // normalizeLines removes blank entries, so this is the block/tail delimiter.
           inPreservedActionBlock = false;
-          pendingPreservedOutputHeader = actionPromptCarry === "url-handoff";
+          pendingPreservedOutputHeader = actionPromptCarry !== "none";
         }
         return part;
       }
@@ -369,8 +371,8 @@ export function redactCronCommandSummaryForExternalDelivery(
         actionPromptCarry = "url-handoff";
       } else if (isActionLine) {
         actionPromptCarry = "code-or-explanation";
-      } else if (isGeneratedOutputHeader && promptCarry === "url-handoff") {
-        // buildCronCommandSummary inserts stdout: between preserved lines and tail output.
+      } else if (isGeneratedOutputHeader && promptCarry !== "none") {
+        // buildCronCommandSummary inserts stdout: between preserved prompts and tail output.
         actionPromptCarry = promptCarry;
       } else if (promptCarry !== "none" && isTerminalStatusLine) {
         actionPromptCarry = promptCarry;
