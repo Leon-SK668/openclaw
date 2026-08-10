@@ -1,0 +1,94 @@
+name: PR 121170 focused Xcode preflight proof
+
+on:
+  push:
+    branches:
+      - proof/pr121170-xcode-owner-20260810
+
+permissions: {}
+
+jobs:
+  real-xcode-preflight-proof:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      TARGET_SHA: 46c3c44fde2da10c822f7a1798b740f6d9c3f995
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/121170/head
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Prove the real full-Xcode failure diagnostic reaches the operator
+        shell: bash
+        run: |
+          set -euo pipefail
+          developer_dir="$(xcode-select -p)"
+          case "$developer_dir" in
+            /Applications/*.app/Contents/Developer) ;;
+            *)
+              echo "expected a full Xcode developer directory, got: $developer_dir" >&2
+              exit 1
+              ;;
+          esac
+
+          unset SDKROOT || true
+          baseline_output="$(
+            DEVELOPER_DIR="$developer_dir" /usr/bin/xcrun xcodebuild -version 2>&1
+          )"
+          test -n "$baseline_output"
+
+          xcodebuild_path="$(
+            DEVELOPER_DIR="$developer_dir" /usr/bin/xcrun --find xcodebuild
+          )"
+          test "$xcodebuild_path" = "$developer_dir/usr/bin/xcodebuild"
+          test -f "$xcodebuild_path"
+          original_mode="$(stat -f '%Lp' "$xcodebuild_path")"
+          restore_xcodebuild_mode() {
+            sudo chmod "$original_mode" "$xcodebuild_path"
+          }
+          trap restore_xcodebuild_mode EXIT
+          sudo chmod a-x "$xcodebuild_path"
+
+          native_log="$RUNNER_TEMP/pr121170-native-xcrun.log"
+          set +e
+          DEVELOPER_DIR="$developer_dir" \
+            /usr/bin/xcrun xcodebuild -version >"$native_log" 2>&1
+          native_status=$?
+          set -e
+
+          source scripts/lib/swift-toolchain.sh
+          helper_log="$RUNNER_TEMP/pr121170-helper.log"
+          set +e
+          DEVELOPER_DIR="$developer_dir" require_swift_toolchain >"$helper_log" 2>&1
+          helper_status=$?
+          set -e
+          restore_xcodebuild_mode
+          trap - EXIT
+
+          test "$native_status" -ne 0
+          test -s "$native_log"
+          test "$helper_status" -ne 0
+
+          native_first_line="$(sed -n '/[^[:space:]]/{p;q;}' "$native_log")"
+          test -n "$native_first_line"
+          grep -Fq "$native_first_line" "$helper_log"
+          grep -Fq \
+            "ERROR: OpenClaw macOS app packaging requires a full Xcode developer directory." \
+            "$helper_log"
+          native_line="$(grep -nF "$native_first_line" "$helper_log" | head -n 1 | cut -d: -f1)"
+          guidance_line="$(
+            grep -nF \
+              "ERROR: OpenClaw macOS app packaging requires a full Xcode developer directory." \
+              "$helper_log" | head -n 1 | cut -d: -f1
+          )"
+          test "$native_line" -lt "$guidance_line"
+
+          sed "s|$developer_dir|[full-xcode-developer-dir]|g" "$helper_log"
+          echo \
+            "XCODE_PREFLIGHT_LOCAL_PROOF_121170 head=$TARGET_SHA fullXcodeSelected=true baselineSuccess=true nativeStatus=$native_status helperStatus=$helper_status diagnosticBeforeGuidance=true"
