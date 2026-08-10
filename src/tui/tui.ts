@@ -547,6 +547,14 @@ export function scheduleProcessExitAfterTuiReturn(
   return timer;
 }
 
+export function cancelProcessExitAfterTuiReturn(
+  timer: TuiProcessExitTimer,
+  clearTimeoutFn: (timer: TuiProcessExitTimer) => void = (timerLocal) =>
+    clearTimeout(timerLocal as unknown as ReturnType<typeof setTimeout>),
+): void {
+  clearTimeoutFn(timer);
+}
+
 type CtrlCAction = "clear" | "warn" | "exit";
 type TuiCtrlCAction = CtrlCAction | "force-exit";
 

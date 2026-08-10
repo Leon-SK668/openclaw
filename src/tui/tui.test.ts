@@ -9,6 +9,7 @@ import { withEnv } from "../test-utils/env.js";
 import { getSlashCommands, parseCommand } from "./commands.js";
 import {
   beginTuiShutdown,
+  cancelProcessExitAfterTuiReturn,
   createBackspaceDeduper,
   createDeferredTuiFinish,
   createTuiSignalHandlers,
@@ -982,6 +983,15 @@ describe("TUI shutdown safety", () => {
     expect(unref).toHaveBeenCalledOnce();
     expect(writeStderr).not.toHaveBeenCalled();
     expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("cancels a scheduled post-return process exit", () => {
+    const timer = { unref: vi.fn() };
+    const clearTimeoutFn = vi.fn();
+
+    cancelProcessExitAfterTuiReturn(timer, clearTimeoutFn);
+
+    expect(clearTimeoutFn).toHaveBeenCalledWith(timer);
   });
 
   it("forces standalone TUI exit on deadline while another handle lingers", async () => {

@@ -16,7 +16,12 @@ type DefaultModelCatalogFacts = ReturnType<
 >;
 
 const runTui = vi.hoisted(() => vi.fn<(options: unknown) => Promise<void>>(async () => {}));
-const scheduleProcessExitAfterTuiReturn = vi.hoisted(() => vi.fn());
+const setupCleanupExitTimer = vi.hoisted(() => ({ unref: vi.fn() }));
+const scheduleProcessExitAfterTuiReturn = vi.hoisted(() =>
+  vi.fn(() => setupCleanupExitTimer),
+);
+const cancelProcessExitAfterTuiReturn = vi.hoisted(() => vi.fn());
+const resolveTuiShutdownHardExitMs = vi.hoisted(() => vi.fn(() => 122_000));
 const restoreTerminalState = vi.hoisted(() => vi.fn());
 const probeGatewayReachable = vi.hoisted(() =>
   vi.fn<() => Promise<{ ok: boolean; detail?: string }>>(async () => ({ ok: true })),
@@ -258,6 +263,8 @@ vi.mock("../../packages/terminal-core/src/restore.js", () => ({
 }));
 
 vi.mock("../tui/tui.js", () => ({
+  cancelProcessExitAfterTuiReturn,
+  resolveTuiShutdownHardExitMs,
   runTui,
   scheduleProcessExitAfterTuiReturn,
 }));
@@ -460,7 +467,11 @@ async function withPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>):
 describe("finalizeSetupWizard", () => {
   beforeEach(() => {
     runTui.mockClear();
-    scheduleProcessExitAfterTuiReturn.mockClear();
+    setupCleanupExitTimer.unref.mockClear();
+    scheduleProcessExitAfterTuiReturn.mockReset();
+    scheduleProcessExitAfterTuiReturn.mockReturnValue(setupCleanupExitTimer);
+    cancelProcessExitAfterTuiReturn.mockClear();
+    resolveTuiShutdownHardExitMs.mockClear();
     restoreTerminalState.mockClear();
     probeGatewayReachable.mockReset();
     probeGatewayReachable.mockResolvedValue({ ok: false, detail: "offline" });
@@ -1918,7 +1929,12 @@ describe("finalizeSetupWizard", () => {
       });
 
       await vi.waitFor(() => expect(sessionGateway.close).toHaveBeenCalledOnce());
-      expect(scheduleProcessExitAfterTuiReturn).not.toHaveBeenCalled();
+      expect(resolveTuiShutdownHardExitMs).toHaveBeenCalledWith({ localMode: true });
+      expect(scheduleProcessExitAfterTuiReturn).toHaveBeenCalledOnce();
+      expect(scheduleProcessExitAfterTuiReturn).toHaveBeenNthCalledWith(1, {
+        delayMs: 122_000,
+      });
+      expect(cancelProcessExitAfterTuiReturn).not.toHaveBeenCalled();
       resolveClose?.();
       await finalizing;
 
@@ -1944,7 +1960,31 @@ describe("finalizeSetupWizard", () => {
         }),
       );
       expect(sessionGateway.close).toHaveBeenCalledWith({ reason: "onboarding tui exited" });
+      expect(cancelProcessExitAfterTuiReturn).toHaveBeenCalledWith(setupCleanupExitTimer);
+      expect(scheduleProcessExitAfterTuiReturn).toHaveBeenCalledTimes(2);
+      expect(scheduleProcessExitAfterTuiReturn).toHaveBeenNthCalledWith(2);
+      expect(cancelProcessExitAfterTuiReturn.mock.invocationCallOrder[0]).toBeLessThan(
+        scheduleProcessExitAfterTuiReturn.mock.invocationCallOrder[1]!,
+      );
+    });
+  });
+
+  it("keeps a bounded exit armed when session gateway close never settles", async () => {
+    await withPlatform("linux", async () => {
+      isSystemdUserServiceAvailable.mockResolvedValue(false);
+      isContainerEnvironment.mockReturnValue(true);
+      waitForGatewayReachable.mockResolvedValue({ ok: true });
+      probeGatewayReachable.mockResolvedValue({ ok: true });
+      const sessionGateway = { close: vi.fn(() => new Promise<void>(() => {})) };
+      startGatewayServer.mockResolvedValueOnce(sessionGateway);
+      const prompter = createLaterPrompter();
+
+      void finalizeSetupWizard(createModelAuthFinalizeArgs({ prompter }));
+
+      await vi.waitFor(() => expect(sessionGateway.close).toHaveBeenCalledOnce());
       expect(scheduleProcessExitAfterTuiReturn).toHaveBeenCalledOnce();
+      expect(scheduleProcessExitAfterTuiReturn).toHaveBeenCalledWith({ delayMs: 122_000 });
+      expect(cancelProcessExitAfterTuiReturn).not.toHaveBeenCalled();
     });
   });
 
