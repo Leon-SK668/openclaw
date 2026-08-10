@@ -1,0 +1,107 @@
+name: PR 121179 exact-head durable approval proof
+
+on:
+  push:
+    branches:
+      - proof/pr121179-exact-head-20260810
+
+permissions: {}
+
+jobs:
+  local-delivery-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: 3a784b4404e443beec96cef4f8fa90c5949823f3
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/121179/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test -f src/auto-reply/reply/dispatch-from-config.payloads.ts
+          grep -q "export function requiresDurableToolResultDelivery" \
+            src/auto-reply/reply/dispatch-from-config.payloads.ts
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove unavailable approval delivery through the production dispatcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_script="src/auto-reply/reply/approval-unavailable.local-proof.test.ts"
+          trap 'rm -f "$proof_script"' EXIT
+          cat >"$proof_script" <<'NODE'
+          import assert from "node:assert/strict";
+          import { test } from "vitest";
+          import { buildExecApprovalUnavailableReplyPayload } from "../../infra/exec-approval-reply.js";
+          import { requiresDurableToolResultDelivery } from "./dispatch-from-config.payloads.js";
+          import { createReplyDispatcher } from "./reply-dispatcher.js";
+
+          test("classifies and delivers approval-unavailable payloads durably", async () => {
+            const delivered = [];
+            const payload = buildExecApprovalUnavailableReplyPayload({
+              reason: "no-approval-route",
+            });
+            assert.equal(requiresDurableToolResultDelivery(payload), true);
+
+            const dispatcher = createReplyDispatcher({
+              deliver: async (deliveredPayload, info) => {
+                delivered.push({ payload: deliveredPayload, kind: info.kind });
+              },
+            });
+            assert.equal(dispatcher.sendToolResult(payload), true);
+            dispatcher.markComplete();
+            await dispatcher.waitForIdle();
+
+            assert.equal(delivered.length, 1);
+            assert.equal(delivered[0]?.kind, "tool");
+            assert.equal(
+              delivered[0]?.payload.channelData?.execApprovalUnavailable?.reason,
+              "no-approval-route",
+            );
+            assert.match(
+              delivered[0]?.payload.text ?? "",
+              /no interactive approval client is currently available/,
+            );
+            console.log(
+              "APPROVAL_UNAVAILABLE_LOCAL_PROOF_121179",
+              JSON.stringify({
+                head: process.env.TARGET_SHA,
+                durable: true,
+                deliveries: delivered.length,
+                kind: delivered[0]?.kind,
+                reason: "no-approval-route",
+              }),
+            );
+          });
+          NODE
+          corepack pnpm test "$proof_script"
+
+      - name: Prove the quiet-mode owner gate routes the notice
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm test src/auto-reply/reply/dispatch-from-config.test.ts \
+            -t "delivers approval-unavailable notices when verbose tool progress is disabled"
