@@ -1896,7 +1896,7 @@ describe("buildGatewayCronService", () => {
           argv: [
             process.execPath,
             "-e",
-            "process.stdout.write('Visit www.example.com/device\\nSUCCESS\\nCode: WDJBMJHT\\nLog in with token=opaque-secret-value\\n')",
+            "process.stdout.write('Visit www.example.com/device\\nSUCCESS\\nWDJBMJHT\\nLog in with token=opaque-secret-value\\n')",
           ],
         },
       });
@@ -1914,9 +1914,10 @@ describe("buildGatewayCronService", () => {
         .find((hookEvent) => hookEvent.action === "finished");
       const summary = typeof event?.summary === "string" ? event.summary : "";
       expect(summary).toContain("[redacted-url]");
-      expect(summary).toContain("Code: [redacted-code]");
+      expect(summary).toContain("[redacted-code]");
       expect(summary).toContain("token=***");
       expect(summary).not.toContain("www.example.com/device");
+      expect(summary).not.toContain("SUCCESS");
       expect(summary).not.toContain("WDJBMJHT");
       expect(summary).not.toContain("opaque-secret-value");
     } finally {
@@ -1946,7 +1947,7 @@ describe("buildGatewayCronService", () => {
           argv: [
             process.execPath,
             "-e",
-            "process.stdout.write('Visit https://example.com/device\\nSUCCESS\\nCode: WDJBMJHT\\nLog in with token=opaque-secret-value\\n')",
+            "process.stdout.write('Visit https://example.com/device\\nFAILED\\nWDJBMJHT\\nLog in with token=opaque-secret-value\\n')",
           ],
         },
         delivery: {
@@ -1965,9 +1966,10 @@ describe("buildGatewayCronService", () => {
       const payload = requireRecord(announcePayload.payload, "cron announce reply payload");
       const message = typeof payload.text === "string" ? payload.text : "";
       expect(message).toContain("Visit [redacted-url]");
-      expect(message).toContain("Code: [redacted-code]");
+      expect(message).toContain("[redacted-code]");
       expect(message).toContain("token=***");
       expect(message).not.toContain("https://example.com/device");
+      expect(message).not.toContain("FAILED");
       expect(message).not.toContain("WDJBMJHT");
       expect(message).not.toContain("opaque-secret-value");
       expect(state.cron.getJob(job.id)?.state.lastRunStatus).toBe("ok");

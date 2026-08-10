@@ -140,41 +140,35 @@ describe("cron command output summaries", () => {
     );
   });
 
-  it("preserves a terminal status in the first action continuation", () => {
-    const summary = "Visit https://example.com/device\nSUCCESS";
+  it.each([
+    ["Enter this code:", "SUCCESS", "Enter this code:"],
+    ["Visit https://example.com/device", "FAILED", "Visit [redacted-url]"],
+  ])(
+    "redacts a status-shaped code after action prompt %s",
+    (prompt, code, redactedPrompt) => {
+      const summary = `${prompt}\n${code}`;
+
+      expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+        `${redactedPrompt}\n[redacted-code]`,
+      );
+    },
+  );
+
+  it("keeps bounded prompt context after redacting a status-shaped code", () => {
+    const summary = "Visit https://example.com/device\nSUCCESS\nWDJBMJHT\nDEBUGGING";
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      "Visit [redacted-url]\nSUCCESS",
-    );
-  });
-
-  it("carries action context across a terminal status to a code continuation", () => {
-    const summary = [
-      "Visit https://example.com/device",
-      "SUCCESS",
-      "Then type WDJBMJHT in the browser",
-    ].join("\n");
-
-    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      "Visit [redacted-url]\nSUCCESS\nThen type [redacted-code] in the browser",
-    );
-  });
-
-  it("carries action context across a terminal status to a bare code", () => {
-    const summary = ["Visit https://example.com/device", "SUCCESS", "WDJBMJHT"].join("\n");
-
-    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      "Visit [redacted-url]\nSUCCESS\n[redacted-code]",
+      "Visit [redacted-url]\n[redacted-code]\n[redacted-code]\nDEBUGGING",
     );
   });
 
   it.each(["WDJBMJHT", "482913", "ABCD-EFGH"])(
     "redacts a plain Code label in active action context: %s",
     (code) => {
-      const summary = `Visit https://example.com/device\nSUCCESS\nCode: ${code}`;
+      const summary = `Visit https://example.com/device\nCode: ${code}`;
 
       expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-        "Visit [redacted-url]\nSUCCESS\nCode: [redacted-code]",
+        "Visit [redacted-url]\nCode: [redacted-code]",
       );
     },
   );
@@ -300,6 +294,7 @@ describe("cron command output summaries", () => {
 
   it.each([
     "SUCCESS",
+    "FAILED",
     "COMPLETED",
     "CANCELLED",
     "FINISHED",
@@ -309,15 +304,22 @@ describe("cron command output summaries", () => {
     "QUEUED",
     "STARTED",
     "WAITING",
-    "STATUS FAILED",
-    "TASK FAILED",
-    "TEST FAILED",
-    "MAKE ERROR",
-  ])("does not classify terminal status %s after a prompt explanation as a code", (status) => {
+  ])("redacts code-shaped terminal status %s after a prompt explanation", (status) => {
     const summary = `Enter this code:\n(waiting for approval)\n${status}`;
 
-    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(summary);
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      `Enter this code:\n(waiting for approval)\n[redacted-code]`,
+    );
   });
+
+  it.each(["STATUS FAILED", "TASK FAILED", "TEST FAILED", "MAKE ERROR"])(
+    "preserves terminal diagnostic phrase %s after a prompt explanation",
+    (status) => {
+      const summary = `Enter this code:\n(waiting for approval)\n${status}`;
+
+      expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(summary);
+    },
+  );
 
   it("keeps the action classifier focused on credential prompts", () => {
     expect(isCronCommandActionCriticalLine("Use this code:")).toBe(true);
