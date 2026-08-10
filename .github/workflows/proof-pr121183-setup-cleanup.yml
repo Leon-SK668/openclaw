@@ -1,0 +1,52 @@
+name: PR 121183 exact-head setup cleanup owner proof
+
+on:
+  push:
+    branches:
+      - proof/pr121183-setup-cleanup-20260810
+
+permissions: {}
+
+jobs:
+  setup-cleanup-owner-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_SHA: c49b4b897c3f7cf0e4ce82d0ce91eb68f7ba3036
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/121183/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Verify TUI and setup cleanup owner contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs src/tui/tui.test.ts src/wizard/setup.finalize.test.ts
+          printf '%s\n' \
+            'SETUP_GATEWAY_CLEANUP_OWNER_PROOF_121183 {"head":"c49b4b897c3f7cf0e4ce82d0ce91eb68f7ba3036","scope":"focused owner tests","settledOrdering":true,"nonsettlingFallbackArmed":true,"realInteractiveTuiE2E":false,"credentials":"none"}'
