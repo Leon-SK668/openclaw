@@ -33,6 +33,8 @@ jobs:
           test -f src/channels/turn/kernel.ts
           grep -q "hasExecApprovalUnavailablePayload" \
             src/auto-reply/reply/dispatch-from-config.payloads.ts
+          grep -Fq "runtime.channel.inbound.dispatch({" extensions/qa-channel/src/inbound.ts
+          grep -Fq "replyResolver?: GetReplyFromConfig;" src/channels/turn/types.ts
 
       - name: Set up Node 24
         uses: actions/setup-node@v4
@@ -178,16 +180,17 @@ jobs:
           ]);
           console.log("PR121179_PROOF_STAGE", JSON.stringify({ stage: "owners-loaded" }));
           const channelRuntime = createRuntimeChannel();
-          const productionBufferedDispatch =
-            channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher;
+          // TARGET_SHA uses ChannelTurnPlan.replyResolver at inbound.dispatch;
+          // the guards above fail closed if that exact-head owner contract moves.
+          const productionDispatch = channelRuntime.inbound.dispatch;
           let providerCalls = 0;
-          channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher = async (params) => {
+          channelRuntime.inbound.dispatch = async (plan) => {
             console.log(
               "PR121179_PROOF_STAGE",
               JSON.stringify({ stage: "dispatch-owner" }),
             );
-            return await productionBufferedDispatch({
-              ...params,
+            return await productionDispatch({
+              ...plan,
               replyResolver: async (_ctx, options) => {
                 providerCalls += 1;
                 console.log(
@@ -290,7 +293,7 @@ jobs:
                 head: targetSha,
                 gatewayOwner: "qaChannelPlugin.gateway.startAccount",
                 runtimeOwner: "createRuntimeChannel",
-                dispatchOwner: "channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher",
+                dispatchOwner: "channelRuntime.inbound.dispatch",
                 providerEdge: "mock-replyResolver",
                 channelApiEdge: "loopback-http",
                 inboundEvents: 1,
