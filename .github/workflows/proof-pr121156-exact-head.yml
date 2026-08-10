@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_SHA: 834ec0afa025941cfca4d234c2fd9fc24bde503f
+      TARGET_SHA: ae89b01edf9dee0aa18597dd6b5aecfbb4a95d79
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -42,13 +42,6 @@ jobs:
           corepack enable
           corepack pnpm --version
           corepack pnpm install --frozen-lockfile
-
-      - name: Emit exact-environment Plugin SDK baseline drift
-        shell: bash
-        run: |
-          set -euo pipefail
-          corepack pnpm plugin-sdk:api:gen
-          git diff -- docs/.generated/plugin-sdk-api-baseline.sha256
 
       - name: Prove Gateway cleanup owner on real managed npm generations
         shell: bash
