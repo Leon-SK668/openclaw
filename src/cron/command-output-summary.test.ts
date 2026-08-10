@@ -146,10 +146,45 @@ describe("cron command output summaries", () => {
   });
 
   it("does not treat an ordinary code prompt plus URL as a URL handoff", () => {
-    const summary = ["Enter code:", "https://docs.example.com/help", "123456"].join("\n");
+    const summary = ["Enter code:", "https://docs.openclaw.ai/help", "123456"].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(summary);
+  });
+
+  it("redacts credential-bearing URLs outside action context", () => {
+    const gcsSignedUrl = `https://storage.googleapis.com/bucket/object?${["X-Goog", "Credential"].join("-")}=test-scope&${["X-Goog", "Signature"].join("-")}=test-signature`;
+    const summary = [
+      "Enter code:",
+      "https://docs.openclaw.ai/help",
+      "https://files.example.com/download?X-Amz-Signature=deadbeef1234",
+      gcsSignedUrl,
+      "https://auth.example.com/magic/Abcd1234Efgh5678",
+      "See (www.auth.example.com/magic/Abcd1234Efgh5678).",
+      "https://auth.example.com/magic/#ABCDEFGH",
+      "https://auth.example.com/invite/LETTERS",
+      "https://auth.example.com/%6Dagic/Abcd1234Efgh5678",
+      "https://files.example.com/c/abc123",
+      "https://docs.LETTERS.example.com/help",
+      "https://docs.openclaw.ai/private-value/../help",
+      "(https://docs.openclaw.ai)(https://auth.example.com/magic/Abcd1234Efgh5678)",
+    ].join("\n");
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
-      "Enter code:\n[redacted-url]\n123456",
+      [
+        "Enter code:",
+        "https://docs.openclaw.ai/help",
+        "[redacted-url]",
+        "[redacted-url]",
+        "[redacted-url]",
+        "See ([redacted-url]).",
+        "[redacted-url]",
+        "[redacted-url]",
+        "[redacted-url]",
+        "[redacted-url]",
+        "[redacted-url]",
+        "[redacted-url]",
+        "([redacted-url]",
+      ].join("\n"),
     );
   });
 
@@ -487,6 +522,46 @@ describe("cron command output summaries", () => {
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       "Enter code [redacted-code]\nReference [redacted-code]\nUse this code:\n[redacted-code]\nReference [redacted-code]",
+    );
+  });
+
+  it("redacts many later code repeats without per-code summary rescans", () => {
+    const codes = Array.from(
+      { length: 256 },
+      (_, index) => `A${index.toString().padStart(5, "0")}`,
+    );
+    const summary = [
+      ...codes.map((code) => `Enter code ${code}`),
+      ...codes.map((code) => `Reference ${code}`),
+    ].join("\n");
+
+    const redacted = redactCronCommandSummaryForExternalDelivery(summary);
+
+    expect(redacted?.match(/\[redacted-code\]/g)).toHaveLength(codes.length * 2);
+    for (const code of codes) {
+      expect(redacted).not.toContain(code);
+    }
+  });
+
+  it("redacts known codes before discovery and across long grouped runs", () => {
+    const summary = [
+      "Reference A00001",
+      "Enter code A00001",
+      "Enter code DDDD EEEE FFFF",
+      "Reference AAAA BBBB CCCC DDDD EEEE FFFF",
+      "Enter code ABCD-EFGH IJKL",
+      "Reference ABCD-EFGH IJKL",
+    ].join("\n");
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      [
+        "Reference [redacted-code]",
+        "Enter code [redacted-code]",
+        "Enter code [redacted-code]",
+        "Reference AAAA BBBB CCCC [redacted-code]",
+        "Enter code [redacted-code]",
+        "Reference [redacted-code]",
+      ].join("\n"),
     );
   });
 

@@ -1,6 +1,6 @@
+import { redactSensitiveUrlLikeString } from "@openclaw/net-policy/redact-sensitive-url";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { redactToolPayloadText } from "../logging/redact.js";
-import { escapeRegExp } from "../shared/regexp.js";
 
 const MAX_PRESERVED_ACTION_LINES = 12;
 const ACTION_REQUIRED_OUTPUT_HEADER = "action-required output preserved:";
@@ -29,9 +29,31 @@ const ACTION_LINE_PATTERNS = [
 ];
 const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/gi;
 const REDACTED_URL = "[redacted-url]";
+// docs.openclaw.ai is the product-owned public information origin; it has no
+// private bearer routes. Arbitrary external hosts remain fail-closed.
+const PUBLIC_INFORMATION_URL_HOST = "docs.openclaw.ai";
+const URL_TRAILING_PROSE_CHARS = new Set([
+  ".",
+  ",",
+  ";",
+  ":",
+  "!",
+  "?",
+  "'",
+  '"',
+  "]",
+  "}",
+  ">",
+  "`",
+]);
+const URL_PROSE_SUFFIX_CHARS = new Set([...URL_TRAILING_PROSE_CHARS, ")"]);
 const STANDALONE_URL_LINE_PATTERN = /^\s*(?:https?:\/\/|www\.)\S+\s*$/i;
 const GENERATED_OUTPUT_SECTION_HEADER_PATTERN = /^stdout:$/i;
 const CODE_CANDIDATE_PATTERN = /\b(?:[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})\b/g;
+const GROUPED_CODE_TOKEN_PATTERN =
+  /(?<![A-Z0-9])[A-Z0-9]{3,12}(?:(?:-| )[A-Z0-9]{3,12})+(?![A-Z0-9])/g;
+const PLAIN_CODE_TOKEN_PATTERN = /(?<![A-Z0-9])[A-Z0-9]{6,12}(?![A-Z0-9])/g;
+const MAX_CODE_TOKEN_GROUPS = 5;
 const BARE_SEPARATED_CODE_PATTERN =
   /^(\s*)(?=[A-Z0-9 -]*(?:\d|-))[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}(\s*)$/;
 const BARE_MIXED_CODE_PATTERN =
@@ -249,18 +271,145 @@ function redactEmbeddedCodeCandidates(
   return result + line.slice(cursor);
 }
 
+function redactKnownGroupedCodes(value: string, knownCodes: ReadonlySet<string>): string {
+  const groups = value.split(/[- ]/);
+  const separators = value.match(/[- ]/g) ?? [];
+  const redactedSpans: Array<{ start: number; end: number }> = [];
+  for (let start = 0; start < groups.length; start += 1) {
+    let candidate = groups[start];
+    let matchedEnd = knownCodes.has(candidate) ? start + 1 : -1;
+    const endLimit = Math.min(groups.length, start + MAX_CODE_TOKEN_GROUPS);
+    for (let end = start + 1; end < endLimit; end += 1) {
+      candidate += `${separators[end - 1]}${groups[end]}`;
+      if (knownCodes.has(candidate)) {
+        matchedEnd = end + 1;
+      }
+    }
+    if (matchedEnd <= start) {
+      continue;
+    }
+    // A hyphen-connected wrapper is one identifier; preserve adjacent words
+    // across spaces, but redact the complete identifier around a known code.
+    let redactedStart = start;
+    while (redactedStart > 0 && separators[redactedStart - 1] === "-") {
+      redactedStart -= 1;
+    }
+    let redactedEnd = matchedEnd;
+    while (redactedEnd < groups.length && separators[redactedEnd - 1] === "-") {
+      redactedEnd += 1;
+    }
+    const previous = redactedSpans.at(-1);
+    if (previous && redactedStart < previous.end) {
+      previous.end = Math.max(previous.end, redactedEnd);
+    } else {
+      redactedSpans.push({ start: redactedStart, end: redactedEnd });
+    }
+  }
+  if (redactedSpans.length === 0) {
+    return value;
+  }
+  const groupStarts: number[] = [];
+  let groupOffset = 0;
+  for (const group of groups) {
+    groupStarts.push(groupOffset);
+    groupOffset += group.length + 1;
+  }
+  let cursor = 0;
+  let result = "";
+  for (const span of redactedSpans) {
+    const endGroupIndex = span.end - 1;
+    const startOffset = groupStarts[span.start]!;
+    const endOffset = groupStarts[endGroupIndex]! + groups[endGroupIndex]!.length;
+    result += `${value.slice(cursor, startOffset)}[redacted-code]`;
+    cursor = endOffset;
+  }
+  return result + value.slice(cursor);
+}
+
+function redactKnownCodeOccurrences(line: string, knownCodes: ReadonlySet<string>): string {
+  if (knownCodes.size === 0) {
+    return line;
+  }
+  // Code grammar caps grouped candidates at five parts, so each line is scanned
+  // with bounded lookups instead of rescanning the complete summary per value.
+  return line
+    .replace(GROUPED_CODE_TOKEN_PATTERN, (token) => redactKnownGroupedCodes(token, knownCodes))
+    .replace(PLAIN_CODE_TOKEN_PATTERN, (token) =>
+      knownCodes.has(token) ? "[redacted-code]" : token,
+    );
+}
+
+function isExplicitlyPublicExternalUrl(value: string): boolean {
+  const normalized = /^www\./i.test(value) ? `https://${value}` : value;
+  if (redactSensitiveUrlLikeString(normalized) !== normalized) {
+    return false;
+  }
+  try {
+    const parsed = new URL(normalized);
+    return (
+      normalized === parsed.toString() &&
+      parsed.protocol === "https:" &&
+      parsed.hostname === PUBLIC_INFORMATION_URL_HOST &&
+      !parsed.port &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function splitExternalUrlCandidate(value: string): { url: string; suffix: string } {
+  let openParens = 0;
+  let end = value.length;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "(") {
+      openParens += 1;
+    } else if (char === ")") {
+      if (openParens === 0) {
+        end = index;
+        break;
+      }
+      openParens -= 1;
+    }
+  }
+  while (end > 0 && URL_TRAILING_PROSE_CHARS.has(value[end - 1]!)) {
+    end -= 1;
+  }
+  return { url: value.slice(0, end), suffix: value.slice(end) };
+}
+
+function redactExternalUrls(line: string, redactAll: boolean): string {
+  return line.replace(URL_PATTERN, (candidate) => {
+    const { url, suffix } = splitExternalUrlCandidate(candidate);
+    for (const char of suffix) {
+      if (!URL_PROSE_SUFFIX_CHARS.has(char)) {
+        return REDACTED_URL;
+      }
+    }
+    return !redactAll && isExplicitlyPublicExternalUrl(url)
+      ? candidate
+      : `${REDACTED_URL}${suffix}`;
+  });
+}
+
 function redactCronCommandSummaryLine(
   line: string,
   embeddedCodeMode: EmbeddedCodeRedactionMode,
   hasActivePromptContinuation: boolean,
   redactBareUnambiguousCodes: boolean,
+  redactUrls: boolean,
   onRedactedCode: (code: string, satisfiesPrompt: boolean) => void,
 ): string {
-  let redacted = redactToolPayloadText(line)
-    .replace(SECRET_ASSIGNMENT_PATTERN, (_match, key: string, separator: string) => {
+  let redacted = redactToolPayloadText(redactExternalUrls(line, redactUrls)).replace(
+    SECRET_ASSIGNMENT_PATTERN,
+    (_match, key: string, separator: string) => {
       return `${key}${separator}***`;
-    })
-    .replace(URL_PATTERN, REDACTED_URL);
+    },
+  );
   redacted = redactEmbeddedCodeCandidates(
     redacted,
     embeddedCodeMode,
@@ -289,16 +438,6 @@ function redactCronCommandSummaryLine(
   return redactBareCode(bareRedacted, BARE_LETTERS_CODE_PATTERN);
 }
 
-function redactKnownCodeOccurrences(summary: string, code: string): string {
-  // Once a value is classified as a credential, redact any larger hyphenated token
-  // that embeds it too; preserving the wrapper would re-expose the credential.
-  const pattern = new RegExp(
-    `(^|[^A-Z0-9])(?:[A-Z0-9]{3,12}-)*${escapeRegExp(code)}(?:-[A-Z0-9]{3,12})*(?=$|[^A-Z0-9])`,
-    "g",
-  );
-  return summary.replace(pattern, "$1[redacted-code]");
-}
-
 export function redactCronCommandSummaryForExternalDelivery(
   summary: string | undefined,
 ): string | undefined {
@@ -309,7 +448,7 @@ export function redactCronCommandSummaryForExternalDelivery(
   let actionPromptCarry: ActionPromptCarry = "none";
   let pendingPreservedOutputHeader = false;
   const redactedCodes = new Set<string>();
-  let redactedSummary = summary
+  const redactedSummary = summary
     .split(/(\r?\n)/)
     .map((part) => {
       if (/^\r?\n$/.test(part)) {
@@ -354,6 +493,7 @@ export function redactCronCommandSummaryForExternalDelivery(
         embeddedCodeMode,
         hasActivePromptContinuation,
         inPreservedActionBlock || hasActivePromptContinuation,
+        inPreservedActionBlock || isPromptActionLine,
         (code, satisfiesPrompt) => {
           lineSatisfiedPrompt ||=
             !isTerminalStatusLine &&
@@ -394,9 +534,7 @@ export function redactCronCommandSummaryForExternalDelivery(
       return redacted;
     })
     .join("");
-  // A code already classified in an action context stays secret if output repeats it later.
-  for (const code of [...redactedCodes].toSorted((left, right) => right.length - left.length)) {
-    redactedSummary = redactKnownCodeOccurrences(redactedSummary, code);
-  }
-  return redactedSummary;
+  // A code classified anywhere in the bounded state pass stays secret at every
+  // occurrence. This second pass scans the output once, independent of code count.
+  return redactKnownCodeOccurrences(redactedSummary, redactedCodes);
 }
