@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_SHA: 3176bc14dd5c5edd1437af34f79b4da1d99992b4
+      TARGET_SHA: 138fd0e096a33dab2bad74c72296201169a97ac9
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -43,6 +43,22 @@ jobs:
           corepack pnpm --version
           corepack pnpm install --frozen-lockfile
 
+      - name: Run focused tests and formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs \
+            src/cron/command-output-summary.test.ts \
+            src/gateway/server-cron-notifications.test.ts \
+            src/gateway/server-cron-primary-webhook.test.ts \
+            src/gateway/server-cron.test.ts
+          ./node_modules/.bin/oxfmt --check \
+            src/cron/command-output-summary.ts \
+            src/cron/command-output-summary.test.ts \
+            src/gateway/server-cron-notifications.test.ts \
+            src/gateway/server-cron-primary-webhook.test.ts \
+            src/gateway/server-cron.test.ts
+
       - name: Prove status-shaped codes are redacted at the real webhook boundary
         shell: bash
         env:
@@ -66,7 +82,10 @@ jobs:
             return import(pathToFileURL(path.join(repoRoot, relativePath)).href);
           }
 
-          const { redactCronCommandSummaryForExternalDelivery } = await importSource(
+          const {
+            buildCronCommandSummary,
+            redactCronCommandSummaryForExternalDelivery,
+          } = await importSource(
             "src/cron/command-output-summary.ts",
           );
           const { sendGatewayCronWebhook } = await importSource(
@@ -96,6 +115,52 @@ jobs:
           assert.equal(
             redactCronCommandSummaryForExternalDelivery(unpromptedSummary),
             unpromptedSummary,
+          );
+
+          const generatedHeaderSummary = buildCronCommandSummary({
+            stdout: "12345678",
+            stderr: "diagnostic output",
+            preservedStdoutLines: ["Enter this code:"],
+          });
+          const generatedHeaderOutput = redactCronCommandSummaryForExternalDelivery(
+            generatedHeaderSummary,
+          );
+          assert.equal(
+            generatedHeaderOutput,
+            [
+              "action-required output preserved:",
+              "Enter this code:",
+              "",
+              "stdout:",
+              "[redacted-code]",
+              "",
+              "stderr:",
+              "diagnostic output",
+            ].join("\n"),
+          );
+
+          const inlineHandoffOutput = redactCronCommandSummaryForExternalDelivery(
+            "Visit https://example.com/device WDJBMJHT",
+          );
+          assert.equal(inlineHandoffOutput, "Visit [redacted-url] [redacted-code]");
+          const inlineStatusOutput = redactCronCommandSummaryForExternalDelivery(
+            "Visit https://example.com/device SUCCESS",
+          );
+          assert.equal(inlineStatusOutput, "Visit [redacted-url] SUCCESS");
+          const punctuatedPromptOutput = redactCronCommandSummaryForExternalDelivery(
+            "Your code is: 482913.",
+          );
+          assert.equal(punctuatedPromptOutput, "Your code is: [redacted-code].");
+          const loginActionOutput = redactCronCommandSummaryForExternalDelivery(
+            "Log in with code WDJBMJHT",
+          );
+          assert.equal(loginActionOutput, "Log in with code [redacted-code]");
+          const continuedHandoffOutput = redactCronCommandSummaryForExternalDelivery(
+            "Visit https://example.com/device WDJBMJHT to continue",
+          );
+          assert.equal(
+            continuedHandoffOutput,
+            "Visit [redacted-url] [redacted-code] to continue",
           );
 
           const interceptedRequests: Array<{ url: string; body: string }> = [];
@@ -177,6 +242,12 @@ jobs:
               outboundDiagnosticsSummary: outbound.diagnostics?.summary,
               outboundDiagnosticsMessage: outbound.diagnostics?.entries?.[0]?.message,
               unpromptedOutput: unpromptedSummary,
+              generatedHeaderOutput,
+              inlineHandoffOutput,
+              inlineStatusOutput,
+              punctuatedPromptOutput,
+              loginActionOutput,
+              continuedHandoffOutput,
               statusCarry: "visible-and-retained-until-following-code",
               endpoint: "https://[redacted-proof-host]/cron",
               fixturePaths: "[redacted-temporary]",
