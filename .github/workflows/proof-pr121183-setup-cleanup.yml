@@ -3,7 +3,7 @@ name: PR 121183 exact-head setup cleanup owner proof
 on:
   push:
     branches:
-      - proof/pr121183-final-a22d13e-20260810
+      - proof/pr121183-process-boundary-20260810
 
 permissions: {}
 
@@ -51,3 +51,243 @@ jobs:
           node scripts/run-vitest.mjs src/tui/tui.test.ts src/wizard/setup.finalize.test.ts
           printf '%s\n' \
             'SETUP_GATEWAY_CLEANUP_OWNER_PROOF_121183 {"head":"a22d13e0027bcb357a043e0658cd519b4ebe9776","scope":"focused owner tests","formatCheck":true,"settledOrdering":true,"nonsettlingFallbackArmed":true,"realInteractiveTuiE2E":false,"credentials":"none"}'
+
+      - name: Prove real setup TUI waits for delayed session Gateway cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { createConnection, createServer } from "node:net";
+          import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+          import { tmpdir } from "node:os";
+          import path from "node:path";
+          import { sleep, startPty } from "./src/tui/tui-pty-test-support.js";
+
+          const targetSha = process.env.TARGET_SHA;
+          assert.equal(targetSha, "a22d13e0027bcb357a043e0658cd519b4ebe9776");
+          const repoDir = process.cwd();
+          const fixtureDir = await mkdtemp(path.join(tmpdir(), "pr121183-process-proof-"));
+          const stateDir = path.join(fixtureDir, "state");
+          const workspaceDir = path.join(fixtureDir, "workspace");
+          const pluginDir = path.join(fixtureDir, "plugin");
+          const tracePath = path.join(fixtureDir, "gateway-stop.trace");
+          const configPath = path.join(fixtureDir, "openclaw.json");
+          const childPath = path.join(fixtureDir, "finalize-child.mjs");
+          const token = "pr121183-proof-token";
+          const pluginId = "pr121183-gateway-stop-proof";
+          const hookDelayMs = 900;
+
+          async function reservePort() {
+            const server = createServer();
+            await new Promise((resolve, reject) => {
+              server.once("error", reject);
+              server.listen(0, "127.0.0.1", resolve);
+            });
+            const address = server.address();
+            assert(address && typeof address === "object");
+            const port = address.port;
+            await new Promise((resolve, reject) =>
+              server.close((error) => (error ? reject(error) : resolve())),
+            );
+            return port;
+          }
+
+          async function canConnect(port) {
+            return await new Promise((resolve) => {
+              const socket = createConnection({ host: "127.0.0.1", port });
+              socket.setTimeout(500);
+              socket.once("connect", () => {
+                socket.destroy();
+                resolve(true);
+              });
+              const finishClosed = () => {
+                socket.destroy();
+                resolve(false);
+              };
+              socket.once("error", finishClosed);
+              socket.once("timeout", finishClosed);
+            });
+          }
+
+          async function readTrace() {
+            try {
+              return (await readFile(tracePath, "utf8")).split("\n").filter(Boolean);
+            } catch (error) {
+              if (error?.code === "ENOENT") {
+                return [];
+              }
+              throw error;
+            }
+          }
+
+          async function waitForValue({ timeoutMs, read, onTimeout }) {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+              const value = await read();
+              if (value !== null) {
+                return value;
+              }
+              await sleep(25);
+            }
+            throw onTimeout();
+          }
+
+          const port = await reservePort();
+          await Promise.all([
+            mkdir(stateDir, { recursive: true }),
+            mkdir(workspaceDir, { recursive: true }),
+            mkdir(pluginDir, { recursive: true }),
+          ]);
+          await writeFile(
+            path.join(pluginDir, "openclaw.plugin.json"),
+            `${JSON.stringify({
+              id: pluginId,
+              name: "PR 121183 Gateway Stop Proof",
+              activation: { onStartup: true },
+              configSchema: { type: "object", additionalProperties: false, properties: {} },
+            })}\n`,
+          );
+          await writeFile(
+            path.join(pluginDir, "index.mjs"),
+            [
+              'import { appendFileSync } from "node:fs";',
+              "export default {",
+              `  id: ${JSON.stringify(pluginId)},`,
+              "  register(api) {",
+              '    api.on("gateway_stop", async () => {',
+              `      appendFileSync(${JSON.stringify(tracePath)}, "start:" + Date.now() + "\\n");`,
+              `      await new Promise((resolve) => setTimeout(resolve, ${hookDelayMs}));`,
+              `      appendFileSync(${JSON.stringify(tracePath)}, "complete:" + Date.now() + "\\n");`,
+              "    });",
+              "  },",
+              "};",
+              "",
+            ].join("\n"),
+          );
+          const config = {
+            gateway: {
+              mode: "local",
+              bind: "loopback",
+              port,
+              auth: { mode: "token", token },
+              controlUi: { enabled: false },
+            },
+            agents: { defaults: { workspace: workspaceDir } },
+            plugins: {
+              enabled: true,
+              allow: [pluginId],
+              load: { paths: [pluginDir] },
+              entries: { [pluginId]: { enabled: true } },
+              slots: { memory: "none" },
+            },
+          };
+          await writeFile(configPath, `${JSON.stringify(config)}\n`);
+          await writeFile(
+            childPath,
+            [
+              'import { readFile } from "node:fs/promises";',
+              'import { finalizeSetupWizard } from "' +
+                path.join(repoDir, "src/wizard/setup.finalize.js") +
+                '";',
+              "const configPath = process.env.OPENCLAW_CONFIG_PATH;",
+              "const workspaceDir = process.env.PR121183_WORKSPACE_DIR;",
+              'const port = Number.parseInt(process.env.PR121183_GATEWAY_PORT ?? "", 10);',
+              "const token = process.env.PR121183_GATEWAY_TOKEN;",
+              'if (!configPath || !workspaceDir || !Number.isInteger(port) || !token) throw new Error("missing proof environment");',
+              'const nextConfig = JSON.parse(await readFile(configPath, "utf8"));',
+              "const prompter = {",
+              "  intro: async () => {}, outro: async () => {}, note: async () => {},",
+              '  select: async () => "later", multiselect: async () => [], text: async () => "",',
+              "  confirm: async () => false, progress: () => ({ update: () => {}, stop: () => {} }),",
+              "};",
+              'console.log("PR121183_PROOF_STAGE", JSON.stringify({ stage: "finalize-start" }));',
+              "const result = await finalizeSetupWizard({",
+              '  flow: "quickstart",',
+              "  opts: { acceptRisk: true, authChoice: \"skip\", installDaemon: false, skipHealth: true, skipUi: false },",
+              "  baseConfig: {}, nextConfig, workspaceDir,",
+              "  settings: { port, bind: \"loopback\", authMode: \"token\", gatewayToken: token, tailscaleMode: \"off\", tailscaleResetOnExit: false },",
+              "  prompter,",
+              "  runtime: {",
+              "    log: (...args) => console.log(...args), error: (...args) => console.error(...args),",
+              "    exit: (code) => process.exit(code),",
+              "  },",
+              "});",
+              'console.log("PR121183_PROOF_STAGE", JSON.stringify({ stage: "finalize-returned", launchedTui: result.launchedTui }));',
+              "",
+            ].join("\n"),
+          );
+
+          const run = startPty(process.execPath, ["--import", "tsx", childPath], {
+            cwd: repoDir,
+            env: {
+              CI: "1",
+              FLY_MACHINE_ID: "pr121183-proof",
+              FLY_APP_NAME: "pr121183-proof",
+              OPENCLAW_CONFIG_PATH: configPath,
+              OPENCLAW_STATE_DIR: stateDir,
+              OPENCLAW_GATEWAY_PORT: String(port),
+              PR121183_GATEWAY_PORT: String(port),
+              PR121183_GATEWAY_TOKEN: token,
+              PR121183_WORKSPACE_DIR: workspaceDir,
+              XDG_RUNTIME_DIR: path.join(fixtureDir, "missing-runtime"),
+              DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(fixtureDir, "missing-runtime", "bus")}`,
+            },
+            outputTimeoutMs: 120_000,
+            exitTimeoutMs: 30_000,
+          });
+
+          try {
+            await run.waitForOutput("gateway connected", 120_000);
+            assert.equal(await canConnect(port), true, "session Gateway was not listening");
+            const exitRequestedAt = Date.now();
+            await run.write("/exit\r", { delay: false });
+            const started = await waitForValue({
+              timeoutMs: 20_000,
+              read: async () => (await readTrace()).find((line) => line.startsWith("start:")) ?? null,
+              onTimeout: () => new Error(`gateway_stop did not start\n${run.output()}`),
+            });
+            assert.equal(
+              await canConnect(port),
+              true,
+              "Gateway listener closed before the delayed stop hook settled",
+            );
+            const completed = await waitForValue({
+              timeoutMs: 20_000,
+              read: async () =>
+                (await readTrace()).find((line) => line.startsWith("complete:")) ?? null,
+              onTimeout: () => new Error(`gateway_stop did not complete\n${run.output()}`),
+            });
+            const stopStartedAt = Number.parseInt(started.slice("start:".length), 10);
+            const stopCompletedAt = Number.parseInt(completed.slice("complete:".length), 10);
+            assert(stopStartedAt >= exitRequestedAt);
+            assert(stopCompletedAt - stopStartedAt >= hookDelayMs - 100);
+            await waitForValue({
+              timeoutMs: 20_000,
+              read: async () => ((await canConnect(port)) ? null : true),
+              onTimeout: () => new Error(`Gateway port remained open after cleanup\n${run.output()}`),
+            });
+            const portClosedAt = Date.now();
+            const exit = await run.waitForExit(20_000);
+            assert.equal(exit.exitCode, 0, run.output());
+            assert(run.output().includes('\"stage\":\"finalize-returned\",\"launchedTui\":true'));
+            console.log(
+              "SETUP_GATEWAY_PROCESS_BOUNDARY_PROOF_121183",
+              JSON.stringify({
+                head: targetSha,
+                productionOwner: "finalizeSetupWizard",
+                realTui: true,
+                realSessionGateway: true,
+                delayedGatewayStopHookMs: stopCompletedAt - stopStartedAt,
+                listenerOpenDuringStop: true,
+                listenerClosedBeforeProcessExit: true,
+                portClosedObservedAtMs: portClosedAt - exitRequestedAt,
+                credentials: "none",
+                endpoints: "[redacted-loopback]",
+              }),
+            );
+          } finally {
+            run.dispose();
+            await rm(fixtureDir, { recursive: true, force: true });
+          }
+          NODE
