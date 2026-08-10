@@ -178,11 +178,16 @@ jobs:
           ]);
           console.log("PR121179_PROOF_STAGE", JSON.stringify({ stage: "owners-loaded" }));
           const channelRuntime = createRuntimeChannel();
-          const productionDispatch = channelRuntime.inbound.dispatchReply;
+          const productionBufferedDispatch =
+            channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher;
           let providerCalls = 0;
-          channelRuntime.inbound.dispatchReply = async (turn) =>
-            await productionDispatch({
-              ...turn,
+          channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher = async (params) => {
+            console.log(
+              "PR121179_PROOF_STAGE",
+              JSON.stringify({ stage: "dispatch-owner" }),
+            );
+            return await productionBufferedDispatch({
+              ...params,
               replyResolver: async (_ctx, options) => {
                 providerCalls += 1;
                 console.log(
@@ -199,6 +204,7 @@ jobs:
                 return undefined;
               },
             });
+          };
           qaApi.setQaChannelRuntime({
             channel: channelRuntime,
           } as Parameters<typeof qaApi.setQaChannelRuntime>[0]);
@@ -284,7 +290,7 @@ jobs:
                 head: targetSha,
                 gatewayOwner: "qaChannelPlugin.gateway.startAccount",
                 runtimeOwner: "createRuntimeChannel",
-                dispatchOwner: "channelRuntime.inbound.dispatchReply",
+                dispatchOwner: "channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher",
                 providerEdge: "mock-replyResolver",
                 channelApiEdge: "loopback-http",
                 inboundEvents: 1,
