@@ -47,6 +47,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ./node_modules/.bin/oxfmt src/wizard/setup.finalize.test.ts
+          git diff -- src/wizard/setup.finalize.test.ts
+          test -z "$(git status --short -- src/wizard/setup.finalize.test.ts)"
           node scripts/run-vitest.mjs src/tui/tui.test.ts src/wizard/setup.finalize.test.ts
           printf '%s\n' \
             'SETUP_GATEWAY_CLEANUP_OWNER_PROOF_121183 {"head":"c49b4b897c3f7cf0e4ce82d0ce91eb68f7ba3036","scope":"focused owner tests","settledOrdering":true,"nonsettlingFallbackArmed":true,"realInteractiveTuiE2E":false,"credentials":"none"}'
