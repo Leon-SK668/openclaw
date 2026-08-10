@@ -55,7 +55,7 @@ export function hasExecApprovalPayload(payload: ReplyPayload): boolean {
   return isRecord(payload.channelData?.execApproval);
 }
 
-function hasExecApprovalUnavailablePayload(payload: ReplyPayload): boolean {
+export function hasExecApprovalUnavailablePayload(payload: ReplyPayload): boolean {
   return isRecord(payload.channelData?.execApprovalUnavailable);
 }
 
