@@ -109,6 +109,7 @@ jobs:
             try {
               if (req.method === "POST" && req.url === "/v1/poll") {
                 pollCount += 1;
+                console.log("PR121179_PROOF_STAGE", JSON.stringify({ stage: "channel-poll" }));
                 await readJson(req);
                 if (!inboundPublished) {
                   inboundPublished = true;
@@ -132,6 +133,10 @@ jobs:
               if (req.method === "POST" && req.url === "/v1/outbound/message") {
                 const body = await readJson(req);
                 outboundRequests.push(body);
+                console.log(
+                  "PR121179_PROOF_STAGE",
+                  JSON.stringify({ stage: "channel-api-send", sends: outboundRequests.length }),
+                );
                 writeJson(res, 200, {
                   message: {
                     id: `outbound-redacted-${outboundRequests.length}`,
@@ -164,20 +169,26 @@ jobs:
           const address = bus.address();
           assert(address && typeof address === "object");
           const baseUrl = `http://127.0.0.1:${address.port}`;
+          console.log("PR121179_PROOF_STAGE", JSON.stringify({ stage: "loopback-ready" }));
 
-          const [{ createPluginRuntime }, qaApi, approvalReply] = await Promise.all([
-            import("./src/plugins/runtime/index.js"),
+          const [{ createRuntimeChannel }, qaApi, approvalReply] = await Promise.all([
+            import("./src/plugins/runtime/runtime-channel.js"),
             import("./extensions/qa-channel/api.js"),
             import("./src/infra/exec-approval-reply.js"),
           ]);
-          const runtime = createPluginRuntime();
-          const productionDispatch = runtime.channel.inbound.dispatch;
+          console.log("PR121179_PROOF_STAGE", JSON.stringify({ stage: "owners-loaded" }));
+          const channelRuntime = createRuntimeChannel();
+          const productionDispatch = channelRuntime.inbound.dispatchReply;
           let providerCalls = 0;
-          runtime.channel.inbound.dispatch = async (plan) =>
+          channelRuntime.inbound.dispatchReply = async (turn) =>
             await productionDispatch({
-              ...plan,
+              ...turn,
               replyResolver: async (_ctx, options) => {
                 providerCalls += 1;
+                console.log(
+                  "PR121179_PROOF_STAGE",
+                  JSON.stringify({ stage: "provider-edge", calls: providerCalls }),
+                );
                 const onToolResult = options?.onToolResult;
                 assert(onToolResult, "production dispatch did not expose onToolResult");
                 await onToolResult(
@@ -188,7 +199,9 @@ jobs:
                 return undefined;
               },
             });
-          qaApi.setQaChannelRuntime(runtime);
+          qaApi.setQaChannelRuntime({
+            channel: channelRuntime,
+          } as Parameters<typeof qaApi.setQaChannelRuntime>[0]);
 
           const cfg = {
             agents: { defaults: { verboseDefault: "off" } },
@@ -208,6 +221,7 @@ jobs:
           const abort = new AbortController();
           const statuses: Array<Record<string, unknown>> = [];
           const gatewayTask = Promise.resolve().then(async () => {
+            console.log("PR121179_PROOF_STAGE", JSON.stringify({ stage: "gateway-start" }));
             await qaApi.qaChannelPlugin.gateway?.startAccount?.({
               accountId: account.accountId,
               account,
@@ -233,10 +247,19 @@ jobs:
               setStatus: (status) => statuses.push(status as Record<string, unknown>),
             });
           });
+          const unexpectedGatewayExit = gatewayTask.then(
+            () => {
+              throw new Error("ephemeral Gateway exited before durable channel send");
+            },
+            (error: unknown) => {
+              throw error;
+            },
+          );
 
           try {
             await Promise.race([
               outboundObserved,
+              unexpectedGatewayExit,
               new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error("timed out waiting for durable channel send")), 20_000),
               ),
@@ -260,7 +283,8 @@ jobs:
               JSON.stringify({
                 head: targetSha,
                 gatewayOwner: "qaChannelPlugin.gateway.startAccount",
-                dispatchOwner: "runtime.channel.inbound.dispatch",
+                runtimeOwner: "createRuntimeChannel",
+                dispatchOwner: "channelRuntime.inbound.dispatchReply",
                 providerEdge: "mock-replyResolver",
                 channelApiEdge: "loopback-http",
                 inboundEvents: 1,
