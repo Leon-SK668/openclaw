@@ -327,11 +327,10 @@ export function redactCronCommandSummaryForExternalDelivery(
       const isPromptCarriedUrlLine =
         promptCarry === "url-handoff" && STANDALONE_URL_LINE_PATTERN.test(part);
       const isPromptActionLine = isActionLine || isPromptCarriedUrlLine;
+      const isTerminalStatusLine = isCronCommandTerminalStatusLine(part);
       const hasActivePromptContinuation =
-        promptCarry !== "none" &&
-        promptCarry !== "url-handoff" &&
-        !isCronCommandTerminalStatusLine(part);
-      // The first non-status continuation belongs to the preceding action prompt;
+        promptCarry !== "none" && promptCarry !== "url-handoff";
+      // The first bounded continuation belongs to the preceding action prompt;
       // otherwise an embedded one-time code bypasses the bare-code redaction path.
       const embeddedCodeMode: EmbeddedCodeRedactionMode = inPreservedActionBlock
         ? "preserved"
@@ -348,7 +347,8 @@ export function redactCronCommandSummaryForExternalDelivery(
         inPreservedActionBlock || hasActivePromptContinuation,
         (code, satisfiesPrompt) => {
           lineSatisfiedPrompt ||=
-            satisfiesPrompt || (!isPromptActionLine && hasActivePromptContinuation);
+            !isTerminalStatusLine &&
+            (satisfiesPrompt || (!isPromptActionLine && hasActivePromptContinuation));
           // Status-shaped values on prompt lines are redacted locally but are too
           // ambiguous to replace throughout otherwise unrelated command output.
           if (
@@ -359,8 +359,8 @@ export function redactCronCommandSummaryForExternalDelivery(
           }
         },
       );
-      // Terminal statuses and one short parenthetical do not consume the cue;
-      // arbitrary output must not turn a later status word into a code.
+      // A status-shaped token is masked but does not consume the cue: command
+      // output can emit a status before the actual one-time credential.
       if (lineSatisfiedPrompt) {
         actionPromptCarry = "none";
       } else if (isPromptCarriedUrlLine) {
@@ -372,7 +372,7 @@ export function redactCronCommandSummaryForExternalDelivery(
       } else if (isGeneratedOutputHeader && promptCarry === "url-handoff") {
         // buildCronCommandSummary inserts stdout: between preserved lines and tail output.
         actionPromptCarry = promptCarry;
-      } else if (promptCarry !== "none" && isCronCommandTerminalStatusLine(part)) {
+      } else if (promptCarry !== "none" && isTerminalStatusLine) {
         actionPromptCarry = promptCarry;
       } else if (
         promptCarry === "code-or-explanation" &&

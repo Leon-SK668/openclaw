@@ -930,7 +930,7 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
   it("redacts command summaries before webhook completion delivery", async () => {
     const logger = { warn: vi.fn() };
     const sensitiveSummary =
-      "Visit https://example.com/device\nSUCCESS\nCode: WDJBMJHT\nEnter code Z9X8-Y7W6\nbuild completed\n654321\nLog in with token=opaque-secret-value";
+      "Visit https://example.com/device\nSUCCESS\nWDJBMJHT\nEnter code Z9X8-Y7W6\nbuild completed\n654321\nLog in with token=opaque-secret-value";
     const job = {
       id: "cron-command-webhook-redact",
       name: "command webhook redact",
@@ -992,18 +992,20 @@ describe("dispatchGatewayCronFinishedNotifications", () => {
     await waitForFast(() => expect(mocks.fetchWithSsrFGuard).toHaveBeenCalledTimes(1));
     const body = webhookRequestBody();
     expect(body.summary).toContain("[redacted-url]");
-    expect(body.summary).toContain("Code: [redacted-code]");
+    expect(body.summary).toContain("[redacted-code]");
     expect(body.summary).toContain("token=***");
     expect(body.summary).toContain("build completed\n654321");
     expect(body.summary).not.toContain("https://example.com/device");
+    expect(body.summary).not.toContain("SUCCESS");
     expect(body.summary).not.toContain("WDJBMJHT");
     expect(body.summary).not.toContain("Z9X8-Y7W6");
     expect(body.summary).not.toContain("opaque-secret-value");
     expect(body.diagnostics.summary).toBe(body.summary);
     expect(body.diagnostics.entries[0].message).toContain("[redacted-url]");
-    expect(body.diagnostics.entries[0].message).toContain("Code: [redacted-code]");
+    expect(body.diagnostics.entries[0].message).toContain("[redacted-code]");
     expect(body.diagnostics.entries[0].message).toContain("token=***");
     expect(body.diagnostics.entries[0].message).not.toContain("https://example.com/device");
+    expect(body.diagnostics.entries[0].message).not.toContain("SUCCESS");
     expect(body.diagnostics.entries[0].message).not.toContain("WDJBMJHT");
     expect(body.diagnostics.entries[0].message).not.toContain("opaque-secret-value");
     expect(body.job.state).not.toHaveProperty("lastDiagnosticSummary");
