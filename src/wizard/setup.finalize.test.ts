@@ -17,9 +17,7 @@ type DefaultModelCatalogFacts = ReturnType<
 
 const runTui = vi.hoisted(() => vi.fn<(options: unknown) => Promise<void>>(async () => {}));
 const setupCleanupExitTimer = vi.hoisted(() => ({ unref: vi.fn() }));
-const scheduleProcessExitAfterTuiReturn = vi.hoisted(() =>
-  vi.fn(() => setupCleanupExitTimer),
-);
+const scheduleProcessExitAfterTuiReturn = vi.hoisted(() => vi.fn(() => setupCleanupExitTimer));
 const cancelProcessExitAfterTuiReturn = vi.hoisted(() => vi.fn());
 const resolveTuiShutdownHardExitMs = vi.hoisted(() => vi.fn(() => 122_000));
 const restoreTerminalState = vi.hoisted(() => vi.fn());
