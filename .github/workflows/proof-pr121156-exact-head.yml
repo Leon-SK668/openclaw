@@ -43,6 +43,13 @@ jobs:
           corepack pnpm --version
           corepack pnpm install --frozen-lockfile
 
+      - name: Emit exact-environment Plugin SDK baseline drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm plugin-sdk:api:gen
+          git diff -- docs/.generated/plugin-sdk-api-baseline.sha256
+
       - name: Prove Gateway cleanup owner on real managed npm generations
         shell: bash
         run: |
