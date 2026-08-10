@@ -1,18 +1,18 @@
-name: PR 121150 exact-head provider-owner proof
+name: PR 121150 exact-head bundled compat proof
 
 on:
   push:
     branches:
-      - proof/pr121150-provider-owner-20260810
+      - proof/pr121150-bundled-compat-run-20260810
 
 permissions: {}
 
 jobs:
-  provider-owner-proof:
+  bundled-compat-proof:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TARGET_SHA: 8c7d8614f8eb0b9a0993c83140cf5a822d5b1557
+      TARGET_SHA: 098b423d836e49a2004bf8e18386eeee8afbad18
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -20,8 +20,8 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git remote add origin https://github.com/openclaw/openclaw.git
-          git fetch --depth=1 origin refs/pull/121150/head
+          git remote add origin https://github.com/Leon-SK668/openclaw.git
+          git fetch --depth=1 origin refs/heads/proof/pr121150-candidate-bundled-compat-20260810
           git checkout --detach FETCH_HEAD
 
       - name: Verify exact PR head
@@ -43,95 +43,96 @@ jobs:
           corepack pnpm --version
           corepack pnpm install --frozen-lockfile
 
-      - name: Prove provider-driven canonical activation through the production owner
+      - name: Check focused formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./node_modules/.bin/oxfmt --check \
+            src/plugins/bundled-compat.ts \
+            src/plugins/bundled-compat.test.ts
+
+      - name: Run bundled compat regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs src/plugins/bundled-compat.test.ts
+
+      - name: Prove alias disable through the production web-provider owner
         shell: bash
         run: |
           set -euo pipefail
           node --import tsx --input-type=module <<'NODE'
           import assert from "node:assert/strict";
-          import { resolvePluginProviders } from "./src/plugins/providers.runtime.ts";
-
-          delete process.env.GEMINI_API_KEY;
-          delete process.env.GOOGLE_API_KEY;
+          import { resolvePluginWebSearchProviders } from "./src/plugins/web-search-providers.runtime.ts";
+          import { resolveBundledWebSearchResolutionConfig } from "./src/plugins/web-search-providers.shared.ts";
 
           const workspaceDir = process.cwd();
-          const providerRefs = ["google-gemini-cli"];
           const aliasConfig = {
             plugins: {
-              allow: [" GoOgLe-GeMiNi-Cli "],
-            },
-          };
-          const common = {
-            config: aliasConfig,
-            workspaceDir,
-            env: process.env,
-            providerRefs,
-            pluginSdkResolution: "src",
-            activate: true,
-            cache: false,
-          };
-
-          const setupProviders = resolvePluginProviders({ ...common, mode: "setup" });
-          const setupGoogle = setupProviders.find(
-            (provider) => provider.id === "google" && provider.pluginId === "google",
-          );
-          assert(setupGoogle, "setup provider resolution did not load canonical google owner");
-          assert(setupGoogle.staticCatalog, "setup provider is missing its static catalog hook");
-          const setupCatalog = await setupGoogle.staticCatalog.run({});
-          assert(setupCatalog && "providers" in setupCatalog);
-          assert(setupCatalog.providers?.google, "setup catalog did not expose google");
-
-          const runtimeProviders = resolvePluginProviders({ ...common, mode: "runtime" });
-          const runtimeGoogle = runtimeProviders.find(
-            (provider) => provider.id === "google" && provider.pluginId === "google",
-          );
-          assert(runtimeGoogle, "runtime provider resolution did not load canonical google owner");
-          assert(runtimeGoogle.normalizeTransport, "runtime provider hook was not registered");
-          const normalizedTransport = runtimeGoogle.normalizeTransport({
-            provider: "google",
-            api: "google-generative-ai",
-            baseUrl: "https://generativelanguage.googleapis.com",
-          });
-          assert.equal(
-            normalizedTransport?.baseUrl,
-            "https://generativelanguage.googleapis.com/v1beta",
-          );
-
-          const disabledProviders = resolvePluginProviders({
-            ...common,
-            config: {
-              plugins: {
-                allow: ["google-gemini-cli"],
-                entries: {
-                  "GOOGLE-GEMINI-CLI": { enabled: false },
+              entries: {
+                "GOOGLE-GEMINI-CLI": {
+                  enabled: false,
+                  config: { webSearch: { model: "gemini-3-flash-preview" } },
                 },
               },
             },
+          };
+          const common = {
+            workspaceDir,
+            env: process.env,
+            onlyPluginIds: ["google"],
+            activate: true,
+            cache: false,
             mode: "runtime",
+          };
+
+          const resolution = resolveBundledWebSearchResolutionConfig({
+            config: aliasConfig,
+            workspaceDir,
+            env: process.env,
+          });
+          assert.deepEqual(
+            resolution.config?.plugins?.entries,
+            {
+              google: {
+                enabled: false,
+                config: { webSearch: { model: "gemini-3-flash-preview" } },
+              },
+            },
+            "bundled compat did not preserve the canonicalized explicit disable",
+          );
+
+          const enabledProviders = resolvePluginWebSearchProviders({
+            ...common,
+            config: { plugins: { allow: ["google"] } },
+          });
+          assert(
+            enabledProviders.some(
+              (provider) => provider.pluginId === "google" && provider.id === "gemini",
+            ),
+            "positive control did not resolve the bundled google web-search provider",
+          );
+
+          const disabledProviders = resolvePluginWebSearchProviders({
+            ...common,
+            config: aliasConfig,
           });
           assert.equal(
-            disabledProviders.some((provider) => provider.pluginId === "google"),
+            disabledProviders.some(
+              (provider) => provider.pluginId === "google" && provider.id === "gemini",
+            ),
             false,
-            "explicitly disabled alias unexpectedly activated canonical google",
+            "explicitly disabled alias activated the canonical bundled web-search provider",
           );
 
           console.log(
-            "PLUGIN_PROVIDER_ACTIVATION_PROOF_121150",
+            "BUNDLED_COMPAT_ALIAS_DISABLE_PROOF_121150",
             JSON.stringify({
               head: process.env.TARGET_SHA,
-              trigger: { providerRef: "google-gemini-cli", explicitPluginIds: 0 },
-              allowlistInput: "mixed-case legacy alias",
-              setup: {
-                pluginId: setupGoogle.pluginId,
-                providerId: setupGoogle.id,
-                staticCatalogProvider: "google",
-              },
-              runtime: {
-                pluginId: runtimeGoogle.pluginId,
-                providerId: runtimeGoogle.id,
-                transportHook: normalizedTransport?.baseUrl,
-              },
-              explicitDisabledAliasStayedDisabled: true,
+              boundary: "resolvePluginWebSearchProviders",
+              canonicalEntry: resolution.config?.plugins?.entries?.google,
+              positiveControl: "google:gemini",
+              disabledAliasProviderCount: disabledProviders.length,
               credentials: "none",
             }),
           );
