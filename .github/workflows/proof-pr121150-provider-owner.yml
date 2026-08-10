@@ -1,0 +1,138 @@
+name: PR 121150 exact-head provider-owner proof
+
+on:
+  push:
+    branches:
+      - proof/pr121150-provider-owner-20260810
+
+permissions: {}
+
+jobs:
+  provider-owner-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: 8c7d8614f8eb0b9a0993c83140cf5a822d5b1557
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout exact PR head anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin refs/pull/121150/head
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify exact PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile
+
+      - name: Prove provider-driven canonical activation through the production owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { resolvePluginProviders } from "./src/plugins/providers.runtime.ts";
+
+          delete process.env.GEMINI_API_KEY;
+          delete process.env.GOOGLE_API_KEY;
+
+          const workspaceDir = process.cwd();
+          const providerRefs = ["google-gemini-cli"];
+          const aliasConfig = {
+            plugins: {
+              allow: [" GoOgLe-GeMiNi-Cli "],
+            },
+          };
+          const common = {
+            config: aliasConfig,
+            workspaceDir,
+            env: process.env,
+            providerRefs,
+            pluginSdkResolution: "src",
+            activate: true,
+            cache: false,
+          };
+
+          const setupProviders = resolvePluginProviders({ ...common, mode: "setup" });
+          const setupGoogle = setupProviders.find(
+            (provider) => provider.id === "google" && provider.pluginId === "google",
+          );
+          assert(setupGoogle, "setup provider resolution did not load canonical google owner");
+          assert(setupGoogle.staticCatalog, "setup provider is missing its static catalog hook");
+          const setupCatalog = await setupGoogle.staticCatalog.run({});
+          assert(setupCatalog && "providers" in setupCatalog);
+          assert(setupCatalog.providers?.google, "setup catalog did not expose google");
+
+          const runtimeProviders = resolvePluginProviders({ ...common, mode: "runtime" });
+          const runtimeGoogle = runtimeProviders.find(
+            (provider) => provider.id === "google" && provider.pluginId === "google",
+          );
+          assert(runtimeGoogle, "runtime provider resolution did not load canonical google owner");
+          assert(runtimeGoogle.normalizeTransport, "runtime provider hook was not registered");
+          const normalizedTransport = runtimeGoogle.normalizeTransport({
+            provider: "google",
+            api: "google-generative-ai",
+            baseUrl: "https://generativelanguage.googleapis.com",
+          });
+          assert.equal(
+            normalizedTransport?.baseUrl,
+            "https://generativelanguage.googleapis.com/v1beta",
+          );
+
+          const disabledProviders = resolvePluginProviders({
+            ...common,
+            config: {
+              plugins: {
+                allow: ["google-gemini-cli"],
+                entries: {
+                  "GOOGLE-GEMINI-CLI": { enabled: false },
+                },
+              },
+            },
+            mode: "runtime",
+          });
+          assert.equal(
+            disabledProviders.some((provider) => provider.pluginId === "google"),
+            false,
+            "explicitly disabled alias unexpectedly activated canonical google",
+          );
+
+          console.log(
+            "PLUGIN_PROVIDER_ACTIVATION_PROOF_121150",
+            JSON.stringify({
+              head: process.env.TARGET_SHA,
+              trigger: { providerRef: "google-gemini-cli", explicitPluginIds: 0 },
+              allowlistInput: "mixed-case legacy alias",
+              setup: {
+                pluginId: setupGoogle.pluginId,
+                providerId: setupGoogle.id,
+                staticCatalogProvider: "google",
+              },
+              runtime: {
+                pluginId: runtimeGoogle.pluginId,
+                providerId: runtimeGoogle.id,
+                transportHook: normalizedTransport?.baseUrl,
+              },
+              explicitDisabledAliasStayedDisabled: true,
+              credentials: "none",
+            }),
+          );
+          NODE
