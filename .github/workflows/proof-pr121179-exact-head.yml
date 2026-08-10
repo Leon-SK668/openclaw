@@ -264,13 +264,19 @@ jobs:
               throw error;
             },
           );
+          // Production turn preparation can occupy a shared runner for several minutes
+          // before the injected provider edge; the job still has a 15-minute hard cap.
+          const proofTimeoutMs = 10 * 60_000;
 
           try {
             await Promise.race([
               outboundObserved,
               unexpectedGatewayExit,
               new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("timed out waiting for durable channel send")), 20_000),
+                setTimeout(
+                  () => reject(new Error("timed out waiting for durable channel send")),
+                  proofTimeoutMs,
+                ),
               ),
             ]);
             abort.abort();
