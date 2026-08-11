@@ -31,7 +31,7 @@ extension DashboardWindowController {
 
     static func notificationsPermissionLabel(for status: UNAuthorizationStatus) -> String {
         switch status {
-        case .authorized, .provisional:
+        case _ where PermissionManager.isNotificationAuthorized(status: status):
             "granted"
         case .denied:
             "denied"

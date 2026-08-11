@@ -82,7 +82,7 @@ enum PermissionManager {
             let granted = await (try? center.requestAuthorization(options: [.alert, .sound, .badge])) ?? false
             let updated = await center.notificationSettings()
             return granted &&
-                (updated.authorizationStatus == .authorized || updated.authorizationStatus == .provisional)
+                self.isNotificationAuthorized(status: updated.authorizationStatus)
         case .denied:
             if interactive {
                 NotificationPermissionHelper.openSettings()
@@ -216,8 +216,8 @@ enum PermissionManager {
             case .notifications:
                 let center = UNUserNotificationCenter.current()
                 let settings = await center.notificationSettings()
-                results[cap] = settings.authorizationStatus == .authorized
-                    || settings.authorizationStatus == .provisional ? .granted : .notGranted
+                results[cap] = self.isNotificationAuthorized(status: settings.authorizationStatus)
+                    ? .granted : .notGranted
 
             case .appleScript:
                 results[cap] = await TerminalAutomationPermission.authorizationStatus()
@@ -510,5 +510,11 @@ enum ScreenRecordingProbe {
         if #available(macOS 10.15, *) {
             _ = CGRequestScreenCaptureAccess()
         }
+    }
+}
+
+extension PermissionManager {
+    static func isNotificationAuthorized(status: UNAuthorizationStatus) -> Bool {
+        status == .authorized || status == .provisional
     }
 }
