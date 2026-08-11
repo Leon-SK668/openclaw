@@ -131,25 +131,30 @@ function userMessage(text: string, timestamp: number) {
   return { role: "user" as const, content: text, timestamp };
 }
 
-function completedEvent(responseId: string, text?: string) {
-  const output = text
-    ? [
-        {
-          type: "message",
-          id: `msg_${responseId}`,
-          role: "assistant",
-          status: "completed",
-          content: [{ type: "output_text", text, annotations: [] }],
-        },
-      ]
-    : [];
+function completedEvent(responseId: string, content?: string | Array<Record<string, unknown>>) {
+  const output =
+    typeof content === "string"
+      ? [
+          {
+            type: "message",
+            id: `msg_${responseId}`,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: content, annotations: [] }],
+          },
+        ]
+      : (content ?? []);
   return {
     type: "response.completed",
     response: {
       id: responseId,
       status: "completed",
       output,
-      usage: { input_tokens: 5, output_tokens: text ? 3 : 0, total_tokens: text ? 8 : 5 },
+      usage: {
+        input_tokens: 5,
+        output_tokens: output.length > 0 ? 3 : 0,
+        total_tokens: output.length > 0 ? 8 : 5,
+      },
     },
   };
 }
@@ -159,17 +164,19 @@ function message(event: Record<string, unknown>): StreamMessage {
 }
 
 function toolCallResponse(responseId: string): StreamMessage[] {
+  const functionCall = {
+    type: "function_call",
+    id: "fc_read",
+    call_id: "call_read",
+    name: "read",
+    arguments: '{"path":"README.md"}',
+    status: "completed",
+  };
   return [
     message({
       type: "response.output_item.added",
       output_index: 0,
-      item: {
-        type: "function_call",
-        id: "fc_read",
-        call_id: "call_read",
-        name: "read",
-        arguments: "",
-      },
+      item: { ...functionCall, arguments: "", status: "in_progress" },
     }),
     message({
       type: "response.function_call_arguments.delta",
@@ -187,16 +194,9 @@ function toolCallResponse(responseId: string): StreamMessage[] {
     message({
       type: "response.output_item.done",
       output_index: 0,
-      item: {
-        type: "function_call",
-        id: "fc_read",
-        call_id: "call_read",
-        name: "read",
-        arguments: '{"path":"README.md"}',
-        status: "completed",
-      },
+      item: functionCall,
     }),
-    message(completedEvent(responseId)),
+    message(completedEvent(responseId, [functionCall])),
   ];
 }
 
@@ -375,6 +375,44 @@ describe("native OpenAI Responses WebSocket client integration", () => {
     expect(result.stopReason).toBe("stop");
     expect(transportState.websocketRequests).toEqual([]);
     expect(transportState.sdkRequests).toHaveLength(1);
+  });
+
+  it("awaits the SSE response hook before start after a WebSocket fallback", async () => {
+    transportState.handshakeMessages.push({ type: "error", error: new Error("connect failed") });
+    transportState.sdkOutcomes.push(sdkCompletion("resp_sse"));
+    const order: string[] = [];
+    let releaseHook!: () => void;
+    const hookPending = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+    const onResponse = vi.fn(async () => {
+      order.push("hook:start");
+      await hookPending;
+      order.push("hook:end");
+    });
+    const responseStream = await createOpenAIResponsesTransportStreamFn()(
+      model,
+      { messages: [userMessage("hello", 1)], tools: [] },
+      {
+        apiKey: "test-key",
+        sessionId: "session-1",
+        transport: "auto",
+        onResponse,
+      },
+    );
+    const consume = (async () => {
+      for await (const event of responseStream) {
+        order.push(event.type);
+      }
+    })();
+
+    await vi.waitFor(() => expect(onResponse).toHaveBeenCalledOnce());
+    expect(order).toEqual(["hook:start"]);
+
+    releaseHook();
+    await consume;
+    expect((await responseStream.result()).stopReason).toBe("stop");
+    expect(order.slice(0, 3)).toEqual(["hook:start", "hook:end", "start"]);
   });
 
   it("skips repeated WebSocket setup during the provider degradation cooldown", async () => {
