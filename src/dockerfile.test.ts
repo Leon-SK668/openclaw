@@ -521,6 +521,9 @@ describe("Dockerfile", () => {
 
     expect(workflow).toContain("resolve_build_provenance:");
     expect(workflow).toContain("built_at: ${{ steps.build_provenance.outputs.built_at }}");
+    expect(workflow).toContain(
+      "release_version: ${{ steps.build_provenance.outputs.release_version }}",
+    );
     expect(workflow).toContain("source_sha: ${{ steps.build_provenance.outputs.source_sha }}");
     expect(workflow.match(/date -u \+%Y-%m-%dT%H:%M:%SZ/gu)).toHaveLength(1);
     expect(
@@ -539,6 +542,34 @@ describe("Dockerfile", () => {
         "OPENCLAW_BUILD_TIMESTAMP=${{ needs.resolve_build_provenance.outputs.built_at }}",
       ).length - 1,
     ).toBe(4);
+  });
+
+  it("stamps and verifies the full correction-release version in official images", async () => {
+    const [dockerfile, workflow] = await Promise.all([
+      readFile(dockerfilePath, "utf8"),
+      readFile(dockerReleaseWorkflowPath, "utf8"),
+    ]);
+    const versionArgIndex = dockerfile.indexOf('ARG OPENCLAW_BUILD_VERSION=""');
+    const versionStampIndex = dockerfile.indexOf('pnpm pkg set "version=$OPENCLAW_BUILD_VERSION"');
+    const buildIndex = dockerfile.indexOf("pnpm build:docker");
+
+    expect(versionArgIndex).toBeGreaterThan(-1);
+    expect(versionStampIndex).toBeGreaterThan(versionArgIndex);
+    expect(versionStampIndex).toBeLessThan(buildIndex);
+    expect(
+      workflow.split(
+        "OPENCLAW_BUILD_VERSION=${{ needs.resolve_build_provenance.outputs.release_version }}",
+      ).length - 1,
+    ).toBe(4);
+    expect(
+      workflow.split(
+        "EXPECTED_IMAGE_VERSION: ${{ needs.resolve_build_provenance.outputs.release_version }}",
+      ).length - 1,
+    ).toBe(2);
+    expect(workflow.split(String.raw`require(\"/app/package.json\").version`).length - 1).toBe(2);
+    expect(
+      workflow.split(String.raw`require(\"/app/dist/build-info.json\").version`).length - 1,
+    ).toBe(2);
   });
 
   it("publishes official Docker browser images with baked Chromium", async () => {

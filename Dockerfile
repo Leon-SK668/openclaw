@@ -116,6 +116,7 @@ RUN set -eux; \
 # these after the dependency layer so a new timestamp does not invalidate install.
 ARG GIT_COMMIT=""
 ARG OPENCLAW_BUILD_TIMESTAMP=""
+ARG OPENCLAW_BUILD_VERSION=""
 ENV GIT_COMMIT=${GIT_COMMIT} \
     OPENCLAW_BUILD_TIMESTAMP=${OPENCLAW_BUILD_TIMESTAMP}
 
@@ -145,8 +146,13 @@ RUN pnpm_config_verify_deps_before_run=false pnpm canvas:a2ui:bundle || \
      rm -rf vendor/a2ui apps/shared/OpenClawKit/Tools/CanvasA2UI)
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
+# Correction-release source keeps the base package version, but official images
+# must report the complete release tag from the publish workflow.
 RUN set -eu; \
     selected_plugin_dirs="$(cat /tmp/openclaw-selected-plugin-dirs)"; \
+    if [ -n "$OPENCLAW_BUILD_VERSION" ]; then \
+      pnpm pkg set "version=$OPENCLAW_BUILD_VERSION"; \
+    fi; \
     if [ -z "$OPENCLAW_BUILD_TIMESTAMP" ]; then \
       OPENCLAW_BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
       export OPENCLAW_BUILD_TIMESTAMP; \
