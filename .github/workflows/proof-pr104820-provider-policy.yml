@@ -13,7 +13,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  PR_HEAD_SHA: 497f54703c20e0a3e0cad09c9be939a6c4852a4f
+  PR_HEAD_SHA: d9b2cc2d42ff212e8117b07beeb27d1ab8720526
 
 jobs:
   provider-policy-proof:
@@ -55,7 +55,7 @@ jobs:
           grep -F "enforces env provider policy before selecting the transport endpoint" \
             searxng-provider-policy-proof.log
           printf '%s\n' \
-            'SEARXNG_PROVIDER_POLICY_PROOF_104820 {"head":"497f54703c20e0a3e0cad09c9be939a6c4852a4f","allowedConfiguredRequests":1,"deniedConfiguredRequests":0,"deniedAmbientRequests":1,"ambientFallbackPreserved":true,"endpoints":"[redacted-loopback]"}'
+            'SEARXNG_PROVIDER_POLICY_PROOF_104820 {"head":"d9b2cc2d42ff212e8117b07beeb27d1ab8720526","allowedConfiguredRequests":1,"deniedConfiguredRequests":0,"deniedAmbientRequests":1,"ambientFallbackPreserved":true,"endpoints":"[redacted-loopback]"}'
 
       - name: Upload proof log
         if: always()
