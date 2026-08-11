@@ -11,7 +11,6 @@ import {
   readTranscriptRawDelta,
   readSessionTranscriptVisibleMessageDelta as readVisibleMessageDelta,
   readLatestTranscriptAssistantText,
-  resolveSessionTranscriptRuntimeReadTarget,
   resolveSessionTranscriptRuntimeTarget,
   withTranscriptWriteLock,
   type TranscriptMessageAppendOptions,
@@ -33,9 +32,14 @@ import type {
   SessionTranscriptDeliveryMirror,
   SessionTranscriptUpdateMode,
 } from "../config/sessions/transcript.js";
+
+export type {
+  TranscriptEntryAnchor,
+  TranscriptTurnAdmission,
+} from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeAgentId } from "../routing/session-key.js";
-import { extractAssistantVisibleText } from "../shared/chat-message-content.js";
+import { extractAssistantPhaseText } from "../shared/chat-message-content.js";
 import type { AgentMessage } from "./agent-core.js";
 import { withProjectedSessionTranscriptWriteLock } from "./session-transcript-lock-runtime.js";
 import {
@@ -177,7 +181,7 @@ type SessionTranscriptMirrorAppendResult =
 export async function resolveSessionTranscriptIdentity(
   params: SessionTranscriptReadParams,
 ): Promise<SessionTranscriptIdentity> {
-  const target = await resolveSessionTranscriptRuntimeReadTarget(params);
+  const target = await resolveSessionTranscriptRuntimeTarget(params);
   const agentId = normalizeAgentId(target.agentId);
   return {
     agentId,
@@ -194,7 +198,7 @@ export async function resolveSessionTranscriptIdentity(
 export async function resolveSessionTranscriptTarget(
   params: SessionTranscriptTargetParams,
 ): Promise<SessionTranscriptTarget> {
-  const target = await resolveSessionTranscriptRuntimeReadTarget(params);
+  const target = await resolveSessionTranscriptRuntimeTarget(params);
   return projectPublicTarget({
     ...target,
     targetKind: "runtime-session",
@@ -309,7 +313,7 @@ export async function appendAssistantMirrorMessageByIdentity(
       ...params,
       sessionId: currentEntry.sessionId,
     };
-    const target = await resolveSessionTranscriptRuntimeReadTarget(scope);
+    const target = await resolveSessionTranscriptRuntimeTarget(scope);
     const latestEquivalentAssistantId =
       !params.idempotencyKey && isDeliveryMirrorAssistantMessage(message)
         ? findLatestEquivalentAssistantMessageId(
@@ -514,7 +518,7 @@ function extractAssistantMirrorComparableText(
     message as Parameters<typeof redactTranscriptMessage>[0],
     config,
   ) as SessionTranscriptAssistantMessage;
-  return extractAssistantVisibleText(redacted)?.trim() || undefined;
+  return extractAssistantPhaseText(redacted)?.trim() || undefined;
 }
 
 function isDeliveryMirrorAssistantMessage(message: SessionTranscriptAssistantMessage): boolean {
