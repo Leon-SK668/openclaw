@@ -12,7 +12,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     env:
-      TARGET_SHA: 46c3c44fde2da10c822f7a1798b740f6d9c3f995
+      TARGET_SHA: 3a602adf55365f1663a0dd4a3a8e95d6370c383c
     steps:
       - name: Checkout exact PR head anonymously
         shell: bash
