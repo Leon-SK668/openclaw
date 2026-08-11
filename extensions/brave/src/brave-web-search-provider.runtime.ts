@@ -28,6 +28,7 @@ import {
   writeCachedSearchPayload,
 } from "openclaw/plugin-sdk/provider-web-search";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
+import { coerceSecretRef } from "openclaw/plugin-sdk/secret-input";
 import {
   assertHttpUrlTargetsPrivateNetwork,
   isBlockedHostnameOrIp,
@@ -155,10 +156,13 @@ async function validateBraveBaseUrl(baseUrl: string): Promise<BraveEndpointMode>
   return (await braveEndpointTargetsPrivateNetwork(parsed)) ? "selfHosted" : "strict";
 }
 
-function missingBraveKeyPayload() {
+function missingBraveKeyPayload(searchConfig?: SearchConfigRecord) {
+  const credentialGuidance = coerceSecretRef(searchConfig?.apiKey)
+    ? "The configured Brave API key SecretRef is unavailable. Repair or remove the configured reference before retrying."
+    : `Run \`${formatCliCommand("openclaw configure --section web")}\` to store it, or set BRAVE_API_KEY in the Gateway environment.`;
   return {
     error: "missing_brave_api_key",
-    message: `web_search (brave) needs a Brave Search API key. Run \`${formatCliCommand("openclaw configure --section web")}\` to store it, or set BRAVE_API_KEY in the Gateway environment. If you do not want to configure a search API key, use web_fetch for a specific URL or the browser tool for interactive pages.`,
+    message: `web_search (brave) needs a Brave Search API key. ${credentialGuidance} If you do not want to configure a search API key, use web_fetch for a specific URL or the browser tool for interactive pages.`,
     docs: "https://docs.openclaw.ai/tools/web",
   };
 }
@@ -356,7 +360,7 @@ export async function executeBraveSearch(
 ): Promise<Record<string, unknown>> {
   const apiKey = resolveBraveApiKey(searchConfig);
   if (!apiKey) {
-    return missingBraveKeyPayload();
+    return missingBraveKeyPayload(searchConfig);
   }
 
   const braveConfig = resolveBraveConfig(searchConfig);

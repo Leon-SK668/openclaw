@@ -308,7 +308,12 @@ describe("brave web search provider", () => {
 
     const result = await tool.execute({ query: "brave unavailable SecretRef" });
 
-    expect(result).toMatchObject({ error: "missing_brave_api_key" });
+    expect(result).toEqual({
+      error: "missing_brave_api_key",
+      message:
+        "web_search (brave) needs a Brave Search API key. The configured Brave API key SecretRef is unavailable. Repair or remove the configured reference before retrying. If you do not want to configure a search API key, use web_fetch for a specific URL or the browser tool for interactive pages.",
+      docs: "https://docs.openclaw.ai/tools/web",
+    });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
