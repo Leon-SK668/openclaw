@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      TARGET_SHA: a22d13e0027bcb357a043e0658cd519b4ebe9776
+      TARGET_SHA: 582a065fffa0bb40cdae43bf832f195ef785d9c0
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout exact PR head anonymously
@@ -50,7 +50,7 @@ jobs:
           ./node_modules/.bin/oxfmt --check src/wizard/setup.finalize.test.ts
           node scripts/run-vitest.mjs src/tui/tui.test.ts src/wizard/setup.finalize.test.ts
           printf '%s\n' \
-            'SETUP_GATEWAY_CLEANUP_OWNER_PROOF_121183 {"head":"a22d13e0027bcb357a043e0658cd519b4ebe9776","scope":"focused owner tests","formatCheck":true,"settledOrdering":true,"nonsettlingFallbackArmed":true,"realInteractiveTuiE2E":false,"credentials":"none"}'
+            'SETUP_GATEWAY_CLEANUP_OWNER_PROOF_121183 {"head":"582a065fffa0bb40cdae43bf832f195ef785d9c0","scope":"focused owner tests","formatCheck":true,"settledOrdering":true,"nonsettlingFallbackArmed":true,"realInteractiveTuiE2E":false,"credentials":"none"}'
 
       - name: Prove real setup TUI waits for delayed session Gateway cleanup
         shell: bash
@@ -65,7 +65,7 @@ jobs:
           import { sleep, startPty } from "./src/tui/tui-pty-test-support.js";
 
           const targetSha = process.env.TARGET_SHA;
-          assert.equal(targetSha, "a22d13e0027bcb357a043e0658cd519b4ebe9776");
+          assert.equal(targetSha, "582a065fffa0bb40cdae43bf832f195ef785d9c0");
           const repoDir = process.cwd();
           const fixtureDir = await mkdtemp(path.join(tmpdir(), "pr121183-process-proof-"));
           const stateDir = path.join(fixtureDir, "state");
