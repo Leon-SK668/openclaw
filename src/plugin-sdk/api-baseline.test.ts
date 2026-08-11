@@ -1,20 +1,22 @@
 /**
  * Tests the plugin SDK public API baseline.
  */
+
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { publicPluginSdkEntrypoints } from "../../scripts/lib/plugin-sdk-entries.mts";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { formatPluginSdkApiTypeAlias } from "./api-baseline-declaration-print.js";
 import {
-  computePluginSdkApiBaselineHashFileContent,
-  formatPluginSdkApiTypeAlias,
   listPluginSdkApiBaselineEntrypoints,
   normalizePluginSdkApiDeclarationText,
   normalizePluginSdkApiSourcePath,
   renderPluginSdkApiBaseline,
   renderPluginSdkApiBaselineModules,
+  writeRenderedPluginSdkApiBaselineArtifacts,
   type PluginSdkApiBaselineRender,
 } from "./api-baseline.js";
 
@@ -36,6 +38,73 @@ const TEST_ENTRYPOINTS = [
 ] as const;
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+function contractContents(rendered: PluginSdkApiBaselineRender): Record<string, string> {
+  return Object.fromEntries(rendered.contractFiles.map((file) => [file.fileName, file.content]));
+}
+
+function writeContractFiles(directory: string, rendered: PluginSdkApiBaselineRender): void {
+  fs.mkdirSync(directory, { recursive: true });
+  for (const file of rendered.contractFiles) {
+    fs.writeFileSync(path.join(directory, file.fileName), file.content);
+  }
+}
+
+function git(repoRoot: string, args: string[]): string {
+  const result = spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_EMAIL: "plugin-sdk-test@openclaw.invalid",
+      GIT_AUTHOR_NAME: "Plugin SDK Test",
+      GIT_COMMITTER_EMAIL: "plugin-sdk-test@openclaw.invalid",
+      GIT_COMMITTER_NAME: "Plugin SDK Test",
+    },
+  });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  return result.stdout.trim();
+}
+
+function stablePatchId(repoRoot: string, revision: string): string {
+  const patch = spawnSync("git", ["show", "--pretty=format:", revision], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  expect(patch.status, patch.stderr).toBe(0);
+  const result = spawnSync("git", ["patch-id", "--stable"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    input: patch.stdout,
+  });
+  expect(result.status, result.stderr).toBe(0);
+  return result.stdout.split(" ")[0] ?? "";
+}
+
+async function renderSourceFixture(
+  files: Readonly<Record<string, string>>,
+  entrypoints: readonly string[] = ["fixture"],
+) {
+  const repoRoot = tempDirs.make("openclaw-plugin-sdk-api-");
+  const sourceDir = path.join(repoRoot, "src", "plugin-sdk");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(repoRoot, "tsconfig.json"),
+    `${JSON.stringify({
+      compilerOptions: {
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        target: "ESNext",
+      },
+    })}\n`,
+  );
+  for (const [relativePath, content] of Object.entries(files)) {
+    const filePath = path.join(sourceDir, relativePath);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+  }
+  return renderPluginSdkApiBaseline({ repoRoot, entrypoints });
+}
 
 async function renderPrivateDeclarationFixture(params?: {
   optionalOption?: boolean;
@@ -124,9 +193,11 @@ function createTupleAliasFixture(tuple: string, warmup: string, prewarm: boolean
 describe("Plugin SDK API baseline", () => {
   let rendered: PluginSdkApiBaselineRender;
 
+  // Rendering builds a TS program across SDK entrypoints. Loaded CI runners can
+  // exceed the default hook budget; this work is compile-bound, not a hang.
   beforeAll(async () => {
     rendered = await renderPluginSdkApiBaseline({ entrypoints: TEST_ENTRYPOINTS });
-  });
+  }, 300_000);
 
   it("normalizes declaration import paths to repo-relative paths", () => {
     const repoRoot = process.cwd();
@@ -136,8 +207,14 @@ describe("Plugin SDK API baseline", () => {
     const normalized = normalizePluginSdkApiDeclarationText(repoRoot, declaration);
 
     expect(normalized).not.toContain(repoRoot);
-    expect(normalized).toContain(
-      'import("src/agents/agent-model-discovery", { with: { "resolution-mode": "import" } })',
+    expect(normalized).toContain('import("<repo>", { with: { "resolution-mode": "import" } })');
+    expect(
+      normalizePluginSdkApiDeclarationText(
+        repoRoot,
+        'type Owned = import("src/x").Foo; type External = import("node_modules/pkg/x").Foo; type Namespace = typeof import("src/x"); type ExternalNamespace = typeof import("node_modules/pkg/x");',
+      ),
+    ).toBe(
+      'type Owned = Foo; type External = import("node_modules/pkg/x").Foo; type Namespace = typeof import("<repo>"); type ExternalNamespace = typeof import("node_modules/pkg/x");',
     );
   });
 
@@ -256,9 +333,11 @@ describe("Plugin SDK API baseline", () => {
     expect(findDeclaration("SqliteTrajectoryRuntimeEventForTest")).toContain(
       "export type SqliteTrajectoryRuntimeEventForTest =",
     );
-    expect(findDeclaration("definePluginEntry")).toMatch(
-      /^\/\/ declaration closure: [a-f0-9]{64}/u,
-    );
+    expect(
+      rendered.baseline.modules
+        .flatMap((moduleSurface) => moduleSurface.exports)
+        .find((exportSurface) => exportSurface.exportName === "definePluginEntry")?.closureHash,
+    ).toMatch(/^[a-f0-9]{64}$/u);
     expect(findDeclaration("definePluginEntry")).toContain("DefinePluginEntryOptions");
     expect(findDeclaration("definePluginEntry")).toContain("DefinedPluginEntry");
     expect(findDeclaration("ProviderSelection")).toContain(
@@ -269,17 +348,23 @@ describe("Plugin SDK API baseline", () => {
     );
     expect(findDeclaration("SessionCatalogEntrySummary")).toContain("entry: SessionEntry;");
     expect(rendered.json).not.toContain('"line":');
-    expect(rendered.jsonl).not.toContain('"sourceLine":');
+    expect(rendered.json).toContain('"source": {');
+    const contract = rendered.contractFiles.map((file) => file.content).join("");
+    expect(contract).not.toContain('"sourceLine":');
+    expect(contract).not.toContain('"sourcePath":');
+    expect(contract).toContain('"contentHash":"');
+    expect(contract).not.toContain('"closureHash":"');
+    expect(contract).not.toContain("// declaration closure:");
   });
 
   it("renders snapshots independently of entrypoint discovery order", () => {
     const reverse = renderPluginSdkApiBaselineModules(rendered.baseline.modules.toReversed());
 
     expect(reverse.json).toBe(rendered.json);
-    expect(reverse.jsonl).toBe(rendered.jsonl);
+    expect(reverse.contractFiles).toEqual(rendered.contractFiles);
   });
 
-  it("hashes entrypoints independently so unrelated API changes merge", () => {
+  it("keeps unrelated module hashes byte-identical when one export changes", () => {
     const target = rendered.baseline.modules[0];
     expect(target?.exports.length).toBeGreaterThan(0);
     const changed = renderPluginSdkApiBaselineModules(
@@ -296,16 +381,278 @@ describe("Plugin SDK API baseline", () => {
           : moduleSurface,
       ),
     );
-    const before = computePluginSdkApiBaselineHashFileContent(rendered).split("\n");
-    const after = computePluginSdkApiBaselineHashFileContent(changed).split("\n");
+    const before = contractContents(rendered);
+    const after = contractContents(changed);
+    const changedFileNames = Object.keys(before).filter(
+      (fileName) => before[fileName] !== after[fileName],
+    );
 
-    expect(after[0]).not.toBe(before[0]);
-    expect(after.slice(1)).toEqual(before.slice(1));
+    expect(changedFileNames).toEqual([`${target?.entrypoint}.json`]);
+  });
+
+  it("writes one file per module and keeps adjacent edits merge- and patch-stable", () => {
+    const modules = rendered.baseline.modules;
+    const left = modules[0];
+    const right = modules[1];
+    expect(left?.exports.length).toBeGreaterThan(0);
+    expect(right?.exports.length).toBeGreaterThan(0);
+    expect(left?.entrypoint).not.toBe(right?.entrypoint);
+
+    const editModule = (target: typeof left, suffix: string) =>
+      renderPluginSdkApiBaselineModules(
+        modules.map((moduleSurface) =>
+          moduleSurface === target
+            ? {
+                ...moduleSurface,
+                exports: moduleSurface.exports.map((exportSurface, index) =>
+                  index === 0
+                    ? {
+                        ...exportSurface,
+                        declaration: `${exportSurface.declaration ?? ""} ${suffix}`,
+                      }
+                    : exportSurface,
+                ),
+              }
+            : moduleSurface,
+        ),
+      );
+    const ours = editModule(left, "left edit");
+    const theirs = editModule(right, "right edit");
+    const records = rendered.contractFiles.map((file) => JSON.parse(file.content));
+
+    expect(rendered.contractFiles).toHaveLength(modules.length);
+    expect(rendered.contractFiles.map((file) => file.fileName)).toEqual(
+      modules.map((moduleSurface) => `${moduleSurface.entrypoint}.json`),
+    );
+    expect(records.map((record) => record.importSpecifier)).toEqual(
+      modules.map((moduleSurface) => moduleSurface.importSpecifier),
+    );
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ contentHash: expect.stringMatching(/^[a-f0-9]{64}$/u) }),
+      ]),
+    );
+
+    const mergeDir = tempDirs.make("openclaw-plugin-sdk-api-merge-");
+    const contractDirectory = path.join(mergeDir, "plugin-sdk-api-baseline");
+    git(mergeDir, ["init", "-q", "--initial-branch=main"]);
+    writeContractFiles(contractDirectory, rendered);
+    git(mergeDir, ["add", "."]);
+    git(mergeDir, ["commit", "-qm", "base"]);
+    const baseRevision = git(mergeDir, ["rev-parse", "HEAD"]);
+
+    git(mergeDir, ["switch", "-qc", "feature"]);
+    fs.writeFileSync(
+      path.join(contractDirectory, `${left?.entrypoint}.json`),
+      contractContents(ours)[`${left?.entrypoint}.json`] ?? "",
+    );
+    git(mergeDir, ["add", "."]);
+    git(mergeDir, ["commit", "-qm", "feature"]);
+    const featureRevision = git(mergeDir, ["rev-parse", "HEAD"]);
+    const featurePatchId = stablePatchId(mergeDir, featureRevision);
+
+    git(mergeDir, ["switch", "-qc", "main-update", baseRevision]);
+    fs.writeFileSync(
+      path.join(contractDirectory, `${right?.entrypoint}.json`),
+      contractContents(theirs)[`${right?.entrypoint}.json`] ?? "",
+    );
+    git(mergeDir, ["add", "."]);
+    git(mergeDir, ["commit", "-qm", "main update"]);
+
+    git(mergeDir, ["switch", "-qc", "merge-check", featureRevision]);
+    git(mergeDir, ["merge", "-q", "--no-edit", "main-update"]);
+    git(mergeDir, ["switch", "-qc", "rebase-check", featureRevision]);
+    git(mergeDir, ["rebase", "main-update"]);
+
+    expect(stablePatchId(mergeDir, "HEAD")).toBe(featurePatchId);
+    expect(fs.readFileSync(path.join(contractDirectory, `${left?.entrypoint}.json`), "utf8")).toBe(
+      contractContents(ours)[`${left?.entrypoint}.json`],
+    );
+    expect(fs.readFileSync(path.join(contractDirectory, `${right?.entrypoint}.json`), "utf8")).toBe(
+      contractContents(theirs)[`${right?.entrypoint}.json`],
+    );
+  });
+
+  it("renders byte-identical contract files deterministically", async () => {
+    const firstRender = await renderPrivateDeclarationFixture();
+    const secondRender = await renderPrivateDeclarationFixture();
+
+    expect(secondRender.contractFiles).toEqual(firstRender.contractFiles);
+  });
+
+  it("checks and repairs modified, missing, and stale contract records", async () => {
+    const outputDir = tempDirs.make("openclaw-plugin-sdk-api-output-");
+    const contractDirectory = path.join(outputDir, "plugin-sdk-api-baseline");
+    const jsonPath = path.join(outputDir, "plugin-sdk-api-baseline.json");
+    const options = {
+      contractDirectory,
+      jsonPath,
+      rendered,
+    } as const;
+    await writeRenderedPluginSdkApiBaselineArtifacts(options);
+    const [modified, missing] = rendered.contractFiles;
+    if (!modified || !missing) {
+      throw new Error("Expected at least two rendered contract files");
+    }
+    fs.writeFileSync(path.join(contractDirectory, modified.fileName), "modified\n");
+    fs.unlinkSync(path.join(contractDirectory, missing.fileName));
+    fs.writeFileSync(path.join(contractDirectory, "stale.json"), "{}\n");
+
+    const drifted = await writeRenderedPluginSdkApiBaselineArtifacts({
+      ...options,
+      check: true,
+    });
+    expect(drifted).toEqual(
+      expect.objectContaining({
+        changed: true,
+        contractDiff: {
+          modified: [modified.fileName],
+          missing: [missing.fileName],
+          stale: ["stale.json"],
+        },
+        wrote: false,
+      }),
+    );
+
+    const repaired = await writeRenderedPluginSdkApiBaselineArtifacts(options);
+    expect(repaired.removedStaleCount).toBe(1);
+
+    const current = await writeRenderedPluginSdkApiBaselineArtifacts({
+      ...options,
+      check: true,
+    });
+    expect(current).toEqual(expect.objectContaining({ changed: false, wrote: false }));
+    expect(fs.existsSync(path.join(contractDirectory, "stale.json"))).toBe(false);
+    expect(fs.readFileSync(path.join(contractDirectory, modified.fileName), "utf8")).toBe(
+      modified.content,
+    );
+    expect(fs.readFileSync(path.join(contractDirectory, missing.fileName), "utf8")).toBe(
+      missing.content,
+    );
+    expect(fs.readFileSync(jsonPath, "utf8")).toContain(
+      '"generatedBy": "scripts/generate-plugin-sdk-api-baseline.ts"',
+    );
+  });
+
+  it("keeps hashes stable when reachable declarations move", async () => {
+    const baseline = await renderSourceFixture({
+      "fixture.ts": [
+        'import type { Leaf } from "./dep/leaf.js";',
+        "export declare function createFixture(value: Leaf): Leaf;",
+      ].join("\n"),
+      "dep/leaf.ts": "export type Leaf = { value: string };\n",
+    });
+    const moved = await renderSourceFixture({
+      "fixture.ts": [
+        'import type { Leaf } from "./moved/leaf.js";',
+        "export declare function createFixture(value: Leaf): Leaf;",
+      ].join("\n"),
+      "moved/leaf.ts": "export type Leaf = { value: string };\n",
+    });
+
+    expect(moved.contractFiles).toEqual(baseline.contractFiles);
+  });
+
+  it("includes globals from side-effect imports in closure hashes", async () => {
+    const render = (optionalValue: boolean) =>
+      renderSourceFixture({
+        "fixture.ts": [
+          'import "./ambient.js";',
+          "export declare function createFixture(value: OpenClawBaselineFixtureGlobal): void;",
+        ].join("\n"),
+        "ambient.ts": [
+          "declare global {",
+          `  interface OpenClawBaselineFixtureGlobal { value${optionalValue ? "?" : ""}: string }`,
+          "}",
+          "export {};",
+        ].join("\n"),
+      });
+    const baseline = await render(false);
+    const changed = await render(true);
+
+    expect(changed.baseline.modules[0]?.exports[0]?.closureHash).not.toBe(
+      baseline.baseline.modules[0]?.exports[0]?.closureHash,
+    );
+  });
+
+  it("keeps hashes stable when unqualified repo import types move", async () => {
+    const baseline = await renderSourceFixture({
+      "fixture.ts": 'export declare const fixture: typeof import("./dep/mod.js");\n',
+      "dep/mod.ts": "export const value = 1;\n",
+    });
+    const moved = await renderSourceFixture({
+      "fixture.ts": 'export declare const fixture: typeof import("./moved/mod.js");\n',
+      "moved/mod.ts": "export const value = 1;\n",
+    });
+
+    expect(moved.contractFiles).toEqual(baseline.contractFiles);
+  });
+
+  it("ignores unreachable transitive declaration changes", async () => {
+    const render = (extra = "") =>
+      renderSourceFixture({
+        "fixture.ts": [
+          'import type { Bridge } from "./bridge.js";',
+          "export declare function createFixture(value: Bridge): Bridge;",
+        ].join("\n"),
+        "bridge.ts": [
+          'import type { Shared } from "./shared.js";',
+          "export type Bridge = { shared: Shared };",
+        ].join("\n"),
+        "shared.ts": `export type Shared = { value: string };\n${extra}`,
+      });
+    const baseline = await render();
+    const unrelated = await render("export type TelegramProbe = { ignored: boolean };\n");
+
+    expect(unrelated.contractFiles).toEqual(baseline.contractFiles);
+  });
+
+  it("keeps cycle members complete across cached export walks", async () => {
+    const render = (optionalMarker: boolean) =>
+      renderSourceFixture(
+        {
+          "cycle-a.ts": [
+            'import type { A } from "./a.js";',
+            "export declare function first(value: A): A;",
+          ].join("\n"),
+          "cycle-b.ts": [
+            'import type { B } from "./b.js";',
+            "export declare function second(value: B): B;",
+          ].join("\n"),
+          "a.ts": [
+            'import type { B } from "./b.js";',
+            `export type A = { marker${optionalMarker ? "?" : ""}: string; b?: B };`,
+          ].join("\n"),
+          "b.ts": [
+            'import type { A } from "./a.js";',
+            "export type B = { value: string; a?: A };",
+          ].join("\n"),
+        },
+        ["cycle-a", "cycle-b"],
+      );
+    const baseline = await render(false);
+    const changed = await render(true);
+    const closureHash = (result: PluginSdkApiBaselineRender) =>
+      result.baseline.modules.find((moduleSurface) => moduleSurface.entrypoint === "cycle-b")
+        ?.exports[0]?.closureHash;
+
+    expect(closureHash(changed)).not.toBe(closureHash(baseline));
+  });
+
+  it("ignores unrelated declarations beside an aliased re-export", async () => {
+    const render = (extra = "") =>
+      renderSourceFixture({
+        "fixture.ts": 'export { internalLeaf as publicLeaf } from "./dep.js";\n',
+        "dep.ts": `export type internalLeaf = { value: string };\n${extra}`,
+      });
+    const baseline = await render();
+    const unrelated = await render("export type Unrelated = { ignored: boolean };\n");
+
+    expect(unrelated.contractFiles).toEqual(baseline.contractFiles);
   });
 
   it("captures transitive private declaration changes deterministically", async () => {
     const baseline = await renderPrivateDeclarationFixture();
-    const unchanged = await renderPrivateDeclarationFixture();
     const optionChanged = await renderPrivateDeclarationFixture({ optionalOption: true });
     const resultChanged = await renderPrivateDeclarationFixture({ optionalResult: true });
     const declaration = baseline.baseline.modules[0]?.exports[0];
@@ -317,25 +664,19 @@ describe("Plugin SDK API baseline", () => {
         source: { path: "src/plugin-sdk/fixture.ts" },
       }),
     );
-    expect(declaration?.declaration).toMatch(/^\/\/ declaration closure: [a-f0-9]{64}/u);
+    expect(declaration?.closureHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(declaration?.declaration).toContain("FixtureOptions");
     expect(declaration?.declaration).toContain("FixtureResult");
     expect(declaration?.declaration).not.toContain("required: string;");
     expect(declaration?.declaration).not.toContain("value: string;");
     expect(declaration?.declaration).not.toContain("externalOnly: string;");
-    expect(unchanged.json).toBe(baseline.json);
-    expect(unchanged.jsonl).toBe(baseline.jsonl);
-    expect(computePluginSdkApiBaselineHashFileContent(unchanged)).toBe(
-      computePluginSdkApiBaselineHashFileContent(baseline),
-    );
 
     for (const changed of [optionChanged, resultChanged]) {
-      expect(changed.baseline.modules[0]?.exports[0]?.declaration).not.toBe(
-        declaration?.declaration,
+      expect(changed.baseline.modules[0]?.exports[0]?.declaration).toBe(declaration?.declaration);
+      expect(changed.baseline.modules[0]?.exports[0]?.closureHash).not.toBe(
+        declaration?.closureHash,
       );
-      expect(computePluginSdkApiBaselineHashFileContent(changed)).not.toBe(
-        computePluginSdkApiBaselineHashFileContent(baseline),
-      );
+      expect(changed.contractFiles).not.toEqual(baseline.contractFiles);
     }
   });
 });
