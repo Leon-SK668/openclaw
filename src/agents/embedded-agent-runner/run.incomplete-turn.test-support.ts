@@ -10,10 +10,8 @@ import type { FailoverReason } from "../failover/signal.js";
 import type { AgentHarness } from "../harness/types.js";
 import { buildEmbeddedRunBlockedResult } from "./run/blocked-run-result.js";
 import { createEmbeddedRunContextRecoveryState } from "./run/context-recovery-state.js";
-import {
-  resolveReplayInvalidFlag,
-  shouldRetrySilentErrorAssistantTurn,
-} from "./run/incomplete-turn.js";
+import { shouldRetrySilentErrorAssistantTurn } from "./run/incomplete-turn-recovery.js";
+import { resolveReplayInvalidFlag } from "./run/incomplete-turn-resolution.js";
 import type { RunEmbeddedAgentParams } from "./run/params.js";
 import { normalizeEmbeddedRunAttemptResult } from "./run/run-attempt-result.js";
 import { prepareTerminalWithSettledTurnFinalization } from "./run/settled-turn-finalization.js";
@@ -92,7 +90,7 @@ export const mockedIsRateLimitAssistantError = vi.fn(
 );
 export const mockedRunEmbeddedAttempt =
   vi.fn<(params: unknown) => Promise<EmbeddedRunAttemptResult>>();
-export const mockedResolveModelAsync = vi.fn(async (provider?: string, modelId?: string) =>
+const mockedResolveModelAsync = vi.fn(async (provider?: string, modelId?: string) =>
   createResolvedModel(provider, modelId),
 );
 export const mockedSleepWithAbort = vi.fn(
@@ -411,9 +409,10 @@ async function runIncompleteTurnOwnerHarnessWithContext(
       attemptCompactionCount: finalized.attemptCompactionCount,
       replayState: { replayInvalid, hadPotentialSideEffects },
       activePromptPersisted,
-      activateInternalPrompt: (prompt, persisted) => {
+      activateInternalPrompt: (prompt) => {
         nextPrompt = prompt;
-        nextPromptPersisted = persisted;
+        nextPromptPersisted = true;
+        suppressNextUserMessagePersistence = true;
         skipPreparedUserTurnMessage = true;
       },
       setSuppressNextUserMessagePersistence: (value) => {
