@@ -74,6 +74,13 @@ describe("method scope resolution", () => {
     ["worktrees.list", ["operator.read"]],
     ["worktrees.branches", ["operator.write"]],
     ["worktrees.create", ["operator.admin"]],
+    ["projects.list", ["operator.read"]],
+    ["users.prefs.get", ["operator.read"]],
+    ["users.prefs.set", ["operator.write"]],
+    ["projects.register", ["operator.admin"]],
+    ["projects.remove", ["operator.admin"]],
+    ["projects.add", ["operator.write"]],
+    ["projects.searchRemote", ["operator.read"]],
     ["sessions.groups.list", ["operator.read"]],
     ["sessions.groups.put", ["operator.write"]],
     ["sessions.groups.rename", ["operator.write"]],
@@ -87,6 +94,7 @@ describe("method scope resolution", () => {
     ["session.discussion.open", ["operator.write"]],
     ["environments.status", ["operator.read"]],
     ["diagnostics.stability", ["operator.read"]],
+    ["gateway.restart.preflight", ["operator.read"]],
     ["skills.curator.status", ["operator.read"]],
     ["hooks.status", ["operator.read"]],
     ["skills.curator.pin", ["operator.admin"]],
@@ -100,11 +108,7 @@ describe("method scope resolution", () => {
     ["talk.client.toolCall", ["operator.talk"]],
     ["talk.client.steer", ["operator.talk"]],
     ["talk.session.create", ["operator.talk"]],
-    ["talk.session.join", ["operator.talk"]],
     ["talk.session.appendAudio", ["operator.talk"]],
-    ["talk.session.startTurn", ["operator.talk"]],
-    ["talk.session.endTurn", ["operator.talk"]],
-    ["talk.session.cancelTurn", ["operator.talk"]],
     ["talk.session.cancelOutput", ["operator.talk"]],
     ["talk.session.acknowledgeMark", ["operator.talk"]],
     ["talk.session.submitToolResult", ["operator.talk"]],
@@ -112,6 +116,9 @@ describe("method scope resolution", () => {
     ["talk.session.close", ["operator.talk"]],
     ["update.status", ["operator.admin"]],
     ["update.hold", ["operator.admin"]],
+    ["secrets.store.list", ["operator.admin"]],
+    ["secrets.store.set", ["operator.admin"]],
+    ["secrets.store.delete", ["operator.admin"]],
     ["config.schema", ["operator.admin"]],
     ["config.patch", ["operator.admin"]],
     ["nativeHook.invoke", ["operator.admin"]],
@@ -390,6 +397,16 @@ describe("method scope resolution", () => {
         nodeId: "macbook",
       }),
     ).toEqual({ allowed: false, missingScope: "operator.admin" });
+  });
+
+  it("keeps sessions.create project IDs at write scope", () => {
+    const params = { projectId: "openclaw", worktree: true };
+    expect(resolveLeastPrivilegeOperatorScopesForMethod("sessions.create", params)).toEqual([
+      "operator.write",
+    ]);
+    expect(authorizeOperatorScopesForMethod("sessions.create", ["operator.write"], params)).toEqual(
+      { allowed: true },
+    );
   });
 
   it("requires admin for incognito session creation and inheritance", () => {
@@ -701,11 +718,7 @@ describe("operator scope authorization", () => {
       "talk.client.toolCall",
       "talk.client.steer",
       "talk.session.create",
-      "talk.session.join",
       "talk.session.appendAudio",
-      "talk.session.startTurn",
-      "talk.session.endTurn",
-      "talk.session.cancelTurn",
       "talk.session.cancelOutput",
       "talk.session.acknowledgeMark",
       "talk.session.submitToolResult",
@@ -853,6 +866,7 @@ describe("core gateway method classification", () => {
     expect(isGatewayMethodClassified("node.pluginSurface.refresh")).toBe(true);
     expect(isGatewayMethodClassified("node.pluginTools.update")).toBe(true);
     expect(isGatewayMethodClassified("node.skills.update")).toBe(true);
+    expect(isGatewayMethodClassified("node.protocolFeatures.update")).toBe(true);
   });
 
   it("classifies every exposed core gateway handler method", () => {

@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vite
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.types.js";
+import { createSessionsHistoryTool } from "../agents/tools/sessions-history-tool.js";
 import type { GetReplyOptions } from "../auto-reply/get-reply-options.types.js";
 import { HEARTBEAT_PROMPT } from "../auto-reply/heartbeat.js";
 import type { InternalGetReplyOptions } from "../auto-reply/reply/get-reply.types.js";
@@ -18,7 +19,7 @@ import {
   loadSessionEntry,
   loadExactSessionEntry,
   loadTranscriptEventsSync,
-  patchSessionEntry,
+  patchSessionEntryCore,
   replaceTranscriptEvents,
   replaceSessionEntry,
   withTranscriptWriteLock,
@@ -35,6 +36,7 @@ import {
   isSessionWorkAdmissionActive,
   runExclusiveSessionLifecycleMutation,
 } from "../sessions/session-lifecycle-admission.js";
+import { buildPersistedUserTurnMessage } from "../sessions/user-turn-transcript.js";
 import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import { captureEnv, setTestEnvValue } from "../test-utils/env.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -54,7 +56,7 @@ import {
   connectOk,
   createGatewaySuiteHarness,
   dispatchInboundMessageMock,
-  getReplyFromConfig,
+  gatewayReplyMock,
   installGatewayTestHooks,
   mockGetReplyFromConfigOnce,
   onceMessage,
@@ -65,7 +67,7 @@ import {
 
 const restartRecoveryMocks = vi.hoisted(() => ({
   retryRestartAbortedMainSessionRecovery: vi.fn<
-    typeof import("../agents/main-session-restart-recovery.js").retryRestartAbortedMainSessionRecovery
+    typeof import("../agents/main-session-recovery/main-session-restart-recovery.js").retryRestartAbortedMainSessionRecovery
   >(async () => ({
     recovered: 0,
     failed: 1,
@@ -73,15 +75,20 @@ const restartRecoveryMocks = vi.hoisted(() => ({
   })),
 }));
 
-vi.mock("../agents/main-session-restart-recovery.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../agents/main-session-restart-recovery.js")>();
-  return {
-    ...actual,
-    retryRestartAbortedMainSessionRecovery:
-      restartRecoveryMocks.retryRestartAbortedMainSessionRecovery,
-  };
-});
+vi.mock(
+  "../agents/main-session-recovery/main-session-restart-recovery.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../agents/main-session-recovery/main-session-restart-recovery.js")
+      >();
+    return {
+      ...actual,
+      retryRestartAbortedMainSessionRecovery:
+        restartRecoveryMocks.retryRestartAbortedMainSessionRecovery,
+    };
+  },
+);
 
 installGatewayTestHooks({ scope: "suite" });
 const FAST_WAIT_OPTS = { timeout: 2_000, interval: 1 } as const;
@@ -896,13 +903,15 @@ describe("gateway server chat", () => {
     }
   });
 
-  test("chat.history exposes persisted and synthetic session metadata for startup hydration", async () => {
+  test("chat.history exposes selected and synthetic session metadata for startup hydration", async () => {
     await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
       await connectOk(ws);
       await createSessionDir();
       const updatedAt = Date.now();
       await writeStoredMainSession({
         updatedAt,
+        providerOverride: "openai",
+        modelOverride: "gpt-5",
         modelProvider: "openai",
         model: "gpt-5",
         contextTokens: 128_000,
@@ -1062,9 +1071,11 @@ describe("gateway server chat", () => {
         routeVariants: [],
       })),
     });
+    testState.agentsConfig = config.agents;
     openDirectChatSession();
     try {
       await writeSessionStore({
+        agentId: "work",
         entries: { "agent:work:main": { sessionId: "sess-work", updatedAt: Date.now() } },
       });
       const responses: Array<{ ok: boolean; payload?: unknown; error?: unknown }> = [];
@@ -1075,12 +1086,13 @@ describe("gateway server chat", () => {
         context,
       });
 
-      expect(responses[0]?.ok).toBe(true);
+      expect(responses[0]?.ok, JSON.stringify(responses[0])).toBe(true);
       expect(
         (responses[0]?.payload as { metadata?: { models?: unknown[] } })?.metadata?.models,
       ).toBe(undefined);
       expect(context.loadGatewayModelCatalogSnapshot).not.toHaveBeenCalled();
     } finally {
+      testState.agentsConfig = undefined;
       testState.sessionStorePath = undefined;
     }
   });
@@ -1445,7 +1457,7 @@ describe("gateway server chat", () => {
               }
             | undefined;
           expect(payload?.metadata?.models).toEqual([
-            {
+            expect.objectContaining({
               id: "gpt-5.5",
               name: "GPT-5.5",
               provider: "openai",
@@ -1453,7 +1465,7 @@ describe("gateway server chat", () => {
               contextWindow: 400_000,
               reasoning: false,
               available: true,
-            },
+            }),
           ]);
           expect(payload?.sessionInfo?.thinkingLevels?.map((level) => level.id)).toEqual(["off"]);
           expect(payload?.defaults?.thinkingLevels?.map((level) => level.id)).toEqual(["off"]);
@@ -3002,7 +3014,7 @@ describe("gateway server chat", () => {
       });
       expect(stored?.restartRecoveryDeliveryContext).toBeUndefined();
       if (retryable) {
-        expect(stored?.restartRecoveryBeforeAgentReplyState).toBe("admitted");
+        expect(stored?.restartRecoveryBeforeAgentReplyState).toBeUndefined();
         expect(stored?.restartRecoveryDeliveryRequestFingerprint).toEqual(
           expect.stringMatching(/^hmac-sha256:v1:/u),
         );
@@ -3178,7 +3190,7 @@ describe("gateway server chat", () => {
       });
       restartRecoveryMocks.retryRestartAbortedMainSessionRecovery.mockImplementationOnce(
         async ({ sessionKey, storePath: recoveryStorePath }) => {
-          await patchSessionEntry({ sessionKey, storePath: recoveryStorePath }, () => ({
+          await patchSessionEntryCore({ sessionKey, storePath: recoveryStorePath }, () => ({
             abortedLastRun: false,
             updatedAt: Date.now(),
           }));
@@ -3245,7 +3257,7 @@ describe("gateway server chat", () => {
         () => expect(context.dedupe.has(pendingChatSendDedupeKey(idempotencyKey))).toBe(true),
         FAST_WAIT_OPTS,
       );
-      await patchSessionEntry({ sessionKey: "agent:main:main", storePath }, () => ({
+      await patchSessionEntryCore({ sessionKey: "agent:main:main", storePath }, () => ({
         restartRecoveryTerminalRunIds: [idempotencyKey],
         updatedAt: Date.now(),
       }));
@@ -3316,7 +3328,7 @@ describe("gateway server chat", () => {
       });
       restartRecoveryMocks.retryRestartAbortedMainSessionRecovery.mockImplementationOnce(
         async ({ sessionKey, storePath: recoveryStorePath }) => {
-          await patchSessionEntry({ sessionKey, storePath: recoveryStorePath }, () => ({
+          await patchSessionEntryCore({ sessionKey, storePath: recoveryStorePath }, () => ({
             sessionId: "replacement-session",
             restartRecoveryDeliveryRunId: "replacement-recovery",
             restartRecoveryDeliverySourceRunId: "replacement-source",
@@ -4787,7 +4799,7 @@ describe("gateway server chat", () => {
 
   test("chat.send does not force-disable block streaming", async () => {
     await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
-      const spy = getReplyFromConfig;
+      const spy = gatewayReplyMock;
       await connectOk(ws);
 
       await createSessionDir();
@@ -4830,7 +4842,7 @@ describe("gateway server chat", () => {
     try {
       await withGatewayChatHarness(
         async ({ ws, createSessionDir }) => {
-          const spy = getReplyFromConfig;
+          const spy = gatewayReplyMock;
           await connectOk(ws, makeGatewayWebchatClient());
 
           await createSessionDir();
@@ -4959,7 +4971,7 @@ describe("gateway server chat", () => {
   test("chat.send forwards Control UI reconnect resume internally", async () => {
     await withGatewayChatHarness(
       async ({ ws, createSessionDir }) => {
-        const spy = getReplyFromConfig;
+        const spy = gatewayReplyMock;
         await connectOk(ws, makeGatewayWebchatClient());
 
         await createSessionDir();
@@ -4998,7 +5010,7 @@ describe("gateway server chat", () => {
   test("chat.send forwards one-turn queue mode overrides internally", async () => {
     await withGatewayChatHarness(
       async ({ ws, createSessionDir }) => {
-        const spy = getReplyFromConfig;
+        const spy = gatewayReplyMock;
         await connectOk(ws, makeGatewayWebchatClient());
 
         await createSessionDir();
@@ -5065,6 +5077,190 @@ describe("gateway server chat", () => {
     });
   });
 
+  test("projects persisted media facts through Gateway history and sessions_history", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await prepareMainHistoryHarness({ ws, createSessionDir });
+      const invalidClaims = [
+        "media://inbound/nested/file.png",
+        "media://inbound/nested%2Ffile.png",
+        "media://inbound/nested%5Cfile.png",
+        "media://inbound/file%00.png",
+        "media://inbound/",
+        "media://inbound/.",
+        "media://inbound/..",
+        ["media://user", "password@inbound/claim.png"].join(":"),
+        "media://inbound/claim.png?signature=private-secret",
+        "media://inbound/claim.png#private-fragment",
+      ];
+      const persisted = buildPersistedUserTurnMessage({
+        text: "inspect mixed attachments",
+        timestamp: Date.now(),
+        media: [
+          {
+            kind: "video",
+            url: "media://inbound/video-claim",
+            contentType: "video/mp4",
+            fileName: "managed-video.mp4",
+            durationMs: 5678,
+          },
+          {
+            kind: "image",
+            url: "media://inbound/image-claim",
+            contentType: "image/png",
+            fileName: "managed-image.png",
+            width: 640,
+            height: 480,
+          },
+          {
+            kind: "image",
+            path: "/private/media/local-image.png",
+            workspaceDir: "/private/workspace",
+            contentType: "image/png",
+            fileName: "local-image.png",
+            sizeBytes: 42,
+            width: 640,
+            height: 480,
+            messageId: "local-source-id",
+          },
+          {
+            kind: "audio",
+            url: "https://media-user@media.example/audio.wav?signature=private-signature#audio-fragment",
+            contentType: "audio/wav",
+            fileName: "remote-audio.wav",
+            durationMs: 1234,
+          },
+          {
+            kind: "document",
+            url: "not a media reference",
+            contentType: "application/pdf",
+            fileName: "metadata-only.pdf",
+          },
+          ...invalidClaims.map((claim, index) => ({
+            kind: "image" as const,
+            path: claim,
+            contentType: "image/png",
+            fileName: `invalid-claim-${index}.png`,
+          })),
+        ],
+        mediaImageLayout: { slots: [{ kind: "offloaded", factIndex: 1 }] },
+      }) as unknown as Record<string, unknown>;
+      const metadata = persisted["__openclaw"] as Record<string, unknown>;
+      const facts = metadata.media as Array<Record<string, unknown>>;
+      Object.assign(expectDefined(facts[2], "local media fact"), {
+        data: "private-inline-data",
+        blob: "private-inline-blob",
+        filePath: "/private/media/alternate-image.png",
+        source: "telegram-attachment-1",
+      });
+      metadata.upstreamUserText = "private upstream prompt";
+      metadata.keepMe = { durable: true };
+      await writeMainSessionTranscript([{ id: "persisted-media", message: persisted }]);
+
+      const historyMessages = await fetchHistoryMessages(ws);
+      const tool = createSessionsHistoryTool({
+        config: {},
+        callGateway: async <T = Record<string, unknown>>(request: {
+          method: string;
+          params?: unknown;
+        }) => {
+          const response = await rpcReq<T & Record<string, unknown>>(
+            ws,
+            request.method,
+            request.params,
+          );
+          expect(response.ok).toBe(true);
+          return expectDefined(response.payload, `${request.method} payload`);
+        },
+      });
+      const toolResult = await tool.execute("persisted-media", { sessionKey: "main" });
+      const sessionsHistory = (toolResult.details as { messages: unknown[] }).messages;
+
+      for (const [boundary, messages] of [
+        ["chat.history", historyMessages],
+        ["sessions_history", sessionsHistory],
+      ] as const) {
+        expect(messages, boundary).toHaveLength(1);
+        expect(messages[0], boundary).toMatchObject({
+          role: "user",
+          content: "inspect mixed attachments",
+          __openclaw: {
+            keepMe: { durable: true },
+            mediaImageLayout: { slots: [{ kind: "offloaded", factIndex: 1 }] },
+            media: [
+              {
+                kind: "video",
+                url: "media://inbound/video-claim",
+                contentType: "video/mp4",
+                fileName: "managed-video.mp4",
+                durationMs: 5678,
+              },
+              {
+                kind: "image",
+                url: "media://inbound/image-claim",
+                contentType: "image/png",
+                fileName: "managed-image.png",
+                width: 640,
+                height: 480,
+              },
+              {
+                kind: "image",
+                contentType: "image/png",
+                fileName: "local-image.png",
+                sizeBytes: 42,
+                width: 640,
+                height: 480,
+                messageId: "local-source-id",
+                source: "telegram-attachment-1",
+              },
+              {
+                kind: "audio",
+                url: "https://media.example/audio.wav",
+                contentType: "audio/wav",
+                fileName: "remote-audio.wav",
+                durationMs: 1234,
+              },
+              {
+                kind: "document",
+                contentType: "application/pdf",
+                fileName: "metadata-only.pdf",
+              },
+              ...invalidClaims.map((_, index) => ({
+                kind: "image",
+                contentType: "image/png",
+                fileName: `invalid-claim-${index}.png`,
+              })),
+            ],
+          },
+        });
+        const projectedMedia = (
+          (messages[0] as { __openclaw?: { media?: Array<Record<string, unknown>> } })["__openclaw"]
+            ?.media ?? []
+        ).map((fact) => fact.path ?? fact.url ?? null);
+        expect(projectedMedia, boundary).toEqual([
+          "media://inbound/video-claim",
+          "media://inbound/image-claim",
+          null,
+          "https://media.example/audio.wav",
+          ...Array.from({ length: invalidClaims.length + 1 }, () => null),
+        ]);
+        const serialized = JSON.stringify(messages);
+        for (const privateValue of [
+          "/private/media",
+          "/private/workspace",
+          "private-inline-data",
+          "private-inline-blob",
+          "media-user",
+          "private-signature",
+          "audio-fragment",
+          "private upstream prompt",
+          "not a media reference",
+        ]) {
+          expect(serialized, `${boundary}: ${privateValue}`).not.toContain(privateValue);
+        }
+      }
+    });
+  });
+
   test("chat.history keeps recent messages within the production byte budget", async () => {
     await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
       await prepareMainHistoryHarness({ ws, createSessionDir });
@@ -5102,7 +5298,7 @@ describe("gateway server chat", () => {
     });
   });
 
-  test("chat.history advances past an oversized newest record when the tail parses empty", async () => {
+  test("chat.history serves older history past an oversized newest record", async () => {
     await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
       await prepareMainHistoryHarness({ ws, createSessionDir });
       const historyMaxBytes = getMaxChatHistoryMessagesBytes();
@@ -5122,18 +5318,9 @@ describe("gateway server chat", () => {
         hasMore?: boolean;
       }>(ws, "chat.history", makeMainSessionParams({ limit: 1 }));
       expect(firstPage.ok).toBe(true);
-      expect(firstPage.payload?.messages).toEqual([]);
-      expect(firstPage.payload?.hasMore).toBe(true);
-      expect(firstPage.payload?.nextOffset).toBe(1);
-
-      const olderPage = await rpcReq<{ messages?: unknown[]; hasMore?: boolean }>(
-        ws,
-        "chat.history",
-        makeMainSessionParams({ limit: 1, offset: firstPage.payload?.nextOffset }),
-      );
-      expect(olderPage.ok).toBe(true);
-      expect(JSON.stringify(olderPage.payload?.messages)).toContain("reachable older message");
-      expect(olderPage.payload?.hasMore).toBe(false);
+      expect(JSON.stringify(firstPage.payload?.messages)).toContain("reachable older message");
+      expect(firstPage.payload?.hasMore).toBe(false);
+      expect(firstPage.payload?.nextOffset).toBeUndefined();
     });
   });
 
@@ -5465,7 +5652,9 @@ describe("gateway server chat", () => {
       await writeGatewayConfig({
         session: { scope: "global" },
         agents: {
-          entries: { main: { default: true }, work: {} },
+          ownership: "explicit",
+          defaults: { sessionStore: { agentId: "work" } },
+          entries: { main: {}, work: {} },
         },
       });
       await connectOk(ws);
@@ -5640,6 +5829,83 @@ describe("gateway server chat", () => {
       expect(JSON.stringify(messages)).toContain("visible question");
       expect(JSON.stringify(messages)).toContain("visible answer");
       expect(JSON.stringify(messages)).not.toContain("NO_REPLY");
+    });
+  });
+
+  // A silent tail longer than the bounded raw window used to project to an empty
+  // first page while the branch still held visible turns, and snapshot clients
+  // erase their rendered conversation when that page comes back empty.
+  test.each([
+    { name: "tail request", params: { limit: 2, maxChars: 100 } },
+    { name: "explicit first page", params: { limit: 2, maxChars: 100, offset: 0 } },
+  ])(
+    "chat.history recovers visible history when the raw tail window is entirely silent ($name)",
+    async ({ params }) => {
+      await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+        await prepareMainHistoryHarness({ ws, createSessionDir });
+        // limit 2 reads at most 2 * 20 + 20 raw records, so 80 silent records
+        // push every visible turn out of the tail window.
+        const silentTail = Array.from({ length: 80 }, (_, index) =>
+          createTextTranscriptEvent("assistant", "NO_REPLY", {
+            timestamp: Date.now() + index + 2,
+          }),
+        );
+        await writeMainSessionTranscript([
+          createTextTranscriptEvent("user", "visible question", { timestamp: Date.now() }),
+          createTextTranscriptEvent("assistant", "visible answer", { timestamp: Date.now() + 1 }),
+          ...silentTail,
+        ]);
+
+        const page = await rpcReq<{ messages?: unknown[]; hasMore?: boolean }>(
+          ws,
+          "chat.history",
+          makeMainSessionParams(params),
+        );
+        expect(page.ok).toBe(true);
+        expect(JSON.stringify(page.payload?.messages)).toContain("visible question");
+        expect(JSON.stringify(page.payload?.messages)).toContain("visible answer");
+        expect(JSON.stringify(page.payload?.messages)).not.toContain("NO_REPLY");
+        expect(page.payload?.hasMore).toBe(false);
+      });
+    },
+  );
+
+  test("chat.history overreads context while scanning past a silent tail", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await prepareMainHistoryHarness({ ws, createSessionDir });
+      const sessionStartedAt = Date.now();
+      await writeSessionStore({
+        entries: {
+          main: { sessionId: "sess-main", updatedAt: Date.now(), sessionStartedAt },
+        },
+      });
+      // limit 2 reads a 60-record tail, and the scan then walks 100-record
+      // chunks, so record 239 of 400 is the first chunk's context boundary.
+      const silent = (index: number, count: number) =>
+        Array.from({ length: count }, (_, offset) =>
+          createTextTranscriptEvent("assistant", "NO_REPLY", {
+            timestamp: sessionStartedAt + index + offset,
+          }),
+        );
+      await writeMainSessionTranscript([
+        createTextTranscriptEvent("user", "oldest visible question", {
+          timestamp: sessionStartedAt + 1,
+        }),
+        ...silent(2, 238),
+        createTextTranscriptEvent("user", "stale announce", {
+          timestamp: sessionStartedAt - 2_000,
+          message: { provenance: { kind: "inter_session", sourceTool: "subagent_announce" } },
+        }),
+        createTextTranscriptEvent("assistant", "stale announce reply", {
+          timestamp: sessionStartedAt - 1_000,
+        }),
+        ...silent(300, 159),
+      ]);
+
+      const messages = await fetchHistoryMessages(ws, { limit: 2, maxChars: 100 });
+      const serialized = JSON.stringify(messages);
+      expect(serialized).toContain("oldest visible question");
+      expect(serialized).not.toContain("stale announce reply");
     });
   });
 
@@ -6127,7 +6393,7 @@ describe("gateway server chat", () => {
 
   test("smoke: supports abort and idempotent completion", async () => {
     await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
-      const spy = getReplyFromConfig;
+      const spy = gatewayReplyMock;
       let aborted = false;
       await connectOk(ws);
 
