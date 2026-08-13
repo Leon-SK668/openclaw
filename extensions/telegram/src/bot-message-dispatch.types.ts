@@ -35,7 +35,7 @@ export type DispatchTelegramMessageParams = {
   textLimit: number;
   telegramCfg: TelegramAccountConfig;
   telegramDeps?: TelegramBotDeps;
-  opts: Pick<TelegramBotOptions, "token" | "mediaMaxMb">;
+  opts: Pick<TelegramBotOptions, "token" | "mediaMaxMb" | "ownerAgentId">;
   retryDispatchErrors?: boolean;
   suppressFailureFallback?: boolean;
   /**
@@ -246,6 +246,7 @@ export type TelegramDispatchTurn = TelegramDispatchTurnConfig &
   TelegramDeliveryStateSlice &
   TelegramReplyStateSlice & {
     queuedFinal: boolean;
+    agentRunFailed?: boolean;
     noVisibleReplyFallbackEligible: boolean;
     suppressSilentReplyFallback: boolean;
     hadErrorReplyFailureOrSkip: boolean;
