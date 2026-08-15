@@ -69,8 +69,6 @@ const CONTINUATION_CODE_VALUE_SUFFIX_PATTERN =
   /^\s+(?:(?:in|into|on)\s+(?:the\s+)?(?:browser|app|client)|to\s+continue)\b/i;
 const PLAIN_CODE_LABEL_PREFIX_PATTERN = /^\s*code\s*[:=]\s*$/i;
 const CODE_VALUE_PATTERN = /^(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
-const INLINE_CODE_VALUE_PATTERN =
-  /^(?=[A-Z0-9-]*(?:\d|-))(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
 // Common terminal labels are command diagnostics, not device codes.
 const CRON_OUTPUT_STATUS_LINE_PATTERN =
   /^(?:status|result|(?:(?:status|job|result|test|tests|make|task|command|process|run|build|step)(?:\s*:\s*|\s+))?(?:success|succeeded|failed|failure|passed|skipped|complete|completed|cancelled|canceled|finished|pending|queued|running|started|waiting|timeout|timed out|warning|error|aborted|blocked|paused|retrying|stopped|terminated))$/i;
@@ -92,7 +90,7 @@ function isYourCodeIsPrompt(line: string): boolean {
     return true;
   }
   const genericValue = YOUR_CODE_IS_PATTERN.exec(line)?.[1];
-  return Boolean(genericValue && INLINE_CODE_VALUE_PATTERN.test(genericValue));
+  return Boolean(genericValue && CODE_VALUE_PATTERN.test(genericValue));
 }
 
 function isCronCommandCodePromptExplanationLine(line: string): boolean {
@@ -181,7 +179,7 @@ function maskCodePromptTextForScan(line: string): string {
   let masked = line;
   const codeIsPatterns = [
     { pattern: QUALIFIED_YOUR_CODE_IS_PATTERN, valuePattern: CODE_VALUE_PATTERN },
-    { pattern: YOUR_CODE_IS_PATTERN, valuePattern: INLINE_CODE_VALUE_PATTERN },
+    { pattern: YOUR_CODE_IS_PATTERN, valuePattern: CODE_VALUE_PATTERN },
   ];
   for (const { pattern, valuePattern } of codeIsPatterns) {
     const globalPattern = new RegExp(pattern.source, "gi");

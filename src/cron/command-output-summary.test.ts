@@ -420,6 +420,7 @@ describe("cron command output summaries", () => {
     expect(isCronCommandActionCriticalLine("Use this code:")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your code: 482913")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your code is ABCD-EFGH")).toBe(true);
+    expect(isCronCommandActionCriticalLine("Your code is WDJBMJHT")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your code is 482913")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your device code is ABCD-EFGH")).toBe(true);
     expect(isCronCommandActionCriticalLine("Your device code is WDJBMJHT")).toBe(true);
@@ -428,8 +429,8 @@ describe("cron command output summaries", () => {
     expect(isCronCommandActionCriticalLine("Use the code from the previous step")).toBe(false);
     expect(isCronCommandActionCriticalLine("Your code compiles successfully")).toBe(false);
     expect(isCronCommandActionCriticalLine("Your code is already formatted")).toBe(false);
-    expect(isCronCommandActionCriticalLine("YOUR CODE IS BROKEN")).toBe(false);
-    expect(isCronCommandActionCriticalLine("YOUR CODE IS ALREADY FORMATTED")).toBe(false);
+    expect(isCronCommandActionCriticalLine("YOUR CODE IS BROKEN")).toBe(true);
+    expect(isCronCommandActionCriticalLine("YOUR CODE IS ALREADY FORMATTED")).toBe(true);
   });
 
   it("redacts a space-separated letters code after a prompt", () => {
@@ -460,6 +461,7 @@ describe("cron command output summaries", () => {
 
   it.each([
     ["Your code is 482913.", "Your code is [redacted-code]."],
+    ["Your code is WDJBMJHT", "Your code is [redacted-code]"],
     ["Your code is ABCD-EFGH, paste it", "Your code is [redacted-code], paste it"],
     ["Your code is: 739214", "Your code is: [redacted-code]"],
   ])("redacts a punctuated generic code prompt: %s", (summary, expected) => {

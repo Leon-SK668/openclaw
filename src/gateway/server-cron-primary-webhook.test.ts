@@ -97,6 +97,7 @@ describe("sendGatewayCronWebhook", () => {
       "Visit https://example.com/device",
       "SUCCESS",
       "WDJBMJHT",
+      "Your code is PLMKNIJH",
       "Log in with token=opaque-secret-value",
     ].join("\n");
     const job = {
@@ -116,6 +117,7 @@ describe("sendGatewayCronWebhook", () => {
     expect(body.summary).not.toContain("https://example.com/device");
     expect(body.summary).toContain("SUCCESS");
     expect(body.summary).not.toContain("WDJBMJHT");
+    expect(body.summary).not.toContain("PLMKNIJH");
     expect(body.summary).not.toContain("opaque-secret-value");
   });
 });
