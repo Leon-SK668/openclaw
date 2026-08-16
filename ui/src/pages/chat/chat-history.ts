@@ -13,6 +13,7 @@ import type {
   SessionBranch,
   SessionsListResult,
 } from "../../api/types.ts";
+import { t } from "../../i18n/index.ts";
 import {
   isAssistantHeartbeatAckForDisplay,
   stripHeartbeatTokenForDisplay,
@@ -1766,6 +1767,26 @@ async function loadChatHistoryUncached(
       retainedPlan: planStatusBeforeStreamReset,
       sessionInfo: res.sessionInfo,
     });
+    if (
+      !state.chatRunId &&
+      !inFlightRunIsActive &&
+      Object.keys(runProjectionsBeforeApply).length === 0 &&
+      runProjectionsUnchanged(previousRunProjections, runProjectionsBeforeApply)
+    ) {
+      const sessionStatus = res.sessionInfo?.status;
+      if (!state.chatRunError && (sessionStatus === "failed" || sessionStatus === "timeout")) {
+        // Terminal session state survives reload. Only a fresh projection may
+        // restore it; retained runs prove the browser has a newer local outcome.
+        const summary =
+          res.sessionInfo?.lastRunError?.trim() ||
+          t(
+            sessionStatus === "timeout"
+              ? "sessionsView.runErrorTimedOut"
+              : "sessionsView.runErrorUnknown",
+          );
+        state.chatRunError = { summary };
+      }
+    }
     recordChatHistoryTiming(state, "applied", startedAtMs, {
       requestSessionKey: sessionKey,
       requestAgentId,

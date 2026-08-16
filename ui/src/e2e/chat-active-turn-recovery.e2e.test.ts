@@ -363,6 +363,61 @@ suite.define(() => {
     }
   });
 
+  it("restores a persisted timeout outcome after a full reload", async () => {
+    const context = await suite.newBrowserContext({
+      locale: "en-US",
+      serviceWorkers: "block",
+      viewport: { height: 900, width: 1280 },
+    });
+    const page = await context.newPage();
+    const timeoutSnapshot = {
+      messages: [{ role: "user", content: "Run the long task." }],
+      sessionId: "timed-out-session",
+      sessionInfo: {
+        activeRunIds: [],
+        endedAt: 2_000,
+        hasActiveRun: false,
+        key: "main",
+        kind: "direct",
+        lastRunError: "Chat run timed out after 10 minutes",
+        status: "timeout",
+        updatedAt: 2_000,
+      },
+    };
+    const gateway = await installMockGateway(page, {
+      methodResponses: {
+        "chat.history": timeoutSnapshot,
+        "chat.startup": timeoutSnapshot,
+        "sessions.list": {
+          count: 1,
+          defaults: { contextTokens: null, model: "gpt-5.5", modelProvider: "openai" },
+          path: "",
+          sessions: [timeoutSnapshot.sessionInfo],
+          ts: 2_000,
+        },
+      },
+    });
+
+    try {
+      await page.goto(`${suite.server.baseUrl}chat`);
+      const timeoutAlert = page.getByRole("alert").filter({
+        hasText: "Chat run timed out after 10 minutes",
+      });
+      await timeoutAlert.waitFor({ timeout: 10_000 });
+      await expect(page.locator(".chat-working-indicator")).toHaveCount(0);
+      await capture(page, "07-timeout-before-reload");
+
+      await page.reload();
+
+      await timeoutAlert.waitFor({ timeout: 10_000 });
+      await expect(page.locator(".chat-working-indicator")).toHaveCount(0);
+      await gateway.waitForRequest("chat.startup");
+      await capture(page, "08-timeout-after-reload");
+    } finally {
+      await suite.closeBrowserContext(context);
+    }
+  });
+
   it("preserves pre-steer commentary order through a full reload", async () => {
     const runId = "run-steer-refresh";
     const texts = {

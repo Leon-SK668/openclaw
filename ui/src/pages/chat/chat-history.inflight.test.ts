@@ -71,6 +71,133 @@ function activeHistory(runId: string): ChatHistoryResult {
 }
 
 describe("chat history in-flight assistant recovery", () => {
+  it.each([
+    {
+      name: "the timeout fallback",
+      sessionInfo: { status: "timeout" as const },
+      summary: "Timed out",
+    },
+    {
+      name: "the persisted failure reason",
+      sessionInfo: { status: "failed" as const, lastRunError: "Provider credits exhausted" },
+      summary: "Provider credits exhausted",
+    },
+  ])("restores $name from a terminal session snapshot", async ({ sessionInfo, summary }) => {
+    const state = createState({
+      messages: [],
+      sessionInfo: {
+        key: "main",
+        kind: "direct",
+        updatedAt: 1,
+        hasActiveRun: false,
+        activeRunIds: [],
+        ...sessionInfo,
+      },
+    });
+
+    await loadChatHistory(state);
+
+    expect(state.chatRunError).toEqual({ summary });
+    expect(state.chatRunId).toBeNull();
+  });
+
+  it("does not replace a newer local terminal error with an older history snapshot", async () => {
+    let resolveHistory!: (history: ChatHistoryResult) => void;
+    const history = new Promise<ChatHistoryResult>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const state = createState({ messages: [] });
+    state.client = {
+      request: vi.fn().mockReturnValue(history),
+    } as unknown as GatewayBrowserClient;
+    const load = loadChatHistory(state);
+    state.chatRunError = { summary: "Newer live failure" };
+    resolveHistory({
+      messages: [],
+      sessionInfo: {
+        key: "main",
+        kind: "direct",
+        updatedAt: 1,
+        hasActiveRun: false,
+        status: "timeout",
+      },
+    });
+
+    await load;
+
+    expect(state.chatRunError).toEqual({ summary: "Newer live failure" });
+  });
+
+  it("does not restore an older terminal snapshot after a newer run completes", async () => {
+    let resolveHistory!: (history: ChatHistoryResult) => void;
+    const history = new Promise<ChatHistoryResult>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const state = createState({ messages: [] });
+    state.client = {
+      request: vi.fn().mockReturnValue(history),
+    } as unknown as GatewayBrowserClient;
+    const load = loadChatHistory(state);
+
+    handleChatGatewayEvent(state, {
+      runId: "run-newer",
+      sessionKey: "main",
+      state: "delta",
+      deltaText: "A newer response.",
+    });
+    handleChatGatewayEvent(state, {
+      runId: "run-newer",
+      sessionKey: "main",
+      state: "final",
+      message: { role: "assistant", content: "The newer run completed." },
+    });
+    expect(state.chatRunId).toBeNull();
+
+    resolveHistory({
+      messages: [],
+      sessionInfo: {
+        key: "main",
+        kind: "direct",
+        updatedAt: 1,
+        hasActiveRun: false,
+        status: "timeout",
+      },
+    });
+    await load;
+
+    expect(state.chatRunError).toBeNull();
+    expect(getChatSessionProjection(state).runs["run-newer"]?.status).toBe("completed");
+  });
+
+  it.each([
+    { name: "completed", event: { state: "final" as const }, status: "completed" },
+    { name: "cancelled", event: { state: "aborted" as const }, status: "aborted" },
+  ])("does not restore an old failure over a retained $name run", async ({ event, status }) => {
+    const state = createState({
+      messages: [],
+      sessionInfo: {
+        key: "main",
+        kind: "direct",
+        updatedAt: 1,
+        hasActiveRun: false,
+        status: "timeout",
+      },
+    });
+    handleChatGatewayEvent(state, {
+      runId: "run-newer",
+      sessionKey: "main",
+      ...event,
+      ...(event.state === "final"
+        ? { message: { role: "assistant", content: "The newer run completed." } }
+        : {}),
+    });
+
+    await loadChatHistory(state);
+
+    expect(state.chatRunError).toBeNull();
+    expect(getChatSessionProjection(state).runs["run-newer"]?.status).toBe(status);
+  });
+
   it("restores active tool state and authoritative preamble time from the in-flight run snapshot", async () => {
     const history = activeHistory("run-live");
     (history.inFlightRun as { events?: unknown[] }).events = [
