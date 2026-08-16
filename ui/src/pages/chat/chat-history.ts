@@ -20,7 +20,7 @@ import {
 } from "../../lib/chat/heartbeat-display.ts";
 import { extractText, isEmptyUserTextOnlyMessage } from "../../lib/chat/message-extract.ts";
 // Control UI page module owns Chat transcript loading and selected-session message subscription.
-import { formatUiError } from "../../lib/format-error.ts";
+import { formatUiError, formatUiExternalText } from "../../lib/format-error.ts";
 import {
   formatMissingOperatorReadScopeMessage,
   isMissingOperatorReadScopeError,
@@ -1784,7 +1784,7 @@ async function loadChatHistoryUncached(
               ? "sessionsView.runErrorTimedOut"
               : "sessionsView.runErrorUnknown",
           );
-        state.chatRunError = { summary };
+        state.chatRunError = { summary: formatUiExternalText(summary) };
       }
     }
     recordChatHistoryTiming(state, "applied", startedAtMs, {

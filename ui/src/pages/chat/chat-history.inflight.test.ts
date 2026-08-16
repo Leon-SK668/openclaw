@@ -82,6 +82,14 @@ describe("chat history in-flight assistant recovery", () => {
       sessionInfo: { status: "failed" as const, lastRunError: "Provider credits exhausted" },
       summary: "Provider credits exhausted",
     },
+    {
+      name: "a redacted persisted failure reason",
+      sessionInfo: {
+        status: "failed" as const,
+        lastRunError: "OPENAI_API_KEY=sk-1234567890abcdef",
+      },
+      summary: "OPENAI_API_KEY=sk-123...cdef",
+    },
   ])("restores $name from a terminal session snapshot", async ({ sessionInfo, summary }) => {
     const state = createState({
       messages: [],
