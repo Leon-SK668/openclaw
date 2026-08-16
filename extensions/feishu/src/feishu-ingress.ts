@@ -229,7 +229,10 @@ export function buildFeishuFlushIngressLifecycle(
     kind: NonNullable<typeof terminal>,
     action: () => Promise<void>,
   ) => {
-    while (!terminal) {
+    for (;;) {
+      if (terminal) {
+        return;
+      }
       if (terminalAction) {
         await terminalAction.catch(() => undefined);
         continue;

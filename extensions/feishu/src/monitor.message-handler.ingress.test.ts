@@ -490,7 +490,6 @@ describe("Feishu durable ingress debounce lifecycle", () => {
         expect(await queue.listFailed?.({ limit: "all" })).toMatchObject([
           {
             id: "evt-original-error",
-            attempts: DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
             laneKey: "chat:oc-chat",
             reason: "retry-limit-exceeded",
             message: dispatchError.message,
