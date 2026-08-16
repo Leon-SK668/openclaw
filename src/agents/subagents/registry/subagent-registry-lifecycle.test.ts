@@ -42,6 +42,9 @@ type SubagentCompletionParams = Parameters<LifecycleController["completeSubagent
 type AnnounceFlowOutcome = Awaited<
   ReturnType<LifecycleControllerParams["runSubagentAnnounceFlow"]>
 >;
+type WakeParams = Parameters<
+  LifecycleControllerParams["maybeWakeRequesterAfterAllChildrenSettled"]
+>[0];
 type RestartRecoveryReceipt = NonNullable<SubagentRunRecord["execution"]["restartRecovery"]>;
 
 describe("subagent recovery session-effect ownership", () => {
@@ -4179,6 +4182,108 @@ describe("requester settle wake trigger", () => {
       completeBatch: expect.any(Function),
     });
     expect(entry.requesterSettleWake).toEqual({ status: "pending", attemptCount: 0 });
+  });
+
+  it("keeps restored settle wakes pending until the gateway context is ready", async () => {
+    const entry = createRunEntry({ endedAt: 4_000 });
+    const hasInProcessGatewayContext = vi.fn(() => false);
+    const settleWake = vi.fn(async () => false);
+    const controller = createLifecycleController({
+      entry,
+      maybeWakeRequesterAfterAllChildrenSettled: settleWake,
+    });
+    settleWake.mockImplementationOnce(async () => {
+      controller.markRequesterSettleWakeRearm(entry.runId);
+      hasInProcessGatewayContext.mockReturnValue(false);
+      return false;
+    });
+
+    vi.useFakeTimers();
+    try {
+      entry.requesterSettleWake = { status: "pending", attemptCount: 0 };
+      controller.resumeRequesterSettleWake(entry.runId, entry, hasInProcessGatewayContext);
+      expect(settleWake).not.toHaveBeenCalled();
+      hasInProcessGatewayContext.mockReturnValue(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      hasInProcessGatewayContext.mockReturnValue(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settleWake).toHaveBeenCalledTimes(2);
+    } finally {
+      controller.clearScheduledResumeTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds restored settle wake dispatch across concurrent batches", async () => {
+    const entries = ["run-a", "run-b", "run-c"].map((runId) =>
+      createRunEntry({ runId, endedAt: 4_000 }),
+    );
+    const runs = new Map(entries.map((entry) => [entry.runId, entry]));
+    const releases: Array<() => void> = [];
+    const settleWake = vi.fn(async (_params: WakeParams) => {
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+      return false;
+    });
+    const controller = createLifecycleController({
+      entry: entries[0]!,
+      runs,
+      maybeWakeRequesterAfterAllChildrenSettled: settleWake,
+    });
+
+    for (const entry of entries) {
+      entry.requesterSettleWake = { status: "pending", attemptCount: 0 };
+      controller.resumeRequesterSettleWake(entry.runId, entry, () => true);
+    }
+
+    await waitForLifecycleState(() => expect(settleWake).toHaveBeenCalledTimes(2));
+    releases.shift()?.();
+    await waitForLifecycleState(() => expect(settleWake).toHaveBeenCalledTimes(3));
+    releases.forEach((release) => release());
+    await waitForActiveGatewayRootWork(1_000);
+  });
+
+  it("retries a settle wake whose durable transition throws", async () => {
+    const entry = createRunEntry({ endedAt: 4_000 });
+    const persistOrThrow = vi.fn(() => {
+      if (persistOrThrow.mock.calls.length === 2) {
+        throw new Error("registry transition failed");
+      }
+    });
+    const settleWake = vi.fn(async (params: WakeParams) => {
+      if (settleWake.mock.calls.length === 1) {
+        params.transitionBatch([entry.runId], {
+          status: "pending",
+          attemptCount: 1,
+          batchRunIds: [entry.runId],
+        });
+      }
+      return false;
+    });
+    const controller = createLifecycleController({
+      entry,
+      persistOrThrow,
+      maybeWakeRequesterAfterAllChildrenSettled: settleWake,
+    });
+
+    vi.useFakeTimers();
+    try {
+      controller.completeCleanupBookkeeping({
+        runId: entry.runId,
+        entry,
+        cleanup: "keep",
+        completedAt: 5_000,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(entry.requesterSettleWake).toEqual({ status: "pending", attemptCount: 0 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settleWake).toHaveBeenCalledTimes(2);
+    } finally {
+      controller.clearScheduledResumeTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("retains delete-cleanup rows until the settle wake resolves", () => {

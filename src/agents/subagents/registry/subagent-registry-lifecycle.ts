@@ -218,8 +218,8 @@ export class SubagentLifecycleController {
   refreshFrozenResultFromSession = (sessionKey: string) =>
     refreshFrozenResultFromSession(this, sessionKey);
 
-  resumeRequesterSettleWake = (runId: string, entry: SubagentRunRecord) =>
-    scheduleRequesterSettleWake(this, runId, entry);
+  resumeRequesterSettleWake = (runId: string, entry: SubagentRunRecord, isReady?: () => boolean) =>
+    scheduleRequesterSettleWake(this, runId, entry, { isReady });
 
   settleRequesterTurnAfterSessionSpawns = (args: {
     requesterSessionKey: string;
@@ -227,6 +227,7 @@ export class SubagentLifecycleController {
     requesterTurnRunId: string;
     requesterYielded: boolean;
     acceptedSessionSpawns: readonly AcceptedSessionSpawn[];
+    requesterSettleWakeReady?: () => boolean;
   }) =>
     settleRequesterTurnAfterSessionSpawns({
       ...args,
@@ -237,7 +238,9 @@ export class SubagentLifecycleController {
           this.markRequesterSettleWakeRearm(runId);
           return;
         }
-        scheduleRequesterSettleWake(this, runId, entry);
+        scheduleRequesterSettleWake(this, runId, entry, {
+          isReady: args.requesterSettleWakeReady,
+        });
       },
     });
 
