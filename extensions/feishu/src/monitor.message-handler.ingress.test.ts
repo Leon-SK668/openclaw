@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
-import { DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS,
+  DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
+} from "openclaw/plugin-sdk/channel-outbound";
 import { createTestInboundDebounceFlush } from "openclaw/plugin-sdk/channel-test-helpers";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -56,6 +59,7 @@ function createLifecycle() {
     adopted: vi.fn(async () => {}),
     deferred: vi.fn(),
     finalizing: vi.fn(),
+    failed: vi.fn(async (_error: unknown) => {}),
     abandoned: vi.fn(async () => {}),
   };
   const lifecycle: FeishuIngressLifecycle = {
@@ -63,6 +67,7 @@ function createLifecycle() {
     onAdopted: calls.adopted,
     onDeferred: calls.deferred,
     onAdoptionFinalizing: calls.finalizing,
+    onFailed: calls.failed,
     onAbandoned: async () => {
       await Promise.all([...abandonHandlers].map(async (handler) => await handler()));
       await calls.abandoned();
@@ -380,11 +385,11 @@ describe("Feishu durable ingress debounce lifecycle", () => {
     expect(second.calls.adopted).not.toHaveBeenCalled();
   });
 
-  it("preserves abandon retry accounting, backoff, threshold, and restart behavior", async () => {
+  it("dead-letters an aged exhausted flush failure with its error and unblocks its lane", async () => {
     vi.useFakeTimers();
-    const now = Date.UTC(2026, 0, 2);
-    vi.setSystemTime(now);
-    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-feishu-abandon-"));
+    let clock = Date.UTC(2026, 0, 2);
+    vi.setSystemTime(clock);
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-feishu-failure-"));
     const stateDir = await fs.realpath(created);
     type Queue = NonNullable<Parameters<typeof createFeishuDurableIngress>[0]["queue"]>;
     type Payload = Parameters<Queue["enqueue"]>[1];
@@ -392,13 +397,23 @@ describe("Feishu durable ingress debounce lifecycle", () => {
       channelId: "feishu",
       accountId: "default",
       stateDir,
+      now: () => clock,
     });
-    const event = {
-      ...createTextEvent("evt-abandon-retry", "om-abandon-retry", "retry me"),
+    const failedEvent = {
+      ...createTextEvent("evt-original-error", "om-original-error", "retry me"),
       event_type: "im.message.receive_v1",
     };
-    const handleMessage = vi.fn(async () => {
-      throw new Error("Feishu dispatch failed before adoption");
+    const nextEvent = {
+      ...createTextEvent("evt-after-error", "om-after-error", "continue"),
+      event_type: "im.message.receive_v1",
+    };
+    const dispatchError = new Error("archived session rejected before admission");
+    const handleMessage = vi.fn(async (turn: HandleMessageParams) => {
+      if (turn.event.message.message_id === "om-original-error") {
+        throw dispatchError;
+      }
+      turn.turnAdoptionLifecycle?.onAdoptionFinalizing();
+      await turn.turnAdoptionLifecycle?.onAdopted();
     });
     vi.spyOn(dedup, "claimUnprocessedFeishuMessage").mockImplementation(async () => ({
       kind: "claimed",
@@ -434,85 +449,68 @@ describe("Feishu durable ingress debounce lifecycle", () => {
       });
       return ingress;
     };
-    const pendingAttempt = async (attempts: number) => {
-      let observed: Awaited<ReturnType<typeof queue.listPending>>[number] | undefined;
+    const expectPendingAttempt = async (attempts: number) => {
       await vi.waitFor(async () => {
         const pending = await queue.listPending({ limit: "all" });
         expect(pending).toEqual([
           expect.objectContaining({
-            id: "evt-abandon-retry",
+            id: "evt-original-error",
             attempts,
             lastAttemptAt: expect.any(Number),
-            lastError: "turn-abandoned",
+            lastError: dispatchError.message,
           }),
         ]);
-        observed = pending[0];
       });
-      const lastAttemptAt = observed?.lastAttemptAt;
-      if (lastAttemptAt === undefined) {
-        throw new Error(`Missing Feishu retry timestamp for attempt ${attempts}`);
-      }
-      return { ...observed, lastAttemptAt };
     };
 
     try {
       const first = createIntegratedIngress();
       first.start();
-      await first.invokeWebhook(event);
-      const firstAttempt = await pendingAttempt(1);
+      await first.invokeWebhook(failedEvent);
+      await expectPendingAttempt(1);
       expect(handleMessage).toHaveBeenCalledTimes(1);
       await first.stop();
 
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 999);
-      const blocked = createIntegratedIngress();
-      blocked.start();
-      await blocked.invokeWebhook(event);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(handleMessage).toHaveBeenCalledTimes(1);
-      await blocked.stop();
-
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 1_001);
-      const second = createIntegratedIngress();
-      second.start();
-      await second.invokeWebhook(event);
-      const secondAttempt = await pendingAttempt(2);
-      expect(handleMessage).toHaveBeenCalledTimes(2);
-      await second.stop();
-
-      for (let attempt = 3; attempt < DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS; attempt += 1) {
-        const claim = await queue.claim("evt-abandon-retry", { ownerId: `seed-${attempt}` });
+      for (let attempt = 2; attempt < DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS; attempt += 1) {
+        const claim = await queue.claim("evt-original-error", { ownerId: `seed-${attempt}` });
         if (!claim) {
           throw new Error(`Expected Feishu seed claim ${attempt}`);
         }
         await queue.release(claim, {
-          lastError: "turn-abandoned",
-          releasedAt: secondAttempt.lastAttemptAt,
+          lastError: dispatchError.message,
+          releasedAt: clock,
         });
       }
 
-      vi.setSystemTime(secondAttempt.lastAttemptAt + 64_001);
-      const threshold = createIntegratedIngress();
-      threshold.start();
-      await threshold.invokeWebhook(event);
-      const thresholdAttempt = await pendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS);
-      expect(handleMessage).toHaveBeenCalledTimes(3);
-      await threshold.stop();
+      clock += DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS + 1;
+      vi.setSystemTime(clock);
+      const exhausted = createIntegratedIngress();
+      exhausted.start();
+      await vi.waitFor(async () => {
+        expect(await queue.listFailed?.({ limit: "all" })).toMatchObject([
+          {
+            id: "evt-original-error",
+            attempts: DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
+            laneKey: "chat:oc-chat",
+            reason: "retry-limit-exceeded",
+            message: dispatchError.message,
+          },
+        ]);
+      });
 
-      vi.setSystemTime(thresholdAttempt.lastAttemptAt + 128_001);
-      const beyond = createIntegratedIngress();
-      beyond.start();
-      await beyond.invokeWebhook(event);
-      const beyondAttempt = await pendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS + 1);
-      expect(handleMessage).toHaveBeenCalledTimes(4);
-      await beyond.stop();
-
-      vi.setSystemTime(beyondAttempt.lastAttemptAt + 1_000);
-      const blockedRestart = createIntegratedIngress();
-      blockedRestart.start();
-      await blockedRestart.invokeWebhook(event);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(handleMessage).toHaveBeenCalledTimes(4);
-      await blockedRestart.stop();
+      await exhausted.invokeWebhook(nextEvent);
+      await vi.waitFor(() => {
+        expect(handleMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            event: expect.objectContaining({
+              message: expect.objectContaining({ message_id: "om-after-error" }),
+            }),
+          }),
+        );
+      });
+      await exhausted.waitForIdle();
+      expect(await queue.listPending({ limit: "all" })).toEqual([]);
+      await exhausted.stop();
     } finally {
       closeOpenClawStateDatabaseForTest();
       await fs.rm(stateDir, { recursive: true, force: true });

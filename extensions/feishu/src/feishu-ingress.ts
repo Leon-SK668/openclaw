@@ -218,91 +218,72 @@ export function buildFeishuFlushIngressLifecycle(
     return { lifecycle: undefined, settle: async () => {} };
   }
   let handedOff = false;
-  let terminal: "adopted" | "abandoned" | undefined;
-  let adopting: Promise<void> | undefined;
-  let abandoning: Promise<void> | undefined;
+  let terminal: "adopted" | "failed" | "abandoned" | undefined;
+  let terminalAction: Promise<void> | undefined;
   const releaseReplayClaims = () => {
     for (const claim of replayClaims) {
       claim.release({ error: new Error("feishu-ingress-not-adopted") });
     }
   };
-  const runAbandon = async () => {
-    if (terminal) {
-      return;
-    }
-    releaseReplayClaims();
-    await transportLifecycle.onAbandoned();
-    terminal = "abandoned";
-  };
-  const ensureAbandoned = async () => {
-    if (terminal) {
-      return;
-    }
-    const activeAbandonment = abandoning ?? runAbandon();
-    abandoning = activeAbandonment;
-    try {
-      await activeAbandonment;
-    } finally {
-      if (abandoning === activeAbandonment && terminal !== "abandoned") {
-        abandoning = undefined;
+  const runTerminalAction = async (
+    kind: NonNullable<typeof terminal>,
+    action: () => Promise<void>,
+  ) => {
+    while (!terminal) {
+      if (terminalAction) {
+        await terminalAction.catch(() => undefined);
+        continue;
+      }
+      const activeAction = (async () => {
+        await action();
+        terminal = kind;
+      })();
+      terminalAction = activeAction;
+      try {
+        await activeAction;
+        return;
+      } finally {
+        if (terminalAction === activeAction) {
+          terminalAction = undefined;
+        }
       }
     }
   };
-  const abandonAll = async () => {
-    if (terminal) {
-      return;
-    }
-    if (adopting) {
-      await adopting.catch(() => undefined);
-      if (terminal) {
+  const abandonAll = () =>
+    runTerminalAction("abandoned", async () => {
+      releaseReplayClaims();
+      await transportLifecycle.onAbandoned();
+    });
+  const failAll = (error: unknown) =>
+    runTerminalAction("failed", async () => {
+      releaseReplayClaims();
+      if (transportLifecycle.onFailed) {
+        await transportLifecycle.onFailed(error);
         return;
       }
-    }
-    await ensureAbandoned();
-  };
+      await transportLifecycle.onAbandoned();
+    });
   const adoptAll = async () => {
-    if (terminal) {
-      return;
-    }
-    if (abandoning) {
-      await abandoning.catch(() => undefined);
-      if (terminal) {
-        return;
-      }
-    }
-    const activeAdoption =
-      adopting ??
-      (async () => {
-        try {
-          await transportLifecycle.onAdopted();
-          terminal = "adopted";
-          // Queue adoption is authoritative. Logical twin guards commit only
-          // afterward: partial best-effort guard writes may admit a duplicate,
-          // but can never split or suppress recovery of an unadopted turn.
-          const results = await Promise.allSettled(
-            replayClaims.map(async (claim) => claim.commit()),
-          );
-          for (const result of results) {
-            if (result.status === "rejected") {
-              try {
-                options?.onReplayCommitError?.(result.reason);
-              } catch {
-                // Reporting cannot undo an already adopted durable turn.
-              }
+    try {
+      await runTerminalAction("adopted", async () => {
+        await transportLifecycle.onAdopted();
+        // Queue adoption is authoritative. Logical twin guards commit only
+        // afterward: partial best-effort guard writes may admit a duplicate,
+        // but can never split or suppress recovery of an unadopted turn.
+        const results = await Promise.allSettled(replayClaims.map(async (claim) => claim.commit()));
+        for (const result of results) {
+          if (result.status === "rejected") {
+            try {
+              options?.onReplayCommitError?.(result.reason);
+            } catch {
+              // Reporting cannot undo an already adopted durable turn.
             }
           }
-        } catch (error) {
-          await ensureAbandoned().catch(() => undefined);
-          throw error;
         }
-      })();
-    adopting = activeAdoption;
-    try {
-      await activeAdoption;
-    } finally {
-      if (adopting === activeAdoption && terminal !== "adopted") {
-        adopting = undefined;
-      }
+      });
+    } catch (error) {
+      await abandonAll().catch(() => undefined);
+      throw error;
     }
   };
   return {
@@ -319,6 +300,10 @@ export function buildFeishuFlushIngressLifecycle(
       onAdoptionFinalizing: () => {
         transportLifecycle.onAdoptionFinalizing();
       },
+      onFailed: async (error) => {
+        handedOff = true;
+        await failAll(error);
+      },
       onAbandoned: async () => {
         handedOff = true;
         await abandonAll();
@@ -331,13 +316,14 @@ export function buildFeishuFlushIngressLifecycle(
         return;
       }
       handedOff = true;
-      releaseReplayClaims();
       try {
-        transportLifecycle.onAdoptionFinalizing();
-        await transportLifecycle.onAdopted();
-        terminal = "adopted";
+        await runTerminalAction("adopted", async () => {
+          releaseReplayClaims();
+          transportLifecycle.onAdoptionFinalizing();
+          await transportLifecycle.onAdopted();
+        });
       } catch (error) {
-        await ensureAbandoned().catch(() => undefined);
+        await abandonAll().catch(() => undefined);
         throw error;
       }
     },
