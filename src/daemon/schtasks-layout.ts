@@ -18,6 +18,14 @@ import type {
   GatewayServiceRenderArgs,
 } from "./service-types.js";
 
+const MANAGED_TASK_STDIN_REDIRECTION = " < NUL";
+
+function stripManagedTaskStdinRedirection(commandLine: string): string {
+  return commandLine.endsWith(MANAGED_TASK_STDIN_REDIRECTION)
+    ? commandLine.slice(0, -MANAGED_TASK_STDIN_REDIRECTION.length)
+    : commandLine;
+}
+
 export function resolveTaskName(env: GatewayServiceEnv): string {
   const override = env.OPENCLAW_WINDOWS_TASK_NAME?.trim();
   if (override) {
@@ -248,7 +256,7 @@ export async function readScheduledTaskCommand(
     }
     const hasEnvironment = Object.keys(environment).length > 0;
     return {
-      programArguments: parseCmdScriptCommandLine(commandLine),
+      programArguments: parseCmdScriptCommandLine(stripManagedTaskStdinRedirection(commandLine)),
       ...(workingDirectory ? { workingDirectory } : {}),
       ...(hasEnvironment ? { environment } : {}),
       ...(hasEnvironment
@@ -288,7 +296,10 @@ export function buildTaskScript({
       lines.push(renderCmdSetAssignment(key, value));
     }
   }
-  lines.push(programArguments.map(quoteCmdScriptArg).join(" "));
+  const commandLine = programArguments.map(quoteCmdScriptArg).join(" ");
+  // Scheduled tasks have no operator terminal. Redirect stdin so permission
+  // clients cannot open an invisible prompt and stall the gateway service.
+  lines.push(`${commandLine}${MANAGED_TASK_STDIN_REDIRECTION}`);
   return `${lines.join("\r\n")}\r\n`;
 }
 

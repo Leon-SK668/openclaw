@@ -386,6 +386,7 @@ describe("installScheduledTask", () => {
       const captured = xmlPayloadCaptures.find((entry) => entry.index === 2);
       expect(captured?.xml).toContain("gateway.vbs</Command>");
       expect(script).toContain('set "OPENCLAW_WINDOWS_TASK_NAME=OpenClaw Custom Gateway"');
+      expect(script).toMatch(/node gateway\.js < NUL\r?\n$/u);
       expect(launcher).toContain("WScript.Shell");
       expect(launcher).toContain(`Run """${scriptPath}""", 0, False`);
       expectTaskRunCall(3, "OpenClaw Custom Gateway");
@@ -641,6 +642,8 @@ describe("installScheduledTask", () => {
       });
 
       const command = await readScheduledTaskCommand(env);
+      const script = decodeWindowsLauncherScript({ buffer: await fs.readFile(scriptPath) });
+      expect(script).toMatch(/node gateway\.js < NUL\r?\n$/u);
       expect(command).toStrictEqual({
         programArguments: ["node", "gateway.js"],
         environment: {

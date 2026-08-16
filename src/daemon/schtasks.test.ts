@@ -262,6 +262,51 @@ describe("readScheduledTaskCommand", () => {
     );
   });
 
+  it("removes the managed stdin redirection from command readback", async () => {
+    await withScheduledTaskScript(
+      {
+        scriptLines: [
+          "@echo off",
+          '"C:/Program Files/Node/node.exe" gateway.js --profile work < NUL',
+        ],
+      },
+      async (env) => {
+        const result = await readScheduledTaskCommand(env);
+        expect(result).toEqual({
+          programArguments: ["C:/Program Files/Node/node.exe", "gateway.js", "--profile", "work"],
+          sourcePath: resolveTaskScriptPath(env),
+        });
+      },
+    );
+  });
+
+  it("keeps legacy task commands without managed stdin redirection readable", async () => {
+    await withScheduledTaskScript(
+      { scriptLines: ["@echo off", "node gateway.js --port 18789"] },
+      async (env) => {
+        const result = await readScheduledTaskCommand(env);
+        expect(result?.programArguments).toEqual(["node", "gateway.js", "--port", "18789"]);
+      },
+    );
+  });
+
+  it("does not strip redirection tokens inside a legacy command", async () => {
+    await withScheduledTaskScript(
+      { scriptLines: ["@echo off", "node gateway.js < input.txt --profile work"] },
+      async (env) => {
+        const result = await readScheduledTaskCommand(env);
+        expect(result?.programArguments).toEqual([
+          "node",
+          "gateway.js",
+          "<",
+          "input.txt",
+          "--profile",
+          "work",
+        ]);
+      },
+    );
+  });
+
   it("reads legacy UTF-8 scripts with CJK paths written before the encoding fix", async () => {
     await withScheduledTaskScript(
       {
