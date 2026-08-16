@@ -123,6 +123,19 @@ export async function resolveInstallableChannelPlugin(params: {
 }): Promise<ResolveInstallableChannelPluginResult> {
   const supports = params.supports ?? (() => true);
   let nextCfg = params.cfg;
+  const directChannelId = params.channelId ?? normalizeChannelId(params.rawChannel);
+  const registeredPlugin = directChannelId ? getChannelPlugin(directChannelId) : undefined;
+  if (directChannelId && registeredPlugin) {
+    return {
+      cfg: nextCfg,
+      channelId: directChannelId,
+      plugin: registeredPlugin,
+      configChanged: false,
+      pluginInstalled: false,
+      supportsRequestedCapability: supports(registeredPlugin),
+    };
+  }
+
   const workspaceDir = resolveWorkspaceDir(nextCfg, params.agentId);
   const catalogEntry =
     (params.rawChannel
@@ -135,7 +148,7 @@ export async function resolveInstallableChannelPlugin(params: {
         })
       : undefined);
   const channelId =
-    params.channelId ??
+    directChannelId ??
     resolveResolvedChannelId({
       rawChannel: params.rawChannel,
       catalogEntry,
