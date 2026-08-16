@@ -8,6 +8,7 @@ import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-i
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
 import {
   createMessageReceiptFromOutboundResults,
+  DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS,
   DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { createTestInboundDebounceFlush } from "openclaw/plugin-sdk/channel-test-helpers";
@@ -589,26 +590,37 @@ describe("mattermost inbound user posts", () => {
     });
   });
 
-  it("preserves abandon retry accounting, backoff, threshold, and restart behavior", async () => {
+  it("dead-letters an aged exhausted flush failure with its error and unblocks its lane", async () => {
     vi.useFakeTimers();
-    const now = Date.UTC(2026, 0, 2);
-    vi.setSystemTime(now);
-    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-mattermost-abandon-"));
+    let clock = Date.UTC(2026, 0, 2);
+    vi.setSystemTime(clock);
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-mattermost-failure-"));
     const stateDir = await fs.realpath(created);
     type Payload = { version: 1; receivedAt: number; rawEvent: string };
     const queue = createChannelIngressQueueForTests<Payload>({
       channelId: "mattermost",
       accountId: "default",
       stateDir,
+      now: () => clock,
     });
     mockState.ingressQueue = queue;
     mockState.runtimeCore = createRuntimeCore(testConfig, undefined, {
       inboundDebounceMs: 0,
       createInboundDebouncer,
     });
-    mockState.dispatchInboundMessage.mockRejectedValue(
-      new Error("Mattermost dispatch failed before adoption"),
-    );
+    const dispatchError = new Error("archived Mattermost session rejected before admission");
+    let failDispatch = true;
+    mockState.dispatchInboundMessage.mockImplementation(async (params) => {
+      if (failDispatch) {
+        throw dispatchError;
+      }
+      const lifecycle = (
+        params.replyOptions as {
+          turnAdoptionLifecycle?: { onAdopted?: () => void | Promise<void> };
+        }
+      ).turnAdoptionLifecycle;
+      await lifecycle?.onAdopted?.();
+    });
 
     const activeProviders: Array<{ stop: () => Promise<void> }> = [];
     const startProvider = async () => {
@@ -641,85 +653,69 @@ describe("mattermost inbound user posts", () => {
       activeProviders.push(provider);
       return provider;
     };
-    const send = async (provider: Awaited<ReturnType<typeof startProvider>>) => {
+    const send = async (
+      provider: Awaited<ReturnType<typeof startProvider>>,
+      id: string,
+      message: string,
+    ) => {
       await emitMattermostChannelPost(provider.socket, {
-        id: "post-abandon-retry",
-        message: "retry me",
+        id,
+        message,
       });
     };
-    const pendingAttempt = async (attempts: number) => {
-      let observed: Awaited<ReturnType<typeof queue.listPending>>[number] | undefined;
+    const expectPendingAttempt = async (attempts: number) => {
       await vi.waitFor(async () => {
         const pending = await queue.listPending({ limit: "all" });
         expect(pending).toEqual([
           expect.objectContaining({
-            id: "post-abandon-retry",
+            id: "post-original-error",
             attempts,
             lastAttemptAt: expect.any(Number),
-            lastError: "turn-abandoned",
+            lastError: dispatchError.message,
           }),
         ]);
-        observed = pending[0];
       });
-      const lastAttemptAt = observed?.lastAttemptAt;
-      if (lastAttemptAt === undefined) {
-        throw new Error(`Missing Mattermost retry timestamp for attempt ${attempts}`);
-      }
-      return { ...observed, lastAttemptAt };
     };
 
     try {
       const first = await startProvider();
-      await send(first);
-      const firstAttempt = await pendingAttempt(1);
+      await send(first, "post-original-error", "retry me");
+      await expectPendingAttempt(1);
       expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1);
       await first.stop();
 
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 999);
-      const blocked = await startProvider();
-      await send(blocked);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1);
-      await blocked.stop();
-
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 1_001);
-      const second = await startProvider();
-      await send(second);
-      const secondAttempt = await pendingAttempt(2);
-      expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(2);
-      await second.stop();
-
-      for (let attempt = 3; attempt < DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS; attempt += 1) {
-        const claim = await queue.claim("post-abandon-retry", { ownerId: `seed-${attempt}` });
+      for (let attempt = 2; attempt < DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS; attempt += 1) {
+        const claim = await queue.claim("post-original-error", { ownerId: `seed-${attempt}` });
         if (!claim) {
           throw new Error(`Expected Mattermost seed claim ${attempt}`);
         }
         await queue.release(claim, {
-          lastError: "turn-abandoned",
-          releasedAt: secondAttempt.lastAttemptAt,
+          lastError: dispatchError.message,
+          releasedAt: clock,
         });
       }
 
-      vi.setSystemTime(secondAttempt.lastAttemptAt + 64_001);
-      const threshold = await startProvider();
-      await send(threshold);
-      const thresholdAttempt = await pendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS);
-      expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(3);
-      await threshold.stop();
+      clock += DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS + 1;
+      vi.setSystemTime(clock);
+      const exhausted = await startProvider();
+      await vi.waitFor(async () => {
+        expect(await queue.listFailed?.({ limit: "all" })).toMatchObject([
+          {
+            id: "post-original-error",
+            laneKey: "channel:chan-1",
+            reason: "retry-limit-exceeded",
+            message: dispatchError.message,
+          },
+        ]);
+      });
 
-      vi.setSystemTime(thresholdAttempt.lastAttemptAt + 128_001);
-      const beyond = await startProvider();
-      await send(beyond);
-      const beyondAttempt = await pendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS + 1);
-      expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(4);
-      await beyond.stop();
-
-      vi.setSystemTime(beyondAttempt.lastAttemptAt + 1_000);
-      const blockedRestart = await startProvider();
-      await send(blockedRestart);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(4);
-      await blockedRestart.stop();
+      failDispatch = false;
+      await send(exhausted, "post-after-error", "continue");
+      await vi.waitFor(async () => {
+        expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(2);
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+      });
+      await exhausted.stop();
     } finally {
       await Promise.allSettled(activeProviders.map(async (provider) => await provider.stop()));
       mockState.ingressQueue = undefined;

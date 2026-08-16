@@ -299,7 +299,11 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
             );
             await settle();
           } catch (error) {
-            await admissionLifecycle.onAbandoned();
+            if (admissionLifecycle.onFailed) {
+              await admissionLifecycle.onFailed(error);
+            } else {
+              await admissionLifecycle.onAbandoned();
+            }
             throw error;
           }
         },
