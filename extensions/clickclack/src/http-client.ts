@@ -2,6 +2,7 @@
  * Thin ClickClack REST/websocket client used by gateway, resolver, and outbound
  * delivery code.
  */
+import { buildTimeoutAbortSignal } from "openclaw/plugin-sdk/extension-shared";
 import { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 import {
   readProviderJsonResponse,
@@ -58,6 +59,7 @@ type ClientOptions = {
   fetch?: typeof fetch;
 };
 
+const CLICKCLACK_REST_REQUEST_TIMEOUT_MS = 30_000;
 const CLICKCLACK_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
 const CLICKCLACK_CORRELATION_ID_MAX_LENGTH = 128;
 const CLICKCLACK_CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/u;
@@ -97,6 +99,17 @@ export class ClickClackHttpError extends Error {
   ) {
     super(`ClickClack ${status}: ${detail}`);
   }
+}
+
+function isMessageCreateRequest(method: string, path: string): boolean {
+  if (method !== "POST") {
+    return false;
+  }
+  return (
+    /^\/api\/channels\/[^/]+\/messages$/u.test(path) ||
+    /^\/api\/messages\/[^/]+\/thread\/replies$/u.test(path) ||
+    /^\/api\/dms\/[^/]+\/messages$/u.test(path)
+  );
 }
 
 /** Matches the workspace/name uniqueness error returned by current ClickClack servers. */
@@ -145,27 +158,33 @@ export function createClickClackClient(options: ClientOptions) {
     init: RequestInit = {},
     requestOptions: { timeoutMs?: number; responseMode?: "json" | "none" } = {},
   ): Promise<T> {
+    const url = `${baseUrl}${path}`;
+    const method = (init.method ?? "GET").toUpperCase();
     const requestHeaders = new Headers(init.headers);
+    const isMultipartUpload = init.body instanceof FormData;
     for (const [key, value] of Object.entries(headers)) {
       requestHeaders.set(key, value);
     }
     if (correlationId) {
       requestHeaders.set(CLICKCLACK_CORRELATION_ID_HEADER, correlationId);
     }
-    if (init.body && !(init.body instanceof FormData)) {
+    if (init.body && !isMultipartUpload) {
       requestHeaders.set("Content-Type", "application/json");
     }
-    const controller =
-      requestOptions.timeoutMs !== undefined && !init.signal ? new AbortController() : undefined;
-    const timeout = controller
-      ? setTimeout(() => controller.abort(), requestOptions.timeoutMs)
-      : undefined;
+    // Message creation can commit before its response completes. Until every
+    // caller has durable nonce reconciliation, only explicit signals may abort it.
+    const defaultTimeoutMs =
+      isMultipartUpload || isMessageCreateRequest(method, path)
+        ? undefined
+        : CLICKCLACK_REST_REQUEST_TIMEOUT_MS;
+    const { signal, cleanup } = buildTimeoutAbortSignal({
+      timeoutMs: requestOptions.timeoutMs ?? defaultTimeoutMs,
+      signal: init.signal ?? undefined,
+      operation: "clickclack-rest",
+      url,
+    });
     try {
-      const response = await fetcher(`${baseUrl}${path}`, {
-        ...init,
-        ...(controller ? { signal: controller.signal } : {}),
-        headers: requestHeaders,
-      });
+      const response = await fetcher(url, { ...init, headers: requestHeaders, signal });
       if (!response.ok) {
         const detail = await readResponseTextLimited(response, CLICKCLACK_ERROR_BODY_LIMIT_BYTES);
         // Remote error bodies are untrusted output; redact them even when the
@@ -188,9 +207,7 @@ export function createClickClackClient(options: ClientOptions) {
         maxBytes: CLICKCLACK_INBOUND_JSON_LIMIT_BYTES,
       });
     } finally {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
+      cleanup();
     }
   }
 
