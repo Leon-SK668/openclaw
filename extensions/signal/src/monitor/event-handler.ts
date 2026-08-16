@@ -720,7 +720,7 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
     entries: SignalInboundEntry[],
     createFlush: SignalInboundFlushFactory,
   ): SignalInboundFlush => {
-    const { lifecycle, settle } = fanInChannelIngressLifecycles(
+    const { lifecycle, settle, abandon } = fanInChannelIngressLifecycles(
       entries.map((entry) => entry.turnAdoptionLifecycle),
     );
     return createFlush({
@@ -747,7 +747,7 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
             async (terminalError: unknown) => {
               // Exhausted retries: release the drain claims so queue retry policy
               // owns redelivery instead of the stall watchdog dead-lettering them.
-              await lifecycle?.onAbandoned();
+              await abandon(terminalError);
               throw terminalError;
             },
           );

@@ -2,7 +2,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS,
+  DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
+} from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -335,11 +338,11 @@ describe("signal reply session init conflict retry", () => {
     }
   });
 
-  it("preserves durable abandon accounting through backoff, threshold, and restart", async () => {
+  it("dead-letters an aged exhausted conflict with its cause and unblocks its lane", async () => {
     vi.useFakeTimers();
-    const now = Date.UTC(2026, 0, 2);
-    vi.setSystemTime(now);
-    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-signal-abandon-"));
+    let clock = Date.UTC(2026, 0, 2);
+    vi.setSystemTime(clock);
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-signal-failure-"));
     const stateDir = await fs.realpath(created);
     type Queue = NonNullable<Parameters<typeof startSignalIngressMonitor>[0]["queue"]>;
     type Payload = Parameters<Queue["enqueue"]>[1];
@@ -347,6 +350,7 @@ describe("signal reply session init conflict retry", () => {
       channelId: "signal",
       accountId: "default",
       stateDir,
+      now: () => clock,
     });
     const timestamp = 1_700_000_000_777;
     const event = createSignalReceiveEvent({
@@ -354,7 +358,13 @@ describe("signal reply session init conflict retry", () => {
       dataMessage: { timestamp, message: "retry through durable ingress", attachments: [] },
     });
     const eventId = JSON.stringify(["number:+15550001111", timestamp]);
-    dispatchInboundMessageMock.mockRejectedValue(CONFLICT_ERROR);
+    let failDispatch = true;
+    dispatchInboundMessageMock.mockImplementation(async () => {
+      if (failDispatch) {
+        throw CONFLICT_ERROR;
+      }
+      return { queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
+    });
 
     const createIntegratedMonitor = async () => {
       const tracked = createTrackedTaskHarness();
@@ -385,7 +395,7 @@ describe("signal reply session init conflict retry", () => {
           id: eventId,
           attempts,
           lastAttemptAt: expect.any(Number),
-          lastError: "turn-abandoned",
+          lastError: CONFLICT_ERROR.message,
         }),
       ]);
       const record = pending[0];
@@ -404,14 +414,16 @@ describe("signal reply session init conflict retry", () => {
       expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(4);
       await first.monitor.stop();
 
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 999);
+      clock = firstAttempt.lastAttemptAt + 999;
+      vi.setSystemTime(clock);
       const blocked = await createIntegratedMonitor();
       await vi.advanceTimersByTimeAsync(10);
       expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(4);
       expect(blocked.tracked.tasks).toHaveLength(0);
       await blocked.monitor.stop();
 
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 1_001);
+      clock = firstAttempt.lastAttemptAt + 1_001;
+      vi.setSystemTime(clock);
       const second = await createIntegratedMonitor();
       await finishOuterAttempt(second.tracked);
       const secondAttempt = await pendingAttempt(2);
@@ -424,31 +436,46 @@ describe("signal reply session init conflict retry", () => {
           throw new Error(`Expected Signal seed claim ${attempt}`);
         }
         await queue.release(claim, {
-          lastError: "turn-abandoned",
+          lastError: CONFLICT_ERROR.message,
           releasedAt: secondAttempt.lastAttemptAt,
         });
       }
 
-      vi.setSystemTime(secondAttempt.lastAttemptAt + 64_001);
-      const threshold = await createIntegratedMonitor();
-      await finishOuterAttempt(threshold.tracked);
-      const thresholdAttempt = await pendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS);
+      clock += DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS + 1;
+      vi.setSystemTime(clock);
+      const exhausted = await createIntegratedMonitor();
+      await finishOuterAttempt(exhausted.tracked);
       expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(12);
-      await threshold.monitor.stop();
+      await vi.waitFor(async () => {
+        expect(await queue.listFailed?.({ limit: "all" })).toMatchObject([
+          {
+            id: eventId,
+            laneKey: "direct:number:+15550001111",
+            reason: "retry-limit-exceeded",
+            message: CONFLICT_ERROR.message,
+          },
+        ]);
+      });
 
-      vi.setSystemTime(thresholdAttempt.lastAttemptAt + 128_001);
-      const beyond = await createIntegratedMonitor();
-      await finishOuterAttempt(beyond.tracked);
-      const beyondAttempt = await pendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS + 1);
-      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(16);
-      await beyond.monitor.stop();
-
-      vi.setSystemTime(beyondAttempt.lastAttemptAt + 1_000);
-      const blockedRestart = await createIntegratedMonitor();
+      failDispatch = false;
+      const nextTimestamp = timestamp + 1;
+      await exhausted.monitor.receive(
+        createSignalReceiveEvent({
+          timestamp: nextTimestamp,
+          dataMessage: {
+            timestamp: nextTimestamp,
+            message: "continue after failed conflict",
+            attachments: [],
+          },
+        }),
+      );
       await vi.advanceTimersByTimeAsync(10);
-      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(16);
-      expect(blockedRestart.tracked.tasks).toHaveLength(0);
-      await blockedRestart.monitor.stop();
+      await exhausted.monitor.waitForIdle();
+      await vi.waitFor(async () => {
+        expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(13);
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+      });
+      await exhausted.monitor.stop();
     } finally {
       closeOpenClawStateDatabaseForTest();
       await fs.rm(stateDir, { recursive: true, force: true });
