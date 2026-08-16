@@ -421,17 +421,20 @@ export function scheduleRequesterSettleWake(
       runWithGatewayIndependentRootWorkContinuation(async () => {
         if (params.runs.get(runId) !== entry || !entry.requesterSettleWake) {
           releaseRequesterSettleWakeReadiness(context, [runId]);
+          context.unmarkRequesterSettleWakeRunScheduled(runId);
           return;
         }
-        await params.maybeWakeRequesterAfterAllChildrenSettled({
-          requesterSessionKey,
-          requesterOrigin: entry.requesterOrigin,
-          settledEntry: entry,
-          transitionBatch: (runIds, state) =>
-            transitionRequesterSettleWakeBatch(context, runIds, state),
-          completeBatch: (runIds, rearmGeneration, outcome) =>
-            completeRequesterSettleWakeBatch(context, runIds, rearmGeneration, outcome),
-        });
+        await params
+          .maybeWakeRequesterAfterAllChildrenSettled({
+            requesterSessionKey,
+            requesterOrigin: entry.requesterOrigin,
+            settledEntry: entry,
+            transitionBatch: (runIds, state) =>
+              transitionRequesterSettleWakeBatch(context, runIds, state),
+            completeBatch: (runIds, rearmGeneration, outcome) =>
+              completeRequesterSettleWakeBatch(context, runIds, rearmGeneration, outcome),
+          })
+          .finally(() => context.unmarkRequesterSettleWakeRunScheduled(runId));
       }),
     ),
   )
@@ -442,12 +445,15 @@ export function scheduleRequesterSettleWake(
         requesterSessionKey: maskLifecycleIdentifier(requesterSessionKey, "session"),
       });
       const current = params.runs.get(runId);
-      if (current === entry && current.requesterSettleWake) {
+      if (
+        current === entry &&
+        current.requesterSettleWake &&
+        requesterSettleWakeReadiness.get(context)?.has(runId)
+      ) {
         scheduleRequesterSettleWakeContextRetry(context, runId, current);
       }
     })
     .finally(() => {
-      context.unmarkRequesterSettleWakeRunScheduled(runId);
       const wasRearmedWhileRunning = context.takeRequesterSettleWakeRearm(runId);
       const current = params.runs.get(runId);
       if (current === entry && current.requesterSettleWake) {

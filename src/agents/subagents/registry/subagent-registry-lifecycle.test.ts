@@ -4197,7 +4197,6 @@ describe("requester settle wake trigger", () => {
       hasInProcessGatewayContext.mockReturnValue(false);
       return false;
     });
-
     vi.useFakeTimers();
     try {
       entry.requesterSettleWake = { status: "pending", attemptCount: 0 };
@@ -4247,7 +4246,7 @@ describe("requester settle wake trigger", () => {
   it("retries a settle wake whose durable transition throws", async () => {
     const entry = createRunEntry({ endedAt: 4_000 });
     const persistOrThrow = vi.fn(() => {
-      if (persistOrThrow.mock.calls.length === 2) {
+      if (persistOrThrow.mock.calls.length === 1) {
         throw new Error("registry transition failed");
       }
     });
@@ -4266,15 +4265,10 @@ describe("requester settle wake trigger", () => {
       persistOrThrow,
       maybeWakeRequesterAfterAllChildrenSettled: settleWake,
     });
-
     vi.useFakeTimers();
     try {
-      controller.completeCleanupBookkeeping({
-        runId: entry.runId,
-        entry,
-        cleanup: "keep",
-        completedAt: 5_000,
-      });
+      entry.requesterSettleWake = { status: "pending", attemptCount: 0 };
+      controller.resumeRequesterSettleWake(entry.runId, entry, () => true);
       await vi.advanceTimersByTimeAsync(0);
 
       expect(entry.requesterSettleWake).toEqual({ status: "pending", attemptCount: 0 });
