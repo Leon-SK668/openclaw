@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInboundDebouncer } from "openclaw/plugin-sdk/channel-inbound-debounce";
-import { DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS,
+  DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
+} from "openclaw/plugin-sdk/channel-outbound";
 import {
   closeOpenClawStateDatabaseForTest,
   createChannelIngressQueueForTests,
@@ -166,11 +169,11 @@ describe("Microsoft Teams drain claim ownership", () => {
     expect(lifecycle.abandonedCount()).toBe(0);
   });
 
-  it("preserves abandon retry accounting, backoff, threshold, and restart behavior", async () => {
+  it("dead-letters an aged exhausted flush failure with its error and unblocks its lane", async () => {
     vi.useFakeTimers();
-    const now = Date.UTC(2026, 0, 2);
-    vi.setSystemTime(now);
-    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-msteams-abandon-"));
+    let clock = Date.UTC(2026, 0, 2);
+    vi.setSystemTime(clock);
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-msteams-failure-"));
     const stateDir = await fs.realpath(created);
     type Queue = NonNullable<Parameters<typeof createMSTeamsIngress>[0]["queue"]>;
     type Payload = Parameters<Queue["enqueue"]>[1];
@@ -178,16 +181,19 @@ describe("Microsoft Teams drain claim ownership", () => {
       channelId: "msteams",
       accountId: "test-app",
       stateDir,
+      now: () => clock,
     });
-    const incoming = directActivity("activity-abandon", "retry me");
+    const failedActivity = directActivity("activity-original-error", "retry me");
+    const nextActivity = directActivity("activity-after-error", "continue");
     await queue.enqueue(
-      "activity-abandon",
-      { version: 1, receivedAt: now - 2 * 24 * 60 * 60_000, rawActivity: JSON.stringify(incoming) },
-      { laneKey: "dm-conversation", receivedAt: now - 2 * 24 * 60 * 60_000 },
+      "activity-original-error",
+      { version: 1, receivedAt: clock, rawActivity: JSON.stringify(failedActivity) },
+      { laneKey: "dm-conversation", receivedAt: clock },
     );
     const dispatchMock = runtimeApiMockState.dispatchReplyWithBufferedBlockDispatcher;
     const priorImplementation = dispatchMock.getMockImplementation();
-    dispatchMock.mockRejectedValue(new Error("Microsoft Teams dispatch failed before adoption"));
+    const dispatchError = new Error("archived Microsoft Teams session rejected before admission");
+    dispatchMock.mockRejectedValue(dispatchError);
 
     const createIntegratedIngress = () => {
       const handler = createHandler({
@@ -201,81 +207,62 @@ describe("Microsoft Teams drain claim ownership", () => {
       });
     };
     const expectPendingAttempt = async (attempts: number) => {
-      let observed: Awaited<ReturnType<typeof queue.listPending>>[number] | undefined;
       await vi.waitFor(async () => {
         const pending = await queue.listPending({ limit: "all" });
         expect(pending).toEqual([
           expect.objectContaining({
-            id: "activity-abandon",
+            id: "activity-original-error",
             attempts,
             lastAttemptAt: expect.any(Number),
-            lastError: "turn-abandoned",
+            lastError: dispatchError.message,
           }),
         ]);
-        observed = pending[0];
       });
-      const lastAttemptAt = observed?.lastAttemptAt;
-      if (lastAttemptAt === undefined) {
-        throw new Error(`Missing Microsoft Teams retry timestamp for attempt ${attempts}`);
-      }
-      return { ...observed, lastAttemptAt };
     };
 
     try {
       const first = createIntegratedIngress();
       first.start();
-      const firstAttempt = await expectPendingAttempt(1);
+      await expectPendingAttempt(1);
       expect(dispatchMock).toHaveBeenCalledTimes(1);
       await first.stop();
 
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 999);
-      const second = createIntegratedIngress();
-      second.start();
-      await second.accept(incoming);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(dispatchMock).toHaveBeenCalledTimes(1);
-      await second.stop();
-      vi.setSystemTime(firstAttempt.lastAttemptAt + 1_001);
-      const afterBackoff = createIntegratedIngress();
-      afterBackoff.start();
-      await afterBackoff.accept(incoming);
-      const secondAttempt = await expectPendingAttempt(2);
-      expect(dispatchMock).toHaveBeenCalledTimes(2);
-      await afterBackoff.stop();
-
-      for (let attempt = 3; attempt < DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS; attempt += 1) {
-        const claim = await queue.claim("activity-abandon", { ownerId: `seed-${attempt}` });
+      for (let attempt = 2; attempt < DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS; attempt += 1) {
+        const claim = await queue.claim("activity-original-error", { ownerId: `seed-${attempt}` });
         if (!claim) {
           throw new Error(`Expected Microsoft Teams seed claim ${attempt}`);
         }
         await queue.release(claim, {
-          lastError: "turn-abandoned",
-          releasedAt: secondAttempt.lastAttemptAt,
+          lastError: dispatchError.message,
+          releasedAt: clock,
         });
       }
-      vi.setSystemTime(secondAttempt.lastAttemptAt + 64_001);
-      const threshold = createIntegratedIngress();
-      threshold.start();
-      await threshold.accept(incoming);
-      const thresholdAttempt = await expectPendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS);
-      expect(dispatchMock).toHaveBeenCalledTimes(3);
-      await threshold.stop();
 
-      vi.setSystemTime(thresholdAttempt.lastAttemptAt + 128_001);
-      const beyond = createIntegratedIngress();
-      beyond.start();
-      await beyond.accept(incoming);
-      const beyondAttempt = await expectPendingAttempt(DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS + 1);
-      expect(dispatchMock).toHaveBeenCalledTimes(4);
-      await beyond.stop();
+      clock += DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS + 1;
+      vi.setSystemTime(clock);
+      const exhausted = createIntegratedIngress();
+      exhausted.start();
+      await vi.waitFor(async () => {
+        expect(await queue.listFailed?.({ limit: "all" })).toMatchObject([
+          {
+            id: "activity-original-error",
+            laneKey: "dm-conversation",
+            reason: "retry-limit-exceeded",
+            message: dispatchError.message,
+          },
+        ]);
+      });
 
-      vi.setSystemTime(beyondAttempt.lastAttemptAt + 1_000);
-      const blockedRestart = createIntegratedIngress();
-      blockedRestart.start();
-      await blockedRestart.accept(incoming);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(dispatchMock).toHaveBeenCalledTimes(4);
-      await blockedRestart.stop();
+      if (!priorImplementation) {
+        throw new Error("Missing Microsoft Teams test dispatch implementation");
+      }
+      dispatchMock.mockImplementation(priorImplementation);
+      await exhausted.accept(nextActivity);
+      await vi.waitFor(async () => {
+        expect(dispatchMock).toHaveBeenCalledTimes(2);
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+      });
+      await exhausted.stop();
     } finally {
       dispatchMock.mockReset();
       if (priorImplementation) {

@@ -356,7 +356,11 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
             }
             await settle();
           } catch (err) {
-            await admissionLifecycle.onAbandoned();
+            if (admissionLifecycle.onFailed) {
+              await admissionLifecycle.onFailed(err);
+            } else {
+              await admissionLifecycle.onAbandoned();
+            }
             throw err;
           }
         },
