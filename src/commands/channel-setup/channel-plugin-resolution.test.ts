@@ -107,6 +107,7 @@ describe("resolveInstallableChannelPlugin", () => {
       runtime: {} as never,
       rawChannel: "telegram",
       allowInstall: true,
+      preferRegisteredPlugin: true,
       supports: (plugin) => Boolean(plugin.directory),
     });
 
@@ -137,6 +138,7 @@ describe("resolveInstallableChannelPlugin", () => {
         runtime: {} as never,
         rawChannel: "workspace-channel",
         allowInstall: false,
+        preferRegisteredPlugin: true,
       }),
     ).rejects.toThrow("agent selection required");
 

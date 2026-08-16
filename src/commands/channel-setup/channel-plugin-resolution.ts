@@ -118,14 +118,18 @@ export async function resolveInstallableChannelPlugin(params: {
   channelId?: ChannelId;
   agentId?: string;
   allowInstall?: boolean;
+  preferRegisteredPlugin?: boolean;
   prompter?: WizardPrompter;
   supports?: (plugin: ChannelPlugin) => boolean;
 }): Promise<ResolveInstallableChannelPluginResult> {
   const supports = params.supports ?? (() => true);
   let nextCfg = params.cfg;
   const directChannelId = params.channelId ?? normalizeChannelId(params.rawChannel);
-  const registeredPlugin = directChannelId ? getChannelPlugin(directChannelId) : undefined;
-  if (directChannelId && registeredPlugin) {
+  const registeredPlugin =
+    params.preferRegisteredPlugin && directChannelId
+      ? getChannelPlugin(directChannelId)
+      : undefined;
+  if (params.preferRegisteredPlugin && directChannelId && registeredPlugin) {
     return {
       cfg: nextCfg,
       channelId: directChannelId,
