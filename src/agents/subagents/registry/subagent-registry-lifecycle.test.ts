@@ -4243,21 +4243,17 @@ describe("requester settle wake trigger", () => {
     await waitForActiveGatewayRootWork(1_000);
   });
 
-  it("retries a settle wake whose durable transition throws", async () => {
+  it("leaves a ready settle wake pending for the registry sweeper", async () => {
     const entry = createRunEntry({ endedAt: 4_000 });
     const persistOrThrow = vi.fn(() => {
-      if (persistOrThrow.mock.calls.length === 1) {
-        throw new Error("registry transition failed");
-      }
+      throw new Error("registry transition failed");
     });
     const settleWake = vi.fn(async (params: WakeParams) => {
-      if (settleWake.mock.calls.length === 1) {
-        params.transitionBatch([entry.runId], {
-          status: "pending",
-          attemptCount: 1,
-          batchRunIds: [entry.runId],
-        });
-      }
+      params.transitionBatch([entry.runId], {
+        status: "pending",
+        attemptCount: 1,
+        batchRunIds: [entry.runId],
+      });
       return false;
     });
     const controller = createLifecycleController({
@@ -4272,8 +4268,10 @@ describe("requester settle wake trigger", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(entry.requesterSettleWake).toEqual({ status: "pending", attemptCount: 0 });
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(settleWake).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settleWake).toHaveBeenCalledOnce();
+      expect(persistOrThrow).toHaveBeenCalledOnce();
+      expect(entry.requesterSettleWake).toEqual({ status: "pending", attemptCount: 0 });
     } finally {
       controller.clearScheduledResumeTimers();
       vi.useRealTimers();

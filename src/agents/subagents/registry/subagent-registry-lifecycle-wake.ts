@@ -445,13 +445,12 @@ export function scheduleRequesterSettleWake(
         requesterSessionKey: maskLifecycleIdentifier(requesterSessionKey, "session"),
       });
       const current = params.runs.get(runId);
-      if (
-        current === entry &&
-        current.requesterSettleWake &&
-        requesterSettleWakeReadiness.get(context)?.has(runId)
-      ) {
+      const isReady = requesterSettleWakeReadiness.get(context)?.get(runId);
+      if (current === entry && current.requesterSettleWake && isReady?.() === false) {
         scheduleRequesterSettleWakeContextRetry(context, runId, current);
       }
+      // Once the Gateway is ready, a thrown transition is durable-store failure.
+      // Keep the row pending for the registry's 60s sweeper instead of polling SQLite every second.
     })
     .finally(() => {
       const wasRearmedWhileRunning = context.takeRequesterSettleWakeRearm(runId);
