@@ -3,17 +3,16 @@ import {
   readSessionMessageSequence,
 } from "@openclaw/gateway-client/browser";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import type { CommandsListResult } from "../../../../packages/gateway-protocol/src/index.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type {
   AgentsListResult,
   GatewaySessionRow,
   GatewaySessionsDefaults,
-  ModelCatalogEntry,
   SessionBranch,
   SessionsListResult,
 } from "../../api/types.ts";
 import { t } from "../../i18n/index.ts";
+import type { ChatMetadataResult } from "../../lib/chat/chat-metadata-store.ts";
 import {
   isAssistantHeartbeatAckForDisplay,
   stripHeartbeatTokenForDisplay,
@@ -513,8 +512,8 @@ function resolveChatHistorySessionId(result: ChatHistoryResult): string | null {
     : null;
 }
 
-function retainedRawHistoryStart(pagination: ChatHistoryPagination | undefined): number | null {
-  const totalMessages = pagination?.totalMessages;
+function retainedRawHistoryStart(pagination: ChatHistoryPagination): number | null {
+  const totalMessages = pagination.totalMessages;
   if (
     typeof totalMessages !== "number" ||
     !Number.isSafeInteger(totalMessages) ||
@@ -522,7 +521,7 @@ function retainedRawHistoryStart(pagination: ChatHistoryPagination | undefined):
   ) {
     return null;
   }
-  const retainedDepth = pagination?.hasMore ? pagination.nextOffset : totalMessages;
+  const retainedDepth = pagination.hasMore ? pagination.nextOffset : totalMessages;
   const start = totalMessages - retainedDepth + 1;
   return Number.isSafeInteger(start) && start > 0 ? start : null;
 }
@@ -532,7 +531,7 @@ function reconcileLoadedHistoryTail(options: {
   nextPagination: ChatHistoryPagination;
   nextSessionId: string | null;
   previousMessages: unknown[];
-  previousPagination: ChatHistoryPagination | undefined;
+  previousPagination: ChatHistoryPagination;
   previousSessionId: string | null;
 }): { messages: unknown[]; pagination: ChatHistoryPagination } | null {
   if (
@@ -542,7 +541,7 @@ function reconcileLoadedHistoryTail(options: {
   ) {
     return null;
   }
-  const previousTotal = options.previousPagination?.totalMessages;
+  const previousTotal = options.previousPagination.totalMessages;
   const nextTotal = options.nextPagination.totalMessages;
   const previousStart = retainedRawHistoryStart(options.previousPagination);
   const nextStart = retainedRawHistoryStart(options.nextPagination);
@@ -573,10 +572,6 @@ function reconcileLoadedHistoryTail(options: {
         : { hasMore: false, totalMessages: nextTotal },
   };
 }
-
-export type ChatMetadataResult = CommandsListResult & {
-  models?: ModelCatalogEntry[];
-};
 
 export type ChatEventPayload = {
   runId?: string;
@@ -1042,7 +1037,7 @@ function replaceCachedChatMessages(state: ChatState, sessionKey: string, agentId
         ? { displayedLeafEntryId: state.chatDisplayedLeafEntryId }
         : {}),
       messages: state.chatMessages,
-      pagination: state.chatHistoryPagination ?? { hasMore: false },
+      pagination: state.chatHistoryPagination,
       sessionId: state.currentSessionId ?? null,
     },
   );

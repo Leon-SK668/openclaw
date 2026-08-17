@@ -2400,6 +2400,10 @@ openclaw-chat-session-rail {
   transition: border-color var(--duration-fast) ease;
 }
 
+.list-item-clickable {
+  text-decoration: none;
+}
+
 .list-item-clickable:hover {
   border-color: var(--border-strong);
 }
@@ -5144,29 +5148,6 @@ td.data-table-key-col {
   }
 }
 
-/* ── Shared collapse chevron ── */
-
-.collapse-chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform var(--duration-fast) ease;
-}
-
-.collapse-chevron svg {
-  width: 12px;
-  height: 12px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.5px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.collapse-chevron--collapsed {
-  transform: rotate(-90deg);
-}
-
 /* Mobile pairing */
 .device-pair-setup {
   max-height: calc(100dvh - 48px);
@@ -5706,9 +5687,7 @@ td.data-table-key-col {
 }
 
 /* Attribute badges (attached automation, approval, cloud placement):
-   muted metadata that sits after the title inside the row link, outside the
-   trail/action overlap cell, so touch devices (which hide the trail) and
-   hovered rows keep them. */
+   muted metadata grouped in the row's second-line endcap. */
 .session-row-badges {
   display: inline-flex;
   align-items: center;
