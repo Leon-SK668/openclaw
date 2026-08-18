@@ -61,14 +61,12 @@ import {
   registerExecApprovalRequestForHostOrThrow,
 } from "./bash-tools.exec-approval-request.js";
 import {
-  buildDefaultExecApprovalRequestArgs,
   buildHeadlessExecApprovalDeniedMessage,
   buildExecApprovalFollowupTarget,
   buildExecApprovalPendingToolResult,
-  createExecApprovalDecisionState,
   createAndRegisterDefaultExecApprovalRequest,
-  enforceStrictInlineEvalApprovalBoundary,
   resolveApprovalDecisionOrUndefined,
+  resolveExecApprovalDecisionState,
   resolveExecHostApprovalContext,
   sendExecApprovalFollowupResult,
   shouldResolveExecApprovalUnavailableInline,
@@ -710,6 +708,25 @@ export async function processGatewayAllowlist(
     requiresHeredocApproval ||
     requiresInlineEvalApproval ||
     requiresSecurityAuditSuppressionApproval;
+  const denyHeadlessApproval = (): ProcessGatewayAllowlistResult => {
+    const text = params.approvalFollowupText
+      ? `${params.approvalFollowupText}\nCommand: ${params.command}`
+      : `Exec denied (approval_required): ${params.command}`;
+    return {
+      deniedResult: {
+        content: [{ type: "text", text }],
+        details: {
+          status: "failed",
+          exitCode: null,
+          failureKind: "approval_required",
+          durationMs: 0,
+          aggregated: text,
+          timedOut: false,
+          cwd: params.workdir,
+        },
+      },
+    };
+  };
   if (requiresHeredocApproval) {
     params.warnings.push(
       "Warning: heredoc execution requires reviewer or explicit approval in allowlist mode.",
@@ -719,6 +736,9 @@ export async function processGatewayAllowlist(
     params.warnings.push(
       `Warning: allowlist auto-execution is unavailable on ${process.platform}; reviewer or explicit approval is required.`,
     );
+  }
+  if (policyRequiresAsk && params.nonInteractiveApproval) {
+    return denyHeadlessApproval();
   }
   const shouldDenyUnpromptedShellExpansion =
     requiresAllowlistPlanApproval &&
@@ -807,21 +827,7 @@ export async function processGatewayAllowlist(
   }
   if (requiresAsk) {
     if (params.nonInteractiveApproval) {
-      const text = `Exec denied (approval_required): ${params.command}`;
-      return {
-        deniedResult: {
-          content: [{ type: "text", text }],
-          details: {
-            status: "failed",
-            exitCode: null,
-            failureKind: "approval_required",
-            durationMs: 0,
-            aggregated: text,
-            timedOut: false,
-            cwd: params.workdir,
-          },
-        },
-      };
+      return denyHeadlessApproval();
     }
     if (!mutableFileBinding) {
       return {
@@ -961,13 +967,6 @@ export async function processGatewayAllowlist(
       autoReviewRequiresHumanApproval = true;
     }
 
-    const requestArgs = buildDefaultExecApprovalRequestArgs({
-      warnings: params.warnings,
-      approvalRunningNoticeMs: params.approvalRunningNoticeMs,
-      createApprovalSlug,
-      turnSourceChannel: params.turnSourceChannel,
-      turnSourceAccountId: params.turnSourceAccountId,
-    });
     const registerGatewayApproval = async (approvalId: string) =>
       await registerExecApprovalRequestForHostOrThrow({
         approvalId,
@@ -1006,7 +1005,11 @@ export async function processGatewayAllowlist(
       sentApproverDms,
       unavailableReason,
     } = await createAndRegisterDefaultExecApprovalRequest({
-      ...requestArgs,
+      warnings: params.warnings,
+      approvalRunningNoticeMs: params.approvalRunningNoticeMs,
+      createApprovalSlug,
+      turnSourceChannel: params.turnSourceChannel,
+      turnSourceAccountId: params.turnSourceAccountId,
       register: registerGatewayApproval,
     });
     emitGatewayExecApprovalSecurityEvent({
@@ -1026,17 +1029,17 @@ export async function processGatewayAllowlist(
         preResolvedDecision,
       })
     ) {
-      const { baseDecision, approvedByAsk, deniedReason } = applyTimedOutAllowlistFallback(
-        createExecApprovalDecisionState({
-          decision: preResolvedDecision,
-          askFallback,
-        }),
-      );
-      const strictInlineEvalDecision = enforceStrictInlineEvalApprovalBoundary({
-        baseDecision,
-        approvedByAsk,
-        deniedReason,
-        requiresInlineEvalApproval,
+      const strictInlineEvalDecision = await resolveExecApprovalDecisionState({
+        decision: preResolvedDecision ?? null,
+        askFallback,
+        resolveTimedOut: (state) => {
+          const adjusted = applyTimedOutAllowlistFallback(state);
+          return {
+            approvedByAsk: adjusted.approvedByAsk,
+            deniedReason: adjusted.deniedReason,
+          };
+        },
+        requiresExplicitApproval: requiresInlineEvalApproval,
         requiresAutoReviewHumanApproval:
           autoReviewRequiresHumanApproval ||
           requiresHeredocApproval ||
@@ -1161,36 +1164,24 @@ export async function processGatewayAllowlist(
         };
       }
 
-      const initialDecisionState = createExecApprovalDecisionState({
+      const resolvedDecision = await resolveExecApprovalDecisionState({
         decision,
         askFallback,
-      });
-      const {
-        baseDecision,
-        approvedByAsk: baseApprovedByAsk,
-        deniedReason: baseDeniedReason,
-      } = applyTimedOutAllowlistFallback(initialDecisionState);
-      let approvedByAsk = baseApprovedByAsk;
-      let deniedReason = baseDeniedReason;
-
-      if (decision === "allow-once") {
-        approvedByAsk = true;
-      } else if (decision === "allow-always") {
-        approvedByAsk = true;
-      }
-
-      const strictBoundaryDecision = enforceStrictInlineEvalApprovalBoundary({
-        baseDecision,
-        approvedByAsk,
-        deniedReason,
-        requiresInlineEvalApproval,
+        resolveTimedOut: (state) => {
+          const adjusted = applyTimedOutAllowlistFallback(state);
+          return {
+            approvedByAsk: adjusted.approvedByAsk,
+            deniedReason: adjusted.deniedReason,
+          };
+        },
+        requiresExplicitApproval: requiresInlineEvalApproval,
         requiresAutoReviewHumanApproval:
           autoReviewRequiresHumanApproval ||
           requiresHeredocApproval ||
           timedOutFallbackRequiresHeredocApproval,
       });
-      approvedByAsk = strictBoundaryDecision.approvedByAsk;
-      deniedReason = strictBoundaryDecision.deniedReason;
+      const { approvedByAsk } = resolvedDecision;
+      let { deniedReason } = resolvedDecision;
 
       if (
         !approvedByAsk &&

@@ -175,11 +175,16 @@ export function renderRecentSession(params: {
   const pullRequestState = session.worktreeId
     ? host.sessionPullRequestIndicatorState(session.key, session.worktreeId)
     : "none";
-  const ownerAttribution = host.sessionsStatusFilter === "archived" ? "archived" : "created";
+  const ownerAttribution =
+    host.sessionsStatusFilter === "archived"
+      ? "archived"
+      : session.owner?.assignedAt !== undefined
+        ? "owned"
+        : "created";
   const ownerActor = host.sessionOwnershipVisible
     ? host.sessionsStatusFilter === "archived"
       ? session.archivedBy
-      : session.createdActor
+      : (session.owner?.actor ?? session.createdActor)
     : undefined;
   const ownerId = ownerActor?.id?.trim();
   const ownerViewing = ownerId
@@ -196,6 +201,8 @@ export function renderRecentSession(params: {
       ownerActor,
       ownerAttribution,
       ownerViewing,
+      session.participants,
+      session.participantCount,
     );
   const trailingDescription = session.isChild
     ? ""
@@ -205,14 +212,12 @@ export function renderRecentSession(params: {
   const hasTrail = session.isChild && (session.runtimeMs != null || session.startedAt != null);
   const metaId = hasTrail ? sidebarSessionMetaId(session.key) : undefined;
   const stateId = trailingIndicator === nothing ? undefined : sidebarSessionStateId(session.key);
-  const openMenuFromEvent = session.isChild
-    ? undefined
-    : (event: MouseEvent | KeyboardEvent) =>
-        handleContextMenuEvent(
-          event,
-          (event.currentTarget as HTMLElement).querySelector("[data-session-menu]"),
-          (trigger, x, y) => host.sidebarMenus.openSessionMenu(session, x, y, trigger),
-        );
+  const openMenuFromEvent = (event: MouseEvent | KeyboardEvent) =>
+    handleContextMenuEvent(
+      event,
+      (event.currentTarget as HTMLElement).querySelector("[data-session-menu]"),
+      (trigger, x, y) => host.sidebarMenus.openSessionMenu(session, x, y, trigger),
+    );
   const title = [
     display?.title ?? [label, narration, rowMeta].filter(Boolean).join(" · "),
     trailingDescription,
@@ -274,8 +279,8 @@ export function renderRecentSession(params: {
         : () => {
             host.finishSessionDrag();
           }}
-      @contextmenu=${openMenuFromEvent ?? nothing}
-      @keydown=${openMenuFromEvent ?? nothing}
+      @contextmenu=${openMenuFromEvent}
+      @keydown=${openMenuFromEvent}
       @mouseenter=${(event: MouseEvent) => startHoverMarquee(event.currentTarget as HTMLElement)}
       @mouseleave=${(event: MouseEvent) => stopHoverMarquee(event.currentTarget as HTMLElement)}
     >
@@ -304,6 +309,13 @@ export function renderRecentSession(params: {
                   aria-label=${t("sessionsView.archived")}
                   title=${t("sessionsView.archived")}
                   >${icons.archive}</span
+                >`
+              : nothing}${session.forkSource
+              ? html`<span
+                  class="sidebar-session-fork-indicator"
+                  role="img"
+                  aria-label=${t("sessionsView.forkedSession")}
+                  >${icons.gitFork}</span
                 >`
               : nothing}${label}</span
           >
@@ -394,11 +406,11 @@ export function renderRecentSession(params: {
                 >`}
           </button>`
         : nothing}
-      ${session.isChild
-        ? nothing
-        : html`<span class="sidebar-recent-session__aside session-row-aside">
-            <span class="session-row-actions">
-              <button
+      <span class="sidebar-recent-session__aside session-row-aside">
+        <span class="session-row-actions">
+          ${session.isChild
+            ? nothing
+            : html`<button
                 class="session-action session-action--pin"
                 data-sidebar-session-pin="true"
                 type="button"
@@ -408,25 +420,25 @@ export function renderRecentSession(params: {
                 @click=${() => host.toggleSessionPin(session)}
               >
                 ${icons.pin}
-              </button>
-              <button
-                class="session-action"
-                data-session-menu="true"
-                type="button"
-                title=${menuLabel}
-                aria-label=${menuLabel}
-                aria-haspopup="menu"
-                aria-expanded=${String(host.sidebarMenus.sessionMenu?.session.key === session.key)}
-                @click=${(event: MouseEvent) => {
-                  event.stopPropagation();
-                  const trigger = event.currentTarget as HTMLElement;
-                  host.toggleSessionMenu(session, trigger);
-                }}
-              >
-                ${icons.moreHorizontal}
-              </button>
-            </span>
-          </span>`}
+              </button>`}
+          <button
+            class="session-action"
+            data-session-menu="true"
+            type="button"
+            title=${menuLabel}
+            aria-label=${menuLabel}
+            aria-haspopup="menu"
+            aria-expanded=${String(host.sidebarMenus.sessionMenu?.session.key === session.key)}
+            @click=${(event: MouseEvent) => {
+              event.stopPropagation();
+              const trigger = event.currentTarget as HTMLElement;
+              host.toggleSessionMenu(session, trigger);
+            }}
+          >
+            ${icons.moreHorizontal}
+          </button>
+        </span>
+      </span>
     </div>
   `;
   // Marquee state mutates the row DOM; keying prevents cross-session reuse.

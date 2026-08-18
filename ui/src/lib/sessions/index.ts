@@ -463,13 +463,12 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
         publish({ ...state, deletedSessions: remainingDeletedSessions });
       }
     }
-    // Gateway lists own filtering/order; events coalesce into one canonical refresh.
+    // Gateway lists own filtering/order; authoritative events invalidate every matching roster.
     roster.scheduleEvent({
       agentId:
         eventInfo?.agentId ??
         parseAgentSessionKey(eventInfo?.key)?.agentId ??
         (typeof payloadAgentId === "string" ? payloadAgentId : undefined),
-      filtered: event.event === "sessions.changed",
     });
   });
 
@@ -492,6 +491,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     },
     refreshList: (options) => roster.refreshList(options),
     setCreatorFilter: (creatorId) => roster.setCreatorFilter(creatorId),
+    setInvolvingMeFilter: (enabled) => roster.setInvolvingMeFilter(enabled),
     reconcile,
     reconcileChanged,
     reconcileRunTerminal,
@@ -501,6 +501,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     create: mutations.create,
     recover: mutations.recover,
     patch: mutations.patch,
+    assignOwner: mutations.assignOwner,
     retireModelOverride: mutations.retireModelOverride,
     setModelOverride: mutations.setModelOverride,
     patchRowLocal: mutations.patchRowLocal,

@@ -5,6 +5,7 @@ import { findInlineApproval } from "../../app/approval-presentation.ts";
 import { hasOperatorAdminAccess, hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { cancelQuestionPrompt, submitQuestionPrompt } from "../../app/question-prompt.ts";
 import { readPresenceEntries, resolveCurrentSelfUser } from "../../app/user-profile.ts";
+import { navigateMarkdownSession } from "../../components/markdown-session-links.ts";
 import { hasSessionPresenceViewers } from "../../components/viewer-facepile.ts";
 import { t } from "../../i18n/index.ts";
 import {
@@ -28,9 +29,9 @@ import { requiresChatModelSetup } from "./chat-model-setup.ts";
 import { ChatPaneBrowserAnnotationRender } from "./chat-pane-browser-annotation-render.ts";
 import {
   availableSidebarSlots,
+  sidebarPanelActions,
   sidebarPanelDefinitions,
   sidebarPanelTemplates,
-  sidePanelHeaderActions,
 } from "./chat-pane-embedded-panels.ts";
 import {
   createChatPaneSessionActionCallbacks,
@@ -49,7 +50,6 @@ import {
 } from "./chat-pane-state.ts";
 import { dismissRealtimeTalkError } from "./chat-realtime.ts";
 import { activeChatRunStartupStatus } from "./chat-run-startup.ts";
-import type { ChatSendOptions } from "./chat-send-contract.ts";
 import { refreshChatCommands, refreshPageChat } from "./chat-state-refresh.ts";
 import {
   resolveChatAgentId,
@@ -74,6 +74,7 @@ import { scheduleChatScroll } from "./scroll.ts";
 import {
   SIDEBAR_NARROW_BREAKPOINT_PX,
   closeSlot,
+  isSidebarSlotVisible,
   openSlot,
   type SidebarSlotId,
 } from "./sidebar-layout.ts";
@@ -128,6 +129,9 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
     });
     const hasPanelSlot = (slot: SidebarSlotId) =>
       sidebarLayout.columns[0]?.panels.some((panel) => panel.slot === slot) === true;
+    const progressCardInRail =
+      this.paneWidth >= SIDEBAR_NARROW_BREAKPOINT_PX &&
+      isSidebarSlotVisible(sidebarLayout, "companion");
     const openPanelSlot = (slot: SidebarSlotId) => {
       state.updateSidebarLayout(openSlot(state.sidebarLayout, slot));
       if (slot === "companion") {
@@ -295,6 +299,18 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
       onFork: (entryId) => this.forkFromMessage(entryId),
       onReset: () => void clearChatHistory(state),
     });
+    const composerControls = catalogKey
+      ? undefined
+      : renderChatPaneComposerControls({
+          state,
+          selectedSession,
+          agentDefaultModel,
+          modelAccess: mutationAccess.model,
+          effortAccess: mutationAccess.effort,
+          permissionAccess: mutationAccess.permission,
+          canSelectFull: hasOperatorAdminAccess(gatewaySnapshot.hello?.auth ?? null),
+          onModelSetup: () => this.context.navigate("model-setup"),
+        });
     const props: ChatProps = {
       transcript: this.transcript,
       paneId: this.presentationId,
@@ -324,7 +340,7 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
       waitingApproval: state.waitingApprovalStatuses.size > 0,
       compactionStatus: state.compactionStatus,
       fallbackStatus: state.fallbackStatus,
-      planStatus: state.planStatus,
+      progressCard: progressCardInRail ? null : this.progressCard.card,
       gatewayQuestionPrompts: catalogKey || sessionParticipationBlocked ? [] : this.questionPrompts,
       onGatewayQuestionChange: () => {
         this.questionPrompts = [...this.questionPrompts];
@@ -343,6 +359,7 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
             }
           : undefined,
       toolMessages: catalogKey ? [] : state.chatToolMessages,
+      guardianNotices: catalogKey ? [] : state.guardianNotices,
       streamSegments: catalogKey ? [] : state.chatStreamSegments,
       stream: catalogKey ? null : state.chatStream,
       streamStartedAt: catalogKey ? null : state.chatStreamStartedAt,
@@ -429,18 +446,14 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
         basePath: state.basePath,
         modelAuthStatusResult: state.modelAuthStatusResult,
       },
-      composerControls: catalogKey
-        ? nothing
-        : renderChatPaneComposerControls({
-            state,
-            selectedSession,
-            agentDefaultModel,
-            modelAccess: mutationAccess.model,
-            effortAccess: mutationAccess.effort,
-            onModelSetup: () => this.context.navigate("model-setup"),
-          }),
+      composerControls: composerControls?.composerControls ?? nothing,
+      permissionPicker: composerControls?.permissionPicker,
       backgroundTasks: catalogKey ? undefined : backgroundTasks,
       taskSuggestions: this.taskSuggestions,
+      activeTaskSuggestionId: this.activeTaskSuggestionId,
+      taskSuggestionSwapDirection: this.taskSuggestionSwapDirection,
+      taskSuggestionSwapGeneration: this.taskSuggestionSwapGeneration,
+      onNavigateTaskSuggestion: this.navigateTaskSuggestion,
       pullRequests: this.sessionPullRequests.filter(
         (pullRequest) => !this.dismissedSessionPullRequestIds.has(chatPullRequestId(pullRequest)),
       ),
@@ -490,6 +503,7 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
         void this.acceptTaskSuggestion(suggestion, mode, cloudProfileId),
       onDismissTaskSuggestion: (suggestion) => void this.dismissTaskSuggestion(suggestion),
       onOpenWorkspaceFile: (target) => openSessionWorkspaceFile(state, target),
+      onOpenSessionLink: (target) => navigateMarkdownSession(this.context, target),
       onRevealWorkspaceFile: (path) => revealSessionWorkspaceFile(state, path),
       onRefresh: () => {
         if (catalogKey) {
@@ -524,12 +538,15 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
         state.requestUpdate?.();
       },
       onRemoveAttachment: this.removeBrowserAnnotation,
-      onSend: (options?: ChatSendOptions) =>
+      onSend: (followUpModeOverride) =>
         catalogKey
           ? void this.continueCatalogSession(catalogKey)
           : suggestionViewer
             ? void this.addCurrentSessionSuggestion()
-            : void state.handleSendChat(undefined, options),
+            : void state.handleSendChat(
+                undefined,
+                followUpModeOverride ? { followUpMode: followUpModeOverride } : undefined,
+              ),
       onCompact: sessionActionCallbacks.onCompact,
       // Checkpoint deep-link carries the archived filter so the row stays findable.
       onOpenSessionCheckpoints: () => {
@@ -563,7 +580,10 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
       onQueueMove: sessionParticipationBlocked ? undefined : state.moveQueuedChatMessage,
       queuedEdit: {
         editingId: activeQueuedMessageEdit(state)?.id ?? null,
+        editingText: activeQueuedMessageEdit(state)?.draftText,
         onEdit: sessionParticipationBlocked ? undefined : state.editQueuedChatMessage,
+        onEditChange: sessionParticipationBlocked ? undefined : state.updateQueuedChatMessageEdit,
+        onEditSubmit: sessionParticipationBlocked ? undefined : state.submitQueuedChatMessageEdit,
         onCancel: state.cancelQueuedChatMessageEdit,
       },
       onGoalCommand: (command) => void state.handleSendChat(command),
@@ -581,7 +601,6 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
       replyMessageAccess: catalogKey ? undefined : this.currentReplyMessageAccess(state.sessionKey),
       onRewindMessage: sessionActionCallbacks.onRewindMessage,
       onForkMessage: sessionActionCallbacks.onForkMessage,
-      onNewSession: () => void this.createSession(),
       onClearHistory: sessionActionCallbacks.onClearHistory,
       agentsList: state.agentsList,
       currentAgentId,
@@ -636,32 +655,38 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
       chat,
       workspace: renderSessionWorkspaceRail(sessionWorkspace, { embedded: true }),
       tasks: renderBackgroundTasksRail(backgroundTasks, { embedded: true }),
-      detail: state.sidebarContent
-        ? renderChatDetailSlot({
-            backgroundTasks,
-            chat: props,
-            content: state.sidebarContent,
-            fullMessageLoader,
-            host: state,
-            layout: sidebarLayout,
-            transcript: this.taskSidebarTranscript,
-          })
-        : null,
+      detailOpen: this.presented && sidebarLayout.open === true && detailSlotOpen(sidebarLayout),
+      renderDetail: (content) =>
+        renderChatDetailSlot({
+          backgroundTasks,
+          chat: props,
+          content,
+          fullMessageLoader,
+          host: state,
+          layout: sidebarLayout,
+          transcript: this.taskSidebarTranscript,
+        }),
       digest: observerDigest ?? null,
       activeRunId: observerRunId ?? null,
       startedAt: selectedSession?.startedAt ?? state.chatStreamStartedAt ?? undefined,
       lastReadAt: selectedSession?.lastReadAt,
       pullRequests: this.sessionPullRequests,
+      progressCard: progressCardInRail ? this.progressCard.card : null,
       companion: companionThread,
       onCompanionSubmit: (question) => void this.submitSessionCompanionQuestion(question),
       onCompanionDraftChange: (draft) =>
         this.sessionCompanionThreads.setDraft(state.sessionKey, draft, currentAgentId),
       onCompanionVisibilityChange: this.setSessionObserverVisibility,
+      connected: state.connected,
+      pendingQuestion: companionThread.pendingQuestion,
+      onClearCompanion: () => void this.clearSessionCompanion(),
       discussion,
+      discussionOpenUrl: discussion?.openUrl ?? null,
       discussionSourceGeneration: this.connectionGeneration,
     });
     const availableSlots = availableSidebarSlots(panelDefinitions);
     const panelTemplates = sidebarPanelTemplates(panelDefinitions);
+    const panelActions = sidebarPanelActions(panelDefinitions);
     const content = renderSidebarRegion({
       availableWidth: this.paneWidth,
       availableSlots,
@@ -677,12 +702,7 @@ export class ChatPane extends ChatPaneBrowserAnnotationRender {
       }),
       layout: sidebarLayout,
       panelDefinitions,
-      panelActions: sidePanelHeaderActions({
-        connected: state.connected,
-        pendingQuestion: companionThread.pendingQuestion,
-        discussionOpenUrl: discussion?.openUrl ?? null,
-        onClearCompanion: () => void this.clearSessionCompanion(),
-      }),
+      panelActions,
       narrow: this.paneWidth < SIDEBAR_NARROW_BREAKPOINT_PX,
       panelTemplates,
       primary,

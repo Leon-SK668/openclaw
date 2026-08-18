@@ -110,7 +110,7 @@ type DynamicToolBuildParams = {
   ignoreRuntimePlan?: boolean;
   /** Host fact resolver; injectable only for focused plugin contract tests. */
   isHostScopedToolActive?: (toolName: string) => boolean;
-  onYieldDetected: () => void;
+  onYieldDetected: (acknowledgment?: string) => void;
   onCodexAppServerEvent?: (event: CodexDynamicToolBuildEvent) => void;
   onPersistentWebSearchPolicyResolved?: (allowed: boolean) => void;
   onWebSearchPolicyResolved?: (allowed: boolean) => void;
@@ -289,6 +289,7 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
         runId: params.runId,
         approvalReviewerDeviceId: params.approvalReviewerDeviceId,
         agentDir,
+        preparedModelRuntime: params.preparedModelRuntime,
         cwd: input.effectiveCwd ?? input.effectiveWorkspace,
         workspaceDir: input.effectiveWorkspace,
         spawnWorkspaceDir:
@@ -339,8 +340,8 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
         forceMessageTool: shouldForceMessageTool(messagePolicyParams),
         enableHeartbeatTool: params.trigger === "heartbeat" || input.forceHeartbeatTool === true,
         forceHeartbeatTool: params.trigger === "heartbeat" || input.forceHeartbeatTool === true,
-        onYield: (message) => {
-          input.onYieldDetected();
+        onYield: (message, acknowledgment) => {
+          input.onYieldDetected(acknowledgment);
           input.onCodexAppServerEvent?.({
             stream: "codex_app_server.tool",
             data: { name: "sessions_yield", message },
