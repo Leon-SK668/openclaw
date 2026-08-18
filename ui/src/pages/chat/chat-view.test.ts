@@ -710,7 +710,6 @@ function createChatProps(overrides: Partial<ChatProps> = {}): ChatProps {
     onAbort: () => undefined,
     onQueueRemove: () => undefined,
     onQueueSteer: () => undefined,
-    onNewSession: () => undefined,
     onClearHistory: () => undefined,
     onOpenSessionCheckpoints: () => undefined,
     agentsList: null,
@@ -1134,10 +1133,61 @@ describe("chat conversation width", () => {
 });
 
 describe("chat history pagination", () => {
+  it("keeps earlier history discoverable and retryable until the transcript is exhausted", () => {
+    const onShowEarlier = vi.fn();
+    const container = document.createElement("div");
+    renderChatInto(container, {
+      historyPagination: { hasMore: true, loading: false, onShowEarlier },
+    });
+
+    const button = requireElement(
+      container,
+      ".chat-history-available",
+      "earlier history action",
+    ) as HTMLButtonElement;
+    expect(button.textContent).toContain("Earlier history available");
+    expect(button.textContent).toContain("Show earlier");
+    expect(button.closest(".chat-main__conversation")).not.toBeNull();
+    expect(button.closest(".chat-thread")).toBeNull();
+    button.click();
+    expect(onShowEarlier).toHaveBeenCalledOnce();
+
+    renderChatInto(container, {
+      historyPagination: { hasMore: true, loading: true, onShowEarlier },
+    });
+    const loadingButton = requireElement(
+      container,
+      ".chat-history-available",
+      "loading earlier history action",
+    ) as HTMLButtonElement;
+    expect(loadingButton.textContent).toContain("Loading earlier history");
+    expect(loadingButton.querySelector(".session-run-spinner")).not.toBeNull();
+    expect(loadingButton.disabled).toBe(false);
+    loadingButton.click();
+    expect(onShowEarlier).toHaveBeenCalledTimes(2);
+
+    renderChatInto(container, {
+      historyPagination: { hasMore: true, loading: false, onShowEarlier },
+    });
+    const retryButton = requireElement(
+      container,
+      ".chat-history-available",
+      "retry earlier history action",
+    ) as HTMLButtonElement;
+    retryButton.click();
+    expect(onShowEarlier).toHaveBeenCalledTimes(3);
+
+    renderChatInto(container);
+    expect(container.querySelector(".chat-history-available")).toBeNull();
+    expect(container.querySelector(".chat-history-sentinel")).toBeNull();
+  });
+
   it("renders the auto-load sentinel and a spinner while older history loads", () => {
     const container = renderChatView({
       historyPagination: {
+        hasMore: true,
         loading: true,
+        onShowEarlier: vi.fn(),
       },
     });
     const threadInner = requireElement(container, ".chat-thread-inner", "chat thread inner");
@@ -1155,7 +1205,9 @@ describe("chat history pagination", () => {
     const onHistoryIntent = vi.fn();
     const container = renderChatView({
       historyPagination: {
+        hasMore: true,
         loading: false,
+        onShowEarlier: vi.fn(),
       },
       onHistoryIntent,
     });
@@ -1173,7 +1225,9 @@ describe("chat history pagination", () => {
     try {
       renderChatView({
         historyPagination: {
+          hasMore: true,
           loading: false,
+          onShowEarlier: vi.fn(),
         },
         onHistoryIntent: vi.fn(),
       });
@@ -1742,13 +1796,24 @@ describe("chat composer workbench", () => {
   it("renders session controls in the composer without owning side-panel content", () => {
     const container = renderChatView({
       composerControls: html`<button class="test-composer-control">Model</button>`,
+      permissionPicker: {
+        canSelectFull: true,
+        mode: "workspace",
+        onSelect: vi.fn(),
+      },
     });
 
     const composerControl = container.querySelector(
       ".agent-chat__composer-controls .test-composer-control",
     );
+    const permissionControl = container.querySelector('[data-chat-permission-select="true"]');
     expect(composerControl).not.toBeNull();
     expect(composerControl?.closest(".agent-chat__composer-footer")).not.toBeNull();
+    expect(permissionControl?.closest(".agent-chat__composer-meta")).not.toBeNull();
+    expect(permissionControl?.closest(".chat-composer-model-control")).toBeNull();
+    expect(permissionControl!.compareDocumentPosition(composerControl!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
     expect(container.querySelector(".agent-chat__composer-header")).toBeNull();
     expect(container.querySelector(".chat-workspace-rail")).toBeNull();
   });
@@ -2552,7 +2617,7 @@ describe("chat loading skeleton", () => {
       "Sending message",
     );
     expect(container.querySelector(".chat-reading-indicator")).not.toBeNull();
-    expect(contextUsage?.closest(".agent-chat__composer-meta")).not.toBeNull();
+    expect(contextUsage?.closest(".agent-chat__composer-context")).not.toBeNull();
   });
 
   it("places context usage after the composer controls in the bottom row", () => {
@@ -2585,7 +2650,7 @@ describe("chat loading skeleton", () => {
 
     const context = container.querySelector(".context-ring");
     expect(context).toBeInstanceOf(HTMLElement);
-    expect(context?.closest(".agent-chat__composer-meta")).not.toBeNull();
+    expect(context?.closest(".agent-chat__composer-context")).not.toBeNull();
     expect(context?.closest(".agent-chat__composer-footer")).not.toBeNull();
     // The session provider matches a plan-usage group, so dollar estimates
     // yield to the subscription windows.
