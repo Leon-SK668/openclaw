@@ -5,6 +5,7 @@ import type {
   createWorkerSessionPlacementStore,
   WorkerSessionPlacementRecord,
 } from "./placement-store.js";
+import type { WorkerPlacementAuthorization } from "./service-contract.js";
 import type { WorkerEnvironmentService } from "./service.js";
 import { boundedWorkerError } from "./worker-error.js";
 
@@ -14,9 +15,9 @@ export type WorkerActiveDispatchPlacement = Extract<
   { state: "active" }
 >;
 export type WorkerFailedDispatchPlacement = Extract<WorkerDispatchPlacement, { state: "failed" }>;
-export type WorkerStartingDispatchPlacement = Extract<
+export type WorkerProvisioningDispatchPlacement = Extract<
   WorkerDispatchPlacement,
-  { state: "starting" }
+  { state: "provisioning" }
 >;
 type WorkerDrainingDispatchPlacement = Extract<WorkerDispatchPlacement, { state: "draining" }>;
 type WorkerReconcilingDispatchPlacement = Extract<
@@ -32,6 +33,7 @@ export type WorkerDispatchPlacementStore = Pick<
   | "claimTurn"
   | "closeWorkerTurnToolState"
   | "beginPlacementMove"
+  | "cancelPlacementMove"
   | "completePlacementMoveSourceToLocal"
   | "completePlacementMoveToWorker"
   | "getPlacementMove"
@@ -82,6 +84,7 @@ export type WorkerActivationBarrier = (params: {
   sessionKey: string;
   agentId: string;
   executionMode: WorkerPlacementExecutionMode;
+  authorize?: WorkerPlacementAuthorization;
   activate: () => WorkerActiveDispatchPlacement;
 }) => Promise<WorkerActiveDispatchPlacement>;
 

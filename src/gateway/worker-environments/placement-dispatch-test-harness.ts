@@ -12,6 +12,7 @@ import {
   type PlacementStore,
   REQUEST,
   seedActivePlacement,
+  seedProvisioningPlacement,
   seedStartingPlacement,
 } from "./placement-dispatch-test-fixtures.js";
 import { createWorkerPlacementDispatchService } from "./placement-dispatch.js";
@@ -49,6 +50,13 @@ export function createHarness(
     terminalizedReclaimError?: Error;
     environmentGeneration?: number;
     failMoveAfterBegin?: boolean;
+    recoveryBarrierError?: Error;
+    prepareAcceptedWorkspacePublication?: Parameters<
+      typeof createWorkerPlacementDispatchService
+    >[0]["prepareAcceptedWorkspacePublication"];
+    publishAcceptedWorkspace?: Parameters<
+      typeof createWorkerPlacementDispatchService
+    >[0]["publishAcceptedWorkspace"];
   } = {},
 ) {
   const reconciledManifestRef = MANIFEST_REF.replaceAll("b", "c");
@@ -93,6 +101,7 @@ export function createHarness(
       }
       return begun;
     },
+    cancelPlacementMove: (params) => placementStore.cancelPlacementMove(params),
     completePlacementMoveSourceToLocal: (params) => {
       log.push("placement:local");
       return placementStore.completePlacementMoveSourceToLocal(params);
@@ -342,22 +351,32 @@ export function createHarness(
     placements,
     environments,
     workspaceOperations: options.workspaceOperations ?? createWorkerWorkspaceOperationCoordinator(),
-    runLocalBarrier: async ({ startDispatch }) => {
+    runLocalBarrier: async ({ authorize, startDispatch }) => {
       log.push("barrier");
       if (options.failAt === "preflight") {
         fail("preflight");
       }
+      authorize?.();
       const placement = startDispatch();
       if (options.failAt === "barrier") {
         throw new Error("barrier failed");
       }
       return placement;
     },
-    runActivationBarrier: async ({ activate }) => {
+    runRecoveryBarrier: async ({ run }) => {
+      log.push("recovery-barrier");
+      if (options.recoveryBarrierError) {
+        throw options.recoveryBarrierError;
+      }
+      await run(options.workspacePath ?? "/gateway/workspace");
+    },
+    runActivationBarrier: async ({ authorize, activate }) => {
+      authorize?.();
       fail("activation");
       return activate();
     },
-    runMoveBarrier: async ({ begin }) => {
+    runMoveBarrier: async ({ authorize, begin }) => {
+      authorize?.();
       const begun = begin();
       if (options.failMoveAfterBegin) {
         throw new Error("move barrier interrupted");
@@ -372,20 +391,33 @@ export function createHarness(
             executionMode: REQUEST.executionMode,
             ...(target.kind === "device" ? { deviceId: target.deviceId } : {}),
           },
-    runReclaimBarrier: async ({ begin, reclaim }) =>
-      await reclaim(options.workspacePath ?? "/gateway/workspace", begin()),
+    runReclaimBarrier: async ({ authorize, begin, reclaim }) => {
+      authorize?.();
+      return await reclaim(options.workspacePath ?? "/gateway/workspace", begin());
+    },
+    runFailedReclaimBarrier: async ({ authorize, reclaim }) => {
+      authorize?.();
+      return await reclaim();
+    },
     resolveWorkspacePath: async () => {
       fail("workspace");
       return options.workspacePath ?? "/gateway/workspace";
     },
     reportWorkspaceResultConflict,
     resolveWorkspaceResultConflict: vi.fn(async () => options.priorWorkspaceResultConflict),
+    ...(options.prepareAcceptedWorkspacePublication
+      ? { prepareAcceptedWorkspacePublication: options.prepareAcceptedWorkspacePublication }
+      : {}),
+    ...(options.publishAcceptedWorkspace
+      ? { publishAcceptedWorkspace: options.publishAcceptedWorkspace }
+      : {}),
   });
   return {
     log,
     reconciledManifestRef,
     placements: {
       current: () => placementStore.get(REQUEST.sessionId),
+      seedProvisioning: () => seedProvisioningPlacement(placementStore, environmentId),
       seedStarting: () => seedStartingPlacement(placementStore, environmentId),
       seedActive: (ownerEpoch: number, executionMode?: "worker-turn" | "remote-exec") =>
         seedActivePlacement(placementStore, { environmentId, ownerEpoch, executionMode }),

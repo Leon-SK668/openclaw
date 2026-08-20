@@ -1,5 +1,6 @@
 import pLimit from "p-limit";
 import { runWithoutOwnedSessionTranscriptWrites } from "../../../config/sessions/transcript-write-context.js";
+import { clearGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
 import {
   runWithGatewayIndependentRootWorkContinuation,
   runWithGatewayIndependentRootWorkAdmission,
@@ -212,6 +213,7 @@ const completeRequesterSettleWakeBatch = (
       context.deleteRequesterSettleWakeTimer(runId);
     }
     if (entry.requesterSettleWake === undefined || !params.runs.has(runId)) {
+      clearGatewayContextResolver(entry);
       params.resumedRuns.delete(runId);
       params.clearPendingLifecycleError(runId);
     }
@@ -588,6 +590,7 @@ export function completeCleanupBookkeeping(
       cleanupParams.entry.terminalOwner = previousTerminalOwner;
       throw error;
     }
+    clearGatewayContextResolver(cleanupParams.entry);
     scheduleCleanupTails({ allowRetiredRow: false, isDeleteCleanup });
     retryDeferredCompletedAnnounces(cleanupParams.runId);
     return;
@@ -609,6 +612,7 @@ export function completeCleanupBookkeeping(
         params.runs.set(cleanupParams.runId, cleanupParams.entry);
         throw error;
       }
+      clearGatewayContextResolver(cleanupParams.entry);
       scheduleCleanupTails({ allowRetiredRow: true, isDeleteCleanup });
       retryDeferredCompletedAnnounces(cleanupParams.runId);
       return;
@@ -652,6 +656,7 @@ export function completeCleanupBookkeeping(
       cleanupParams.entry.terminalOwner = previousTerminalOwner;
       throw error;
     }
+    clearGatewayContextResolver(cleanupParams.entry);
   }
   scheduleCleanupTails({ allowRetiredRow: false, isDeleteCleanup });
   retryDeferredCompletedAnnounces(cleanupParams.runId);
