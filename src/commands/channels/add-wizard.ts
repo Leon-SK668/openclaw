@@ -3,8 +3,10 @@
 // prompter driving the Control UI / native clients).
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
+  AgentSelectionRequiredError,
   listAgentIds,
   resolveConfiguredAgentId,
+  resolveAgentOperationAgentId,
   tryResolveAgentOperationAgentId,
 } from "../../agents/agent-scope-config.js";
 import { getLoadedChannelPlugin } from "../../channels/plugins/index.js";
@@ -35,14 +37,18 @@ export async function selectChannelSetupAgentId(
   cfg: OpenClawConfig,
   prompter: WizardPrompter,
 ): Promise<string> {
-  const agentIds = listAgentIds(cfg);
-  if (agentIds.length <= 1) {
-    return resolveChannelSetupOwner(cfg).agentId;
+  try {
+    return resolveAgentOperationAgentId(cfg);
+  } catch (error) {
+    if (!(error instanceof AgentSelectionRequiredError)) {
+      throw error;
+    }
   }
-  return await prompter.select({
+  const selectedAgentId = await prompter.select({
     message: "Set up channels for agent",
-    options: agentIds.map((agentId) => ({ value: agentId, label: agentId })),
+    options: listAgentIds(cfg).map((agentId) => ({ value: agentId, label: agentId })),
   });
+  return resolveConfiguredAgentId(cfg, selectedAgentId);
 }
 
 /** Resolve omitted, matched, and unmatched channel targets without collapsing caller intent. */
@@ -83,6 +89,7 @@ export async function resolveInitialWizardChannelTarget(
 
 type ChannelsAddWizardFlowParams = {
   cfg: OpenClawConfig;
+  agentId?: string;
   workspaceDir?: string;
   baseHash?: string;
   runtime: RuntimeEnv;
@@ -238,7 +245,7 @@ export async function runChannelsAddWizardFlow(params: ChannelsAddWizardFlowPara
             value: agent.id,
             label: agent.isDefault ? `${agent.id} (default)` : agent.id,
           })),
-          initialValue: defaultAgentId,
+          initialValue: params.agentId ?? defaultAgentId,
         });
         const bindingResult = applyAgentBindings(nextConfig, [
           {
@@ -311,6 +318,7 @@ export async function runChannelsSetupWizard(
   }
   await runChannelsAddWizardFlow({
     cfg,
+    agentId,
     ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
     runtime,
     prompter,

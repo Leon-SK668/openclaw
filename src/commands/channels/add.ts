@@ -158,10 +158,11 @@ async function channelsAddCommandImpl(
       runtime.exit(1);
       return;
     }
-    const workspaceDir =
+    const agentId =
       opts.agent === undefined
-        ? resolveChannelSetupOwner(cfg, await selectChannelSetupAgentId(cfg, prompter)).workspaceDir
-        : resolveChannelSetupOwner(cfg, opts.agent).workspaceDir;
+        ? await selectChannelSetupAgentId(cfg, prompter)
+        : resolveChannelSetupOwner(cfg, opts.agent).agentId;
+    const workspaceDir = resolveChannelSetupOwner(cfg, agentId).workspaceDir;
     const target = await resolveInitialWizardChannelTarget(opts.channel, cfg, workspaceDir);
     if (target.kind === "unresolved") {
       runtime.error(target.message);
@@ -171,6 +172,7 @@ async function channelsAddCommandImpl(
     await runChannelsAddWizardFlow({
       cfg,
       ...(baseHash !== undefined ? { baseHash } : {}),
+      agentId,
       runtime,
       prompter,
       ...(workspaceDir ? { workspaceDir } : {}),
