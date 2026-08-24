@@ -1,4 +1,5 @@
 import { initialState, Task, TaskStatus } from "@lit/task";
+import { readMissingScopeError } from "@openclaw/gateway-client/browser";
 import type { ReactiveControllerHost } from "lit";
 import type {
   FsListDirResult,
@@ -11,8 +12,9 @@ import type {
 } from "../../../../packages/gateway-protocol/src/index.js";
 import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
+import { formatUiError } from "../../lib/format-error.ts";
 import { canCallGatewayMethod, isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
-import type { BrowserTarget, DraftNode } from "./discovery.ts";
+import type { BrowserTarget } from "./discovery.ts";
 import type { DraftGatewayState } from "./draft-gateway-state.ts";
 import { folderDisplayName, isAbsolutePath, isKnownWorkspacePath } from "./path.ts";
 import { projectCloneInput, type DraftRemoteProject } from "./project-chip.ts";
@@ -23,9 +25,6 @@ type DraftPickerKind = "where" | "project" | "detail";
 
 type DraftPlaceBrowserSnapshot = Readonly<{
   context: ApplicationContext | undefined;
-  nodes: readonly DraftNode[];
-  folder: string;
-  execNode: string;
   isAdmin: boolean;
 }>;
 
@@ -57,7 +56,8 @@ export class DraftPlaceBrowser {
   private browserProjectPathValue: string | null = null;
   private browserRegisteringValue = false;
   private openPopoverValue: DraftPickerKind | null = null;
-  private hidingPopoverValue: DraftPickerKind | null = null;
+  // Independent hide animations can overlap; keep every trigger fenced until its own completes.
+  private readonly hidingPopovers = new Set<DraftPickerKind>();
   // Live head input; absolute paths stay applicable even without fs.listDir.
   private browserPathDraftValue = "";
   private browserRequestToken = 0;
@@ -183,7 +183,7 @@ export class DraftPlaceBrowser {
       return null;
     }
     const error = this.projectSearchTask.error;
-    return error instanceof Error ? error.message : String(error);
+    return formatUiError(error);
   }
 
   get browserLoading(): boolean {
@@ -215,7 +215,18 @@ export class DraftPlaceBrowser {
   }
 
   popoverHiding(kind: DraftPickerKind): boolean {
-    return this.hidingPopoverValue === kind;
+    return this.hidingPopovers.has(kind);
+  }
+
+  popoverCallbacks(kind: DraftPickerKind) {
+    return {
+      popoverOpen: this.popoverOpen(kind),
+      popoverHiding: this.popoverHiding(kind),
+      onGuardTransition: (event: MouseEvent) => this.guardPopoverTransition(event, kind),
+      onPopoverShow: () => this.onPopoverShow(kind),
+      onPopoverHide: () => this.onPopoverHide(kind),
+      onPopoverAfterHide: () => this.onPopoverAfterHide(kind),
+    };
   }
 
   get browserPathDraft(): string {
@@ -261,7 +272,6 @@ export class DraftPlaceBrowser {
     sessions: readonly RecentPlaceSource[];
     workspace: string;
     workspaceRoots: readonly string[];
-    execNodes: readonly DraftNode[];
     isAdmin: boolean;
   }): ProjectRecent[] {
     const allowGatewayFolder = (folder: string) =>
@@ -269,15 +279,12 @@ export class DraftPlaceBrowser {
     const serverRecents = this.projectRecentsValue?.filter((recent) =>
       recent.kind === "project"
         ? this.projectsValue.some((project) => project.id === recent.projectId)
-        : recent.execNode
-          ? params.execNodes.some((node) => node.nodeId === recent.execNode)
-          : allowGatewayFolder(recent.folder),
+        : !recent.execNode && allowGatewayFolder(recent.folder),
     );
     return (
       serverRecents ??
       recentPlaces(params.sessions, {
         workspace: params.workspace,
-        execNodes: params.execNodes,
         allowGatewayFolder,
       }).map((recent) => {
         const item: ProjectRecent = {
@@ -285,9 +292,6 @@ export class DraftPlaceBrowser {
           folder: recent.folder,
           displayName: folderDisplayName(recent.folder),
         };
-        if (recent.execNode) {
-          item.execNode = recent.execNode;
-        }
         return item;
       })
     );
@@ -363,16 +367,12 @@ export class DraftPlaceBrowser {
     return isAbsolutePath(draft) ? draft : null;
   }
 
-  selectBrowserTarget(target: BrowserTarget) {
-    const snapshot = this.read();
-    const folder = snapshot.folder.trim();
-    const matchesCurrentTarget = target.nodeId === snapshot.execNode;
-    const path = matchesCurrentTarget && isAbsolutePath(folder) ? folder : undefined;
-    this.browserTargetValue = target;
-    this.loadBrowser(path);
+  selectGatewayBrowser(label: string, path?: string) {
+    this.browserTargetValue = { nodeId: "", label };
+    this.loadBrowser(path && isAbsolutePath(path) ? path : undefined);
   }
 
-  loadBrowser(path: string | undefined) {
+  loadBrowser(path: string | undefined, retainedError: string | null = null) {
     const snapshot = this.read();
     const gatewaySnapshot = snapshot.context?.gateway.snapshot;
     const client = gatewaySnapshot?.client;
@@ -380,27 +380,16 @@ export class DraftPlaceBrowser {
     if (gatewaySnapshot?.phase !== "connected" || !client || !target) {
       return;
     }
-    const targetNode = snapshot.nodes.find((node) => node.nodeId === target.nodeId);
-    if (targetNode?.canExec && !targetNode.canBrowse) {
-      this.showRoot();
-      this.browserTargetValue = target;
-      this.browserPathDraftValue = path ?? "";
-      this.callbacks.requestUpdate();
-      return;
-    }
     const requestId = ++this.browserRequestToken;
     this.browserLoadingValue = true;
-    this.browserErrorValue = null;
+    this.browserErrorValue = retainedError;
     this.browserProjectPathValue = null;
     this.browserListingValue = null;
     this.browserPathDraftValue = path ?? "";
     const draftAtRequest = this.browserPathDraftValue;
     this.callbacks.requestUpdate();
     void client
-      .request<FsListDirResult>("fs.listDir", {
-        ...(path ? { path } : {}),
-        ...(target.nodeId ? { nodeId: target.nodeId } : {}),
-      })
+      .request<FsListDirResult>("fs.listDir", path ? { path } : {})
       .then((result) => {
         if (requestId !== this.browserRequestToken) {
           return;
@@ -412,7 +401,7 @@ export class DraftPlaceBrowser {
         if (result?.path && this.browserPathDraftValue === draftAtRequest) {
           this.browserPathDraftValue = result.path;
         }
-        if (result?.path && !target.nodeId && snapshot.isAdmin) {
+        if (result?.path && snapshot.isAdmin) {
           void client
             .request<WorktreesBranchesResult>("worktrees.branches", {
               repoRoot: result.path,
@@ -432,12 +421,17 @@ export class DraftPlaceBrowser {
         }
         this.callbacks.requestUpdate();
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (requestId !== this.browserRequestToken) {
           return;
         }
         if (path) {
-          this.loadBrowser(undefined);
+          this.loadBrowser(
+            undefined,
+            readMissingScopeError(error)?.missingScope === "operator.admin"
+              ? t("newSession.browseRequiresAdmin")
+              : t("newSession.browserLoadFailed"),
+          );
           return;
         }
         this.browserErrorValue = t("newSession.browserLoadFailed");
@@ -459,7 +453,6 @@ export class DraftPlaceBrowser {
       gatewaySnapshot?.phase !== "connected" ||
       !client ||
       !snapshot.isAdmin ||
-      this.browserTargetValue?.nodeId ||
       this.browserProjectPathValue !== path ||
       this.browserRegisteringValue
     ) {
@@ -483,7 +476,7 @@ export class DraftPlaceBrowser {
       this.close();
     } catch (error) {
       if (requestId === this.browserRequestToken && client === this.gateway.client) {
-        this.browserErrorValue = error instanceof Error ? error.message : String(error);
+        this.browserErrorValue = formatUiError(error);
       }
     } finally {
       if (requestId === this.browserRequestToken) {
@@ -506,7 +499,7 @@ export class DraftPlaceBrowser {
     if (this.openPopoverValue === kind) {
       this.openPopoverValue = null;
     }
-    this.hidingPopoverValue = kind;
+    this.hidingPopovers.add(kind);
     if (kind === "project") {
       this.showRoot();
     } else {
@@ -515,15 +508,13 @@ export class DraftPlaceBrowser {
   }
 
   onPopoverAfterHide(kind: DraftPickerKind) {
-    if (this.hidingPopoverValue === kind) {
-      this.hidingPopoverValue = null;
-    }
+    this.hidingPopovers.delete(kind);
     this.restorePopoverTrigger(`new-session-${kind}-trigger`, `.new-session-page__${kind}-popover`);
     this.callbacks.requestUpdate();
   }
 
   guardPopoverTransition(event: Event, kind: DraftPickerKind) {
-    if (this.hidingPopoverValue !== kind) {
+    if (!this.hidingPopovers.has(kind)) {
       return;
     }
     event.preventDefault();
@@ -531,7 +522,7 @@ export class DraftPlaceBrowser {
   }
 
   clearPopoverHiding() {
-    this.hidingPopoverValue = null;
+    this.hidingPopovers.clear();
     this.callbacks.requestUpdate();
   }
 

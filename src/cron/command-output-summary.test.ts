@@ -53,10 +53,10 @@ describe("cron command output summaries", () => {
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       [
+        "stdout:",
         "action-required output preserved:",
         "Open this URL to continue:",
         "",
-        "stdout:",
         "[redacted-url]",
         "[redacted-code]",
         "",
@@ -75,14 +75,35 @@ describe("cron command output summaries", () => {
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       [
+        "stdout:",
         "action-required output preserved:",
         "Enter this code:",
         "",
-        "stdout:",
         "[redacted-code]",
         "",
         "stderr:",
         "diagnostic output",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps preserved stderr prompt continuation with the stderr tail", () => {
+    const summary = buildCronCommandSummary({
+      stdout: "ordinary output",
+      stderr: "WDJBMJHT",
+      preservedStderrLines: ["Enter this code:"],
+    });
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      [
+        "stdout:",
+        "ordinary output",
+        "",
+        "stderr:",
+        "action-required output preserved:",
+        "Enter this code:",
+        "",
+        "[redacted-code]",
       ].join("\n"),
     );
   });
@@ -460,12 +481,19 @@ describe("cron command output summaries", () => {
   });
 
   it.each([
+    ["Enter code 1234", "Enter code [redacted-code]"],
     ["Your code is 482913.", "Your code is [redacted-code]."],
     ["Your code is WDJBMJHT", "Your code is [redacted-code]"],
     ["Your code is ABCD-EFGH, paste it", "Your code is [redacted-code], paste it"],
     ["Your code is: 739214", "Your code is: [redacted-code]"],
   ])("redacts a punctuated generic code prompt: %s", (summary, expected) => {
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(expected);
+  });
+
+  it("preserves four-digit numbers without an attached code prompt", () => {
+    const summary = "action-required output preserved:\nBuild 1234 is complete\n\nReference 1234";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(summary);
   });
 
   it("uses preserved-block redaction for prompt-bearing lines", () => {
@@ -524,6 +552,14 @@ describe("cron command output summaries", () => {
 
     expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
       "Enter code [redacted-code]\nReference [redacted-code]\nUse this code:\n[redacted-code]\nReference [redacted-code]",
+    );
+  });
+
+  it("redacts repeats of prompt-classified four-digit codes", () => {
+    const summary = "Enter code 1234\nReference 1234";
+
+    expect(redactCronCommandSummaryForExternalDelivery(summary)).toBe(
+      "Enter code [redacted-code]\nReference [redacted-code]",
     );
   });
 

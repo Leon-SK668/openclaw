@@ -18,7 +18,7 @@ const ONBOARDING_TARGET_LOCK_OPTIONS = {
   staleRecovery: "remove-if-unchanged" as const,
 };
 const activeSetupMigrationTargetLock = new AsyncLocalStorage<string>();
-const MEANINGFUL_CONFIG_IGNORED_KEYS = new Set(["$schema", "meta"]);
+const MEANINGFUL_CONFIG_IGNORED_KEYS = new Set(["$schema", "meta", "telemetry"]);
 const MEANINGFUL_WIZARD_CONFIG_IGNORED_KEYS = new Set(["securityAcknowledgedAt"]);
 const MEANINGFUL_WORKSPACE_ENTRIES = [
   "AGENTS.md",
@@ -29,7 +29,6 @@ const MEANINGFUL_WORKSPACE_ENTRIES = [
   "skills",
 ] as const;
 const IMPORT_BLOCKING_STATE_ENTRIES = ["credentials", "sessions", "agents"] as const;
-const MIGRATION_TARGET_STATE_ENTRIES = [...IMPORT_BLOCKING_STATE_ENTRIES, "state"] as const;
 
 export class SetupTargetLockedError extends Error {
   readonly code = "setup_target_locked";
@@ -135,18 +134,21 @@ export async function inspectSetupMigrationFreshness(params: {
   return { fresh: reasons.length === 0, reasons };
 }
 
-/** Preserves the acknowledgement accepted in-memory before the import lock is acquired. */
-export function preserveSetupMigrationSecurityAcknowledgement(
+/** Preserve interactive consent decisions made before the import lock rereads config. */
+export function preserveSetupMigrationOnboardingConsents(
   config: OpenClawConfig,
   inMemoryConfig: OpenClawConfig,
 ): OpenClawConfig {
   const securityAcknowledgedAt = inMemoryConfig.wizard?.securityAcknowledgedAt;
-  if (!securityAcknowledgedAt || config.wizard?.securityAcknowledgedAt) {
+  const preserveSecurity = securityAcknowledgedAt && !config.wizard?.securityAcknowledgedAt;
+  const preserveTelemetry = inMemoryConfig.telemetry?.consentedAt && !config.telemetry?.consentedAt;
+  if (!preserveSecurity && !preserveTelemetry) {
     return config;
   }
   return {
     ...config,
-    wizard: { ...config.wizard, securityAcknowledgedAt },
+    ...(preserveSecurity ? { wizard: { ...config.wizard, securityAcknowledgedAt } } : {}),
+    ...(preserveTelemetry ? { telemetry: inMemoryConfig.telemetry } : {}),
   };
 }
 
@@ -254,7 +256,7 @@ export async function buildSetupMigrationTargetSnapshot(params: {
   const targetConfig = buildSetupMigrationSnapshotConfig(params.config);
   hash.update(`config:${JSON.stringify(canonicalizeSetupMigrationValue(targetConfig))}\0`);
   await hashTargetPath(hash, params.workspaceDir, "workspace");
-  for (const entry of MIGRATION_TARGET_STATE_ENTRIES) {
+  for (const entry of IMPORT_BLOCKING_STATE_ENTRIES) {
     await hashTargetPath(hash, path.join(params.stateDir, entry), `state/${entry}`);
   }
   return hash.digest("hex");
@@ -306,7 +308,9 @@ export async function prepareSetupMigrationAttemptBoundary(params: {
     workspaceDir: params.workspaceDir,
   });
   if (currentTargetSnapshotHash !== params.expectedTargetSnapshotHash) {
-    throw new Error("Migration target changed while preparing the import. Review it and retry.");
+    throw new SetupMigrationTargetChangedError(
+      "Migration target changed while preparing the import. Review it and retry.",
+    );
   }
   const sourceSnapshotHash = await buildSetupMigrationPlanSourceSnapshot(params.plan);
   if (sourceSnapshotHash !== params.expectedSourceSnapshotHash) {
@@ -378,3 +382,4 @@ export function assertFreshSetupMigrationTarget(freshness: {
 }
 
 export class SetupMigrationFreshnessError extends Error {}
+export class SetupMigrationTargetChangedError extends Error {}

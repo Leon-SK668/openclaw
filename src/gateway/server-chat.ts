@@ -10,7 +10,6 @@ import {
   buildAgentRunTerminalOutcomeFromLifecycleEvent,
   classifyAgentRunTerminalOutcome,
 } from "../agents/agent-run-terminal-outcome.js";
-import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { isTimeoutError, resolveFailoverReasonFromError } from "../agents/failover-error.js";
 import type { FailoverReason } from "../agents/failover/signal.js";
 import { resolveToolSearchCodeDisplayTarget } from "../agents/tool-display-common.js";
@@ -53,29 +52,30 @@ import type {
   SessionMessageSubscriberRegistry,
   ToolEventRecipientRegistry,
 } from "./server-chat-state.js";
-import { loadGatewaySessionLifecycleSnapshot } from "./server-chat.load-gateway-session-row.runtime.js";
-import { persistGatewaySessionLifecycleEvent } from "./server-chat.persist-session-lifecycle.runtime.js";
 import { hasSessionChangeReceivers } from "./session-change-receivers.js";
-import { buildGatewaySessionEventRow } from "./session-event-payload.js";
+import {
+  buildGatewaySessionEventRow,
+  projectSessionEventActiveRunIds,
+} from "./session-event-payload.js";
 import {
   deriveGatewaySessionLifecycleProjectionPatch,
   isRestartRecoveryLifecycleEvent,
   isStaleLifecycleEventForSession,
+  persistGatewaySessionLifecycleEvent,
 } from "./session-lifecycle-state.js";
+import { tryResolveSessionCompatibilityOwnerAgentId } from "./session-request-agent.js";
+import { resolveSessionSubscriptionKeys } from "./session-subscription-keys.js";
 import {
-  resolveSessionSubscriptionKey,
-  resolveSessionSubscriptionKeys,
-} from "./session-subscription-keys.js";
-import { loadGatewaySessionEntryReadOnly } from "./session-utils.js";
+  loadGatewaySessionEntryReadOnly,
+  loadGatewaySessionLifecycleSnapshot,
+} from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
 
 export {
   createChatAbortMarker,
-  createChatRunRegistry,
   createChatRunState,
   createSessionEventSubscriberRegistry,
   createSessionMessageSubscriberRegistry,
-  createToolEventRecipientRegistry,
 } from "./server-chat-state.js";
 export type {
   ChatAbortMarker,
@@ -94,6 +94,7 @@ const CHAT_STATE_BY_TERMINAL_CLASSIFICATION = {
   cancellation: "aborted",
   failure: "error",
 } as const;
+const RESTART_RECOVERY_LIFECYCLE_PHASES = new Set(["start", "end", "error"]);
 
 function readChatRunStartupPhase(value: unknown): ChatRunStartupPhase | undefined {
   switch (value) {
@@ -140,10 +141,6 @@ function projectToolSearchCodeEventForChannelPayload<T extends { data?: unknown 
     projectedData.bridgeVerb = target.bridgeVerb;
   }
   return { ...payload, data: projectedData };
-}
-
-function resolveHeartbeatAckMaxChars(): number {
-  return DEFAULT_HEARTBEAT_ACK_MAX_CHARS;
 }
 
 function resolveHeartbeatContext(runId: string, sourceRunId?: string) {
@@ -211,7 +208,7 @@ function normalizeHeartbeatChatFinalText(params: {
 
   const stripped = stripHeartbeatToken(params.text, {
     mode: "heartbeat",
-    maxAckChars: resolveHeartbeatAckMaxChars(),
+    maxAckChars: DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
   });
   if (!stripped.didStrip) {
     return { suppress: false, text: params.text };
@@ -337,7 +334,7 @@ export type AgentEventHandlerOptions = {
   nodeSendToSession: NodeSendToSession;
   agentRunSeq: Map<string, number>;
   chatRunState: ChatRunState;
-  resolveSessionKeyForRun: (runId: string) => string | undefined;
+  resolveSessionKeyForRun: (runId: string, options?: { agentId?: string }) => string | undefined;
   clearAgentRunContext: (
     runId: string,
     lifecycleGeneration?: string,
@@ -347,6 +344,7 @@ export type AgentEventHandlerOptions = {
   sessionEventSubscribers: SessionEventSubscriberRegistry;
   sessionMessageSubscribers: SessionMessageSubscriberRegistry;
   loadGatewaySessionLifecycleSnapshotForEvent?: typeof loadGatewaySessionLifecycleSnapshot;
+  persistGatewaySessionLifecycleEventForEvent?: typeof persistGatewaySessionLifecycleEvent;
   lifecycleErrorRetryGraceMs?: number;
   isChatSendRunActive?: (runId: string) => boolean;
   clearTrackedActiveRun?: (params: {
@@ -378,7 +376,7 @@ export type AgentEventHandlerOptions = {
     canonicalKey: string;
     sessionId?: string;
     agentId?: string;
-  }) => { active: boolean; runIds: string[] };
+  }) => { active: boolean; runIds?: string[] };
 };
 
 type AgentEventHandler = ((event: AgentEventPayload) => void) & {
@@ -452,6 +450,7 @@ export function createAgentEventHandler({
   sessionEventSubscribers,
   sessionMessageSubscribers,
   loadGatewaySessionLifecycleSnapshotForEvent = loadGatewaySessionLifecycleSnapshot,
+  persistGatewaySessionLifecycleEventForEvent = persistGatewaySessionLifecycleEvent,
   lifecycleErrorRetryGraceMs = AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS,
   isChatSendRunActive = () => false,
   clearTrackedActiveRun,
@@ -479,6 +478,19 @@ export function createAgentEventHandler({
       return;
     }
     clearAgentRunContext(evt.runId);
+  };
+  const resolveEventSession = (evt: AgentEventRuntimePayload) => {
+    const chatLink = evt.contextClaimId ? undefined : chatRunState.registry.peek(evt.runId);
+    const sessionAgentId = chatLink?.agentId ?? evt.agentId;
+    const eventSessionKey =
+      evt.deliverySessionKey ??
+      (typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined);
+    const sessionKey =
+      chatLink?.sessionKey ??
+      eventSessionKey ??
+      getAgentRunContext(evt.runId)?.sessionKey ??
+      resolveSessionKeyForRun(evt.runId, sessionAgentId ? { agentId: sessionAgentId } : undefined);
+    return { chatLink, sessionAgentId, eventSessionKey, sessionKey };
   };
 
   type TerminalLifecycleOptions = {
@@ -590,6 +602,7 @@ export function createAgentEventHandler({
                   updatedAt: row.updatedAt ?? undefined,
                   status: row.status,
                   lastRunError: row.lastRunError,
+                  lastRunId: row.lastRunId,
                   startedAt: row.startedAt,
                   endedAt: row.endedAt,
                   runtimeMs: row.runtimeMs,
@@ -607,13 +620,18 @@ export function createAgentEventHandler({
           ...(agentId ? { agentId } : {}),
         })
       : undefined;
-    // Agent lifecycle broadcasts merge into cached session rows in the UI.
-    // Always replace run identity so a newer start cannot inherit a completed run.
+    // Agent lifecycle broadcasts merge into cached session rows in the UI. Replace
+    // run identities only when the Gateway owns the complete exact set.
     const activeRunFields = activeRunState
-      ? { hasActiveRun: activeRunState.active, activeRunIds: activeRunState.runIds }
+      ? {
+          hasActiveRun: activeRunState.active,
+          activeRunIds: projectSessionEventActiveRunIds(activeRunState),
+        }
       : {};
     const clearsLastRunError =
       Object.hasOwn(lifecyclePatch, "lastRunError") && lifecyclePatch.lastRunError === undefined;
+    const clearsLastRunId =
+      Object.hasOwn(lifecyclePatch, "lastRunId") && lifecyclePatch.lastRunId === undefined;
     const projectedRow = row
       ? lifecycleProjection
         ? buildGatewaySessionEventRow(row, { lifecycle: true })
@@ -624,9 +642,10 @@ export function createAgentEventHandler({
           ...projectedRow,
           ...lifecyclePatch,
           ...activeRunFields,
-          // JSON drops undefined values, so a start/success must send null to
-          // evict a prior failure reason from the subscribed client row.
+          // JSON drops undefined values, so starts/successes need tombstones
+          // for terminal fields retained in the subscribed client row.
           ...(clearsLastRunError ? { lastRunError: null } : {}),
+          ...(clearsLastRunId ? { lastRunId: null } : {}),
         }
       : undefined;
     if (session && omitUnscopedGlobalGoal) {
@@ -693,12 +712,17 @@ export function createAgentEventHandler({
   };
 
   const resolveSessionDeliveryKeys = (sessionKey: string, agentId?: string) => {
-    const canonicalKey = resolveSessionSubscriptionKey(sessionKey, agentId ?? "");
-    if (canonicalKey === sessionKey) {
-      return [canonicalKey];
+    if (sessionKey.trim().toLowerCase() !== "global") {
+      return [sessionKey];
     }
-    const defaultAgentId = resolveDefaultAgentId(getRuntimeConfig());
-    return resolveSessionSubscriptionKeys(sessionKey, agentId ?? defaultAgentId, defaultAgentId);
+    const compatibilityOwnerAgentId = tryResolveSessionCompatibilityOwnerAgentId(
+      getRuntimeConfig(),
+      sessionKey,
+    );
+    const deliveryAgentId = agentId ?? compatibilityOwnerAgentId;
+    return deliveryAgentId
+      ? resolveSessionSubscriptionKeys(sessionKey, deliveryAgentId, compatibilityOwnerAgentId)
+      : [];
   };
   const sendNodeSessionPayloadForAgent = (
     sessionKey: string,
@@ -756,17 +780,11 @@ export function createAgentEventHandler({
     const currentLifecycleGeneration =
       activeLifecycleGeneration ?? currentRunContext?.lifecycleGeneration;
 
-    const chatLink = evt.contextClaimId ? undefined : chatRunState.registry.peek(evt.runId);
-    const sessionAgentId = chatLink?.agentId ?? evt.agentId;
-    const eventSessionKey =
-      evt.deliverySessionKey ??
-      (typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined);
+    const { chatLink, sessionAgentId, eventSessionKey, sessionKey } = resolveEventSession(evt);
     const isControlUiVisible =
       evt.controlUiVisible ?? currentRunContext?.isControlUiVisible ?? true;
     const projectSessionLifecycle =
       evt.projectSessionLifecycle ?? currentRunContext?.projectSessionLifecycle ?? true;
-    const sessionKey =
-      chatLink?.sessionKey ?? eventSessionKey ?? resolveSessionKeyForRun(evt.runId);
     const restartRecoverySessionKey = eventSessionKey ?? sessionKey;
     const restartRecoveryAgentId = evt.agentId ?? sessionAgentId;
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
@@ -815,12 +833,9 @@ export function createAgentEventHandler({
         ))
     ) {
       if (!isAborted) {
+        // peek() (chatLink) and this shift() run in one synchronous frame, so
+        // the shifted head is exactly the peeked entry.
         const finished = chatLink ? chatRunState.registry.shift(evt.runId) : undefined;
-        if (chatLink && !finished) {
-          clearRunContextForEvent(evt);
-          return;
-        }
-
         const terminalSessionKey = finished?.sessionKey ?? sessionKey;
         const terminalRunId = finished?.clientRunId ?? eventRunId;
         const terminalAgentId = finished?.agentId ?? sessionAgentId;
@@ -839,8 +854,8 @@ export function createAgentEventHandler({
           timeoutPhase: evt.data?.timeoutPhase,
           error: evt.data?.error,
         });
-        const terminalState =
-          CHAT_STATE_BY_TERMINAL_CLASSIFICATION[classifyAgentRunTerminalOutcome(terminalOutcome)];
+        const terminalClassification = classifyAgentRunTerminalOutcome(terminalOutcome);
+        const terminalState = CHAT_STATE_BY_TERMINAL_CLASSIFICATION[terminalClassification];
         if (!(opts?.skipChatErrorFinal && terminalState === "error")) {
           emitChatTerminal(
             terminalSessionKey,
@@ -850,8 +865,13 @@ export function createAgentEventHandler({
             terminalState,
             terminalOutcome.error ?? evt.data?.error,
             terminalOutcome.stopReason,
-            readChatErrorKind(evt.data?.errorKind) ??
-              resolveChatErrorKindFromError(evt.data?.error),
+            // Timeout is a recorded classification, not event metadata: the
+            // lifecycle producer emits no errorKind, so without this the UI
+            // shows a generic "failed" while sessions.list says "timeout".
+            terminalClassification === "timeout"
+              ? "timeout"
+              : (readChatErrorKind(evt.data?.errorKind) ??
+                  resolveChatErrorKindFromError(evt.data?.error)),
             {
               agentId: terminalAgentId,
               controlUiVisible: isControlUiVisible,
@@ -878,10 +898,13 @@ export function createAgentEventHandler({
     if (sessionKey) {
       clearTrackedActiveRun?.({ runId: evt.runId, clientRunId, sessionKey });
       if (!suppressRestartRecoveryProjection && projectSessionLifecycle) {
-        const persistence = persistGatewaySessionLifecycleEvent({
+        const persistence = persistGatewaySessionLifecycleEventForEvent({
           sessionKey,
           agentId: sessionAgentId,
-          event: evt,
+          event: {
+            ...evt,
+            ...(eventRunId !== evt.runId ? { clientRunId: eventRunId } : {}),
+          },
         });
         trackTrackedRunTerminalPersistence?.({
           runId: evt.runId,
@@ -1376,20 +1399,16 @@ export function createAgentEventHandler({
     const lifecyclePhase =
       evt.stream === "lifecycle" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
 
-    const chatLink = evt.contextClaimId ? undefined : chatRunState.registry.peek(evt.runId);
-    const sessionAgentId = chatLink?.agentId ?? evt.agentId;
-    const eventSessionKey =
-      evt.deliverySessionKey ??
-      (typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined);
+    const { chatLink, sessionAgentId, eventSessionKey, sessionKey } = resolveEventSession(evt);
     const runContext = getAgentRunContext(evt.runId);
     const activeLifecycleGeneration = resolveActiveLifecycleGenerationForRun(evt.runId);
     const isControlUiVisible = evt.controlUiVisible ?? runContext?.isControlUiVisible ?? true;
     const projectSessionLifecycle =
       evt.projectSessionLifecycle ?? runContext?.projectSessionLifecycle ?? true;
     const isHeartbeat = runContext?.isHeartbeat;
-    const sessionKey =
-      chatLink?.sessionKey ?? eventSessionKey ?? resolveSessionKeyForRun(evt.runId);
-    const restartRecoverySessionKey = eventSessionKey ?? sessionKey;
+    const restartRecoverySessionKey = RESTART_RECOVERY_LIFECYCLE_PHASES.has(lifecyclePhase ?? "")
+      ? (eventSessionKey ?? sessionKey)
+      : undefined;
     const restartRecoveryAgentId = evt.agentId ?? sessionAgentId;
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
     const eventRunId = chatLink?.clientRunId ?? evt.runId;
@@ -1755,10 +1774,13 @@ export function createAgentEventHandler({
     }
 
     if (projectSessionLifecycle && sessionKey && lifecyclePhase === "start") {
-      void persistGatewaySessionLifecycleEvent({
+      void persistGatewaySessionLifecycleEventForEvent({
         sessionKey,
         agentId: sessionAgentId,
-        event: evt,
+        event: {
+          ...evt,
+          ...(eventRunId !== evt.runId ? { clientRunId: eventRunId } : {}),
+        },
       }).catch((err: unknown) => {
         // Surface the swallowed start-phase persistence failure: a silent write
         // failure drops the run's start marker from restart-recovery accounting

@@ -1,30 +1,38 @@
-import fs from "node:fs";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
-import { formatErrorMessage } from "../infra/errors.js";
-import { isPathInside } from "../infra/path-guards.js";
-import { redactToolPayloadText } from "../logging/redact.js";
+import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
 import {
-  redactRegisteredSecretValues,
-  registerSecretValueForRedaction,
-} from "../logging/secret-redaction-registry.js";
-import {
-  appendCapturedOutput,
-  createCapturedOutputBuffers,
-  finalizeCapturedOutput,
-} from "../process/exec-output.js";
-import { createChildAdapter } from "../process/supervisor/adapters/child.js";
-import { truncateUtf8Suffix } from "../utils/utf8-truncate.js";
-import {
-  parseWorkerLaunchDescriptor,
+  completeWorkerLaunchDescriptor,
+  parseWorkerLaunchPlan,
   type WorkerLaunchDescriptor,
 } from "../worker/launch-descriptor.js";
+import type {
+  NodeWorkerWorkspaceRetainInput,
+  NodeWorkerWorkspaceRetainResult,
+} from "../worker/node-workspace-retain-protocol.js";
+import type { WorkerConnectionEndpoint } from "../worker/worker-connection-endpoint.js";
+import { NodeWorkerCapacity } from "./node-worker-capacity.js";
+import type { NodeWorkerContainerEngine } from "./node-worker-container-engine.js";
+import { NodeWorkerContainerLifecycle } from "./node-worker-container-lifecycle.js";
 import { snapshotNodeWorkerEnv } from "./node-worker-environment.js";
 import {
+  observeNodeWorkerChildOutput,
+  type NodeWorkerTerminalOutcome,
+} from "./node-worker-launch-observation.js";
+import {
   NodeWorkerLaunchStore,
+  type NodeWorkerContainerIdentity,
   type NodeWorkerLaunchReceipt,
-  type NodeWorkerTerminalState,
 } from "./node-worker-launch-store.js";
+import {
+  prepareNodeWorkerLaunchTransport,
+  startNodeWorkerLaunchTransport,
+  type NodeWorkerChildAdapter,
+} from "./node-worker-launch-transport.js";
+import {
+  createNodeWorkerCredentialScrubber,
+  sanitizeNodeWorkerDiagnostic,
+} from "./node-worker-output.js";
 import {
   inspectNodeWorkerProcessIdentity,
   requireNodeWorkerProcessIdentity,
@@ -36,194 +44,114 @@ import {
   type NodeWorkerSupervisorIdentity,
 } from "./node-worker-supervisor-contract.js";
 import {
+  createNodeWorkerJournalGate,
+  nodeWorkerReceiptMatchesOwner,
+  type NodeWorkerActiveOwnership,
+  type NodeWorkerObservedTerminal,
+  type NodeWorkerRunningChild,
+  type NodeWorkerStopState,
+  type NodeWorkerSupervisorOptions,
+} from "./node-worker-supervisor-ownership.js";
+import { recoverNodeWorkerLaunch } from "./node-worker-supervisor-recovery.js";
+import {
   inspectOwnedNodeWorkerTree,
   signalOwnedNodeWorkerTree,
   waitForOwnedNodeWorkerTreeDeath,
 } from "./node-worker-tree-control.js";
+import { NodeWorkerWorkspaceRuntime } from "./node-worker-workspace.js";
 
-const STDOUT_MAX_BYTES = 64 * 1024;
-const STDERR_MAX_BYTES = 4 * 1024;
 const STOP_GRACE_MS = 1_000;
 const FORCE_STOP_WAIT_MS = 4_000;
 const GATEWAY_NAMESPACE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const BUNDLE_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 
-type ChildAdapter = Awaited<ReturnType<typeof createChildAdapter>>;
-type StopState = Extract<NodeWorkerTerminalState, "cancelled" | "interrupted">;
-type CredentialScrubber = {
-  maxRepresentationBytes: number;
-  scrub: (text: string) => string;
-};
-type ActiveBase = {
-  launchId: string;
-  planHash: string;
-  supervisor: NodeWorkerProcessIdentity;
-  worker: NodeWorkerProcessIdentity;
-};
-type RunningChild = ActiveBase & {
-  state: "running";
-  adapter: ChildAdapter;
-  done: Promise<void>;
-  journalReady: Promise<void>;
-  releaseJournal: () => void;
-  scrubber: CredentialScrubber;
-  stopState?: StopState;
-};
-type TerminalOutcome = Readonly<{
-  state: NodeWorkerTerminalState;
-  resultJson?: string;
-  errorText?: string;
-}>;
-type ObservedTerminal = ActiveBase & {
-  state: "observed";
-  outcome: TerminalOutcome;
-  persistenceError?: unknown;
-};
-type ActiveOwnership = RunningChild | ObservedTerminal;
-
-function resolveWorkerEntry(params: {
-  bundleRoot: string;
-  bundleHash: string;
-  gatewayNamespace: string;
-}): string {
-  const root = fs.realpathSync.native(params.bundleRoot);
-  const bundle = fs.realpathSync.native(
-    path.join(root, params.gatewayNamespace, "bundles", params.bundleHash),
-  );
-  if (!isPathInside(root, bundle)) {
-    throw new Error("node worker bundle resolves outside its configured root");
-  }
-  const entry = fs.realpathSync.native(path.join(bundle, "openclaw.mjs"));
-  if (!isPathInside(bundle, entry) || !fs.statSync(entry).isFile()) {
-    throw new Error("node worker entry must be a regular file inside its bundle");
-  }
-  return entry;
-}
-
-function createCredentialScrubber(credential: string): CredentialScrubber {
-  const representations = new Set([
-    credential,
-    encodeURIComponent(credential),
-    JSON.stringify(credential).slice(1, -1),
-  ]);
-  const ordered = [...representations].toSorted((left, right) => right.length - left.length);
-  return {
-    maxRepresentationBytes: Math.max(
-      ...ordered.map((representation) => Buffer.byteLength(representation, "utf8")),
-    ),
-    scrub: (text) => {
-      let scrubbed = text;
-      for (const representation of ordered) {
-        scrubbed = scrubbed.replaceAll(representation, "[REDACTED]");
-      }
-      return scrubbed;
-    },
-  };
-}
-
-function redactLaunchText(value: string, scrubCredential: (text: string) => string): string {
-  const launchRedacted = scrubCredential(value);
-  const exactRedacted = redactRegisteredSecretValues(launchRedacted, () => "[REDACTED]");
-  return redactToolPayloadText(exactRedacted);
-}
-
-function sanitizeDiagnostic(
-  value: string,
-  fallback: string,
-  scrubCredential: (text: string) => string,
-): string {
-  const oneLine = redactLaunchText(value, scrubCredential).replace(/\s+/gu, " ").trim();
-  return truncateUtf8Suffix(oneLine || fallback, STDERR_MAX_BYTES);
-}
-
-function successfulResult(
-  stdout: ReturnType<typeof createCapturedOutputBuffers>,
-  scrubCredential: (text: string) => string,
-): string {
-  if (stdout.truncatedBytes > 0) {
-    throw new Error(`worker stdout exceeded ${STDOUT_MAX_BYTES} bytes`);
-  }
-  const raw = finalizeCapturedOutput(stdout, "head", true).toString("utf8").trim();
-  const redacted = redactLaunchText(raw, scrubCredential);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(redacted) as unknown;
-  } catch (error) {
-    throw new Error("worker returned invalid JSON output", { cause: error });
-  }
-  const result = JSON.stringify(parsed);
-  if (Buffer.byteLength(result, "utf8") > STDOUT_MAX_BYTES) {
-    throw new Error(`worker result exceeded ${STDOUT_MAX_BYTES} bytes`);
-  }
-  return result;
-}
-
-function sameProcessIdentity(
-  left: NodeWorkerProcessIdentity | null,
-  right: NodeWorkerProcessIdentity | null,
-): boolean {
-  return (
-    left?.pid === right?.pid &&
-    left?.startTime === right?.startTime &&
-    (left !== null) === (right !== null)
-  );
-}
-
-function receiptMatchesOwner(
-  receipt: NodeWorkerLaunchReceipt,
-  supervisor: NodeWorkerProcessIdentity,
-  worker: NodeWorkerProcessIdentity | null,
-): boolean {
-  return (
-    sameProcessIdentity(receipt.supervisor, supervisor) &&
-    sameProcessIdentity(receipt.worker, worker)
-  );
-}
-
 /** Owns worker process groups, lifetime gates, and the durable node-host launch journal. */
 class NodeWorkerSupervisor {
-  private readonly active = new Map<string, ActiveOwnership>();
+  private readonly active = new Map<string, NodeWorkerActiveOwnership>();
   private readonly starting = new Map<string, Promise<NodeWorkerLaunchReceipt>>();
   private readonly bundleRoot: string;
   private readonly store: NodeWorkerLaunchStore;
   private readonly workerEnv: NodeJS.ProcessEnv;
+  private readonly engineEnv: NodeJS.ProcessEnv;
+  private readonly capacity: NodeWorkerCapacity;
+  private readonly workspace: NodeWorkerWorkspaceRuntime;
+  private readonly containerEngine?: NodeWorkerContainerEngine;
+  private readonly containerLifecycle?: NodeWorkerContainerLifecycle;
+  private readonly containerImage?: string;
   private supervisorIdentity?: NodeWorkerProcessIdentity;
+  private initializationPromise?: Promise<void>;
   private closed = false;
   private closePromise?: Promise<void>;
 
-  constructor(options: { bundleRoot?: string; env?: NodeJS.ProcessEnv } = {}) {
+  constructor(options: NodeWorkerSupervisorOptions = {}) {
     const env = options.env ?? process.env;
     this.bundleRoot = path.resolve(
       options.bundleRoot ?? path.join(resolveStateDir(env), "node-host"),
     );
     this.store = new NodeWorkerLaunchStore({ env });
     this.workerEnv = snapshotNodeWorkerEnv(env);
+    this.engineEnv = { ...process.env, ...env };
+    this.containerEngine = options.containerEngine;
+    this.containerLifecycle = options.containerEngine
+      ? new NodeWorkerContainerLifecycle(options.containerEngine, this.bundleRoot, this.store)
+      : undefined;
+    this.containerImage = options.containerImage;
+    this.workspace =
+      options.workspace ??
+      new NodeWorkerWorkspaceRuntime({ root: this.bundleRoot, env: this.workerEnv });
+    this.capacity = new NodeWorkerCapacity(this.store, options);
   }
 
   private requireSupervisorIdentity(): NodeWorkerProcessIdentity {
     return (this.supervisorIdentity ??= requireNodeWorkerProcessIdentity(process.pid));
   }
 
-  async launch(input: NodeWorkerLaunchInput): Promise<NodeWorkerLaunchReceipt> {
+  initialize(): Promise<void> {
+    return (this.initializationPromise ??= this.containerEngine
+      ? this.initializeContainerHosting()
+      : this.capacity.initialize(async (receipt) => {
+          await this.recoverRunning(receipt, false);
+        }));
+  }
+
+  private async initializeContainerHosting(): Promise<void> {
+    await this.containerLifecycle?.initialize();
+    await this.capacity.initialize(async (receipt) => {
+      await this.recoverRunning(receipt, false);
+    });
+  }
+
+  private requireContainerLifecycle(): NodeWorkerContainerLifecycle {
+    if (!this.containerLifecycle) {
+      throw new Error("node worker container isolation has no available engine");
+    }
+    return this.containerLifecycle;
+  }
+
+  async launch(
+    input: NodeWorkerLaunchInput,
+    connectionEndpoint: WorkerConnectionEndpoint,
+    signal?: AbortSignal,
+  ): Promise<NodeWorkerLaunchReceipt> {
     if (!GATEWAY_NAMESPACE_PATTERN.test(input.gatewayNamespace)) {
       throw new Error("gateway namespace must be a safe bounded path component");
     }
-    if (!BUNDLE_HASH_PATTERN.test(input.bundleHash)) {
+    if (!BUNDLE_HASH_PATTERN.test(input.expectedBundleHash)) {
       throw new Error("node worker bundle hash must be 64 lowercase hexadecimal characters");
     }
     if (!Number.isSafeInteger(input.placementGeneration) || input.placementGeneration < 0) {
       throw new Error("node worker placement generation must be a non-negative safe integer");
     }
-    const descriptor = parseWorkerLaunchDescriptor(structuredClone(input.descriptor));
-    if (descriptor.admission.handshake.bundleHash !== input.bundleHash) {
+    const plan = parseWorkerLaunchPlan(structuredClone(input.descriptor));
+    const descriptor = completeWorkerLaunchDescriptor(plan, connectionEndpoint);
+    if (descriptor.admission.handshake.bundleHash !== input.expectedBundleHash) {
       throw new Error("node worker descriptor bundle hash does not match the launch bundle");
     }
-    const planHash = nodeWorkerPlanHash({
-      bundleHash: input.bundleHash,
-      descriptor,
-      gatewayNamespace: input.gatewayNamespace,
-      placementGeneration: input.placementGeneration,
-    });
+    const planHash = nodeWorkerPlanHash(input);
+    if (this.closed) {
+      throw new Error("node worker supervisor is closed");
+    }
+    await this.initialize();
     const local = this.active.get(input.launchId);
     if (local) {
       if (local.planHash !== planHash) {
@@ -237,23 +165,21 @@ class NodeWorkerSupervisor {
         return receipt;
       }
     }
+    const supervisor = this.requireSupervisorIdentity();
+    const claimInput = {
+      launchId: input.launchId,
+      planHash,
+      gatewayNamespace: input.gatewayNamespace,
+      environmentId: descriptor.admission.environmentId,
+      sessionId: descriptor.admission.sessionId,
+      ownerEpoch: descriptor.admission.ownerEpoch,
+      placementGeneration: input.placementGeneration,
+      runId: descriptor.assignment.runId,
+    };
     if (this.closed) {
       throw new Error("node worker supervisor is closed");
     }
-    const supervisor = this.requireSupervisorIdentity();
-    const claim = this.store.claim(
-      {
-        launchId: input.launchId,
-        planHash,
-        gatewayNamespace: input.gatewayNamespace,
-        environmentId: descriptor.admission.environmentId,
-        sessionId: descriptor.admission.sessionId,
-        ownerEpoch: descriptor.admission.ownerEpoch,
-        placementGeneration: input.placementGeneration,
-        runId: descriptor.assignment.runId,
-      },
-      supervisor,
-    );
+    const claim = await this.capacity.claim(claimInput, supervisor, signal);
     if (claim.action === "recover") {
       return await this.recoverRunning(claim.receipt);
     }
@@ -277,16 +203,80 @@ class NodeWorkerSupervisor {
   }
 
   async status(launchId: string): Promise<NodeWorkerLaunchReceipt | undefined> {
+    await this.initialize();
     const active = this.active.get(launchId);
     if (active?.state === "observed") {
       return this.reconcileActiveTerminal(active);
     }
-    return this.store.get(launchId);
+    if (active?.state === "running") {
+      if (active.container) {
+        const containerState = await this.requireContainerLifecycle().inspect(
+          active.container,
+          active,
+        );
+        if (containerState === "unknown") {
+          return this.store.get(launchId);
+        }
+        if (containerState === "reused") {
+          throw new Error(`node worker launch ${launchId} lost its container ownership`);
+        }
+        if (containerState === "live") {
+          const clientState = inspectNodeWorkerProcessIdentity(active.worker);
+          if (clientState !== "dead" && clientState !== "reused") {
+            return this.store.get(launchId);
+          }
+          await this.stopChild(active, "interrupted");
+        } else {
+          await this.cleanupActiveContainer(active);
+          await active.done;
+          if (active.deferredOutcome) {
+            this.observeTerminalOutcome(active, active.deferredOutcome);
+          }
+        }
+        const observed = this.active.get(launchId);
+        return observed?.state === "observed"
+          ? this.reconcileActiveTerminal(observed)
+          : this.store.get(launchId);
+      }
+      const workerState = inspectNodeWorkerProcessIdentity(active.worker);
+      if (workerState === "dead" || workerState === "reused") {
+        let treeState = inspectOwnedNodeWorkerTree(active.worker);
+        if (treeState === "live") {
+          await signalOwnedNodeWorkerTree(active.worker, "SIGTERM");
+          treeState = await waitForOwnedNodeWorkerTreeDeath(active.worker, STOP_GRACE_MS);
+        }
+        if (treeState === "live") {
+          await signalOwnedNodeWorkerTree(active.worker, "SIGKILL");
+          await waitForOwnedNodeWorkerTreeDeath(active.worker, FORCE_STOP_WAIT_MS);
+        }
+        await active.done;
+        const observed = this.active.get(launchId);
+        if (observed?.state === "observed") {
+          return this.reconcileActiveTerminal(observed);
+        }
+      }
+      return this.store.get(launchId);
+    }
+    const receipt = this.store.get(launchId);
+    return receipt?.state === "running" ? await this.recoverRunning(receipt) : receipt;
+  }
+
+  async retainWorkspaces(
+    input: NodeWorkerWorkspaceRetainInput,
+    signal?: AbortSignal,
+  ): Promise<NodeWorkerWorkspaceRetainResult> {
+    await this.initialize();
+    return await this.workspace.applyRetainSnapshot(
+      input,
+      () => this.store.listNonterminal(),
+      signal,
+    );
   }
 
   async cancel(
     expected: NodeWorkerSupervisorIdentity,
   ): Promise<NodeWorkerLaunchReceipt | undefined> {
+    await this.initialize();
     const receipt = this.store.getMatching(expected);
     if (!receipt || receipt.state === "completed" || receipt.state === "failed") {
       return receipt;
@@ -298,7 +288,7 @@ class NodeWorkerSupervisor {
     if (active) {
       if (
         active.planHash !== expected.planHash ||
-        !receiptMatchesOwner(receipt, active.supervisor, active.worker)
+        !nodeWorkerReceiptMatchesOwner(receipt, active.supervisor, active.worker, active.container)
       ) {
         return receipt;
       }
@@ -313,7 +303,13 @@ class NodeWorkerSupervisor {
     }
     const startup = this.starting.get(expected.launchId);
     if (startup && receipt.state === "pending" && receipt.supervisor.pid === process.pid) {
-      const cancelled = this.store.finishCancelled({
+      if (this.containerEngine) {
+        // Startup may already own a container while its create/start client is
+        // in flight; retain the durable slot until normal cancellation fences it.
+        await startup;
+        return await this.cancel(expected);
+      }
+      const cancelled = this.capacity.finishCancelled({
         expected,
         supervisor: receipt.supervisor,
         worker: null,
@@ -321,15 +317,46 @@ class NodeWorkerSupervisor {
       await startup;
       return this.store.getMatching(expected) ?? cancelled;
     }
+    if (startup && receipt.container && receipt.supervisor.pid === process.pid) {
+      await startup;
+      return await this.cancel(expected);
+    }
     const supervisorState = inspectNodeWorkerProcessIdentity(receipt.supervisor);
     if (supervisorState === "live" || supervisorState === "unknown") {
       return receipt;
     }
     if (!receipt.worker) {
-      return this.store.finishCancelled({
+      return this.capacity.finishCancelled({
         expected,
         supervisor: receipt.supervisor,
         worker: null,
+      });
+    }
+    if (receipt.container) {
+      const containerState = await this.requireContainerLifecycle().inspect(
+        receipt.container,
+        receipt,
+      );
+      if (containerState === "unknown" || containerState === "reused") {
+        return receipt;
+      }
+      const beforeSignal = this.store.getMatching(expected);
+      if (
+        beforeSignal?.state !== "running" ||
+        !nodeWorkerReceiptMatchesOwner(
+          beforeSignal,
+          receipt.supervisor,
+          receipt.worker,
+          receipt.container,
+        )
+      ) {
+        return beforeSignal;
+      }
+      await this.requireContainerLifecycle().remove(receipt.container, receipt);
+      return this.capacity.finishCancelled({
+        expected,
+        supervisor: receipt.supervisor,
+        worker: receipt.worker,
       });
     }
     let workerState = inspectOwnedNodeWorkerTree(receipt.worker);
@@ -340,7 +367,7 @@ class NodeWorkerSupervisor {
       const beforeSignal = this.store.getMatching(expected);
       if (
         beforeSignal?.state !== "running" ||
-        !receiptMatchesOwner(beforeSignal, receipt.supervisor, receipt.worker)
+        !nodeWorkerReceiptMatchesOwner(beforeSignal, receipt.supervisor, receipt.worker)
       ) {
         return beforeSignal;
       }
@@ -351,7 +378,7 @@ class NodeWorkerSupervisor {
       const beforeSignal = this.store.getMatching(expected);
       if (
         beforeSignal?.state !== "running" ||
-        !receiptMatchesOwner(beforeSignal, receipt.supervisor, receipt.worker)
+        !nodeWorkerReceiptMatchesOwner(beforeSignal, receipt.supervisor, receipt.worker)
       ) {
         return beforeSignal;
       }
@@ -361,7 +388,7 @@ class NodeWorkerSupervisor {
     if (workerState !== "dead") {
       return this.store.getMatching(expected);
     }
-    return this.store.finishCancelled({
+    return this.capacity.finishCancelled({
       expected,
       supervisor: receipt.supervisor,
       worker: receipt.worker,
@@ -373,14 +400,22 @@ class NodeWorkerSupervisor {
       return this.closePromise;
     }
     this.closed = true;
+    this.capacity.close();
     const operation = (async () => {
+      const errors: unknown[] = [];
+      if (this.initializationPromise) {
+        try {
+          await this.initializationPromise;
+        } catch (error) {
+          errors.push(error);
+        }
+      }
       await Promise.allSettled(this.starting.values());
       await Promise.all(
         [...this.active.values()]
-          .filter((active): active is RunningChild => active.state === "running")
+          .filter((active): active is NodeWorkerRunningChild => active.state === "running")
           .map(async (active) => await this.stopChild(active, "interrupted")),
       );
-      const errors: unknown[] = [];
       for (const active of this.active.values()) {
         if (active.state !== "observed") {
           continue;
@@ -407,9 +442,9 @@ class NodeWorkerSupervisor {
     return closePromise;
   }
 
-  private reconcileActiveTerminal(active: ObservedTerminal): NodeWorkerLaunchReceipt {
+  private reconcileActiveTerminal(active: NodeWorkerObservedTerminal): NodeWorkerLaunchReceipt {
     try {
-      const receipt = this.store.finish({
+      const receipt = this.capacity.finish({
         launchId: active.launchId,
         planHash: active.planHash,
         supervisor: active.supervisor,
@@ -429,36 +464,16 @@ class NodeWorkerSupervisor {
     }
   }
 
-  private async recoverRunning(receipt: NodeWorkerLaunchReceipt): Promise<NodeWorkerLaunchReceipt> {
-    if (receipt.state !== "running" || !receipt.worker) {
-      return receipt;
-    }
-    const previousSupervisor = inspectNodeWorkerProcessIdentity(receipt.supervisor);
-    if (previousSupervisor !== "dead" && previousSupervisor !== "reused") {
-      return this.store.get(receipt.launchId) ?? receipt;
-    }
-    let workerState = inspectOwnedNodeWorkerTree(receipt.worker);
-    if (workerState === "unknown") {
-      return this.store.get(receipt.launchId) ?? receipt;
-    }
-    if (workerState === "live") {
-      await signalOwnedNodeWorkerTree(receipt.worker, "SIGTERM");
-      workerState = await waitForOwnedNodeWorkerTreeDeath(receipt.worker, STOP_GRACE_MS);
-    }
-    if (workerState === "live") {
-      await signalOwnedNodeWorkerTree(receipt.worker, "SIGKILL");
-      workerState = await waitForOwnedNodeWorkerTreeDeath(receipt.worker, FORCE_STOP_WAIT_MS);
-    }
-    if (workerState !== "dead") {
-      return this.store.get(receipt.launchId) ?? receipt;
-    }
-    return this.store.finish({
-      launchId: receipt.launchId,
-      planHash: receipt.planHash,
-      supervisor: receipt.supervisor,
-      worker: receipt.worker,
-      state: "interrupted",
-      errorText: "node host stopped before the worker launch completed",
+  private async recoverRunning(
+    receipt: NodeWorkerLaunchReceipt,
+    notifyCapacity = true,
+  ): Promise<NodeWorkerLaunchReceipt> {
+    return await recoverNodeWorkerLaunch({
+      receipt,
+      store: this.store,
+      capacity: this.capacity,
+      containerLifecycle: this.containerLifecycle,
+      notifyCapacity,
     });
   }
 
@@ -469,40 +484,56 @@ class NodeWorkerSupervisor {
     supervisor: NodeWorkerProcessIdentity;
   }): Promise<NodeWorkerLaunchReceipt> {
     const credential = params.descriptor.admission.credential;
-    const scrubber = createCredentialScrubber(credential);
-    registerSecretValueForRedaction(credential);
-    let adapter: ChildAdapter;
+    const endpoint = params.descriptor.connectionEndpoint;
+    const cloudflareAccess = endpoint.kind === "websocket" ? endpoint.cloudflareAccess : undefined;
+    const sensitiveValues = cloudflareAccess
+      ? [credential, cloudflareAccess.clientId, cloudflareAccess.clientSecret]
+      : [credential];
+    const scrubber = createNodeWorkerCredentialScrubber(sensitiveValues);
+    // Turn cancellation can beat the child's admission retry deadline. Retain the
+    // producer's latest cause so the durable terminal receipt does not become generic.
+    const connectionFailure: { errorText?: string } = {};
+    for (const value of sensitiveValues) {
+      registerSecretValueForRedaction(value);
+    }
+    let adapter: NodeWorkerChildAdapter;
+    let container: NodeWorkerContainerIdentity | undefined;
     try {
-      const entry = resolveWorkerEntry({
+      const prepared = await prepareNodeWorkerLaunchTransport({
         bundleRoot: this.bundleRoot,
-        bundleHash: params.input.bundleHash,
-        gatewayNamespace: params.input.gatewayNamespace,
+        workerEnv: this.workerEnv,
+        engineEnv: this.engineEnv,
+        input: params.input,
+        descriptor: params.descriptor,
+        connectionFailure,
+        scrubber,
+        store: this.store,
+        containerEngine: this.containerEngine,
+        containerLifecycle: this.containerLifecycle,
+        containerImage: this.containerImage,
       });
-      adapter = await createChildAdapter({
-        argv: [process.execPath, entry, "worker", "--internal-worker-ipc"],
-        env: this.workerEnv,
-        exactEnv: true,
-        ownedWorker: true,
-        input: JSON.stringify(params.descriptor),
-      });
+      if (prepared.kind === "terminal") {
+        return prepared.receipt;
+      }
+      adapter = prepared.adapter;
+      container = prepared.container;
     } catch (error) {
-      return this.store.finish({
+      return this.capacity.finish({
         launchId: params.input.launchId,
         planHash: params.planHash,
         supervisor: params.supervisor,
         worker: null,
         state: "failed",
-        errorText: sanitizeDiagnostic(
-          formatErrorMessage(error),
-          "node worker spawn failed",
-          scrubber.scrub,
-        ),
+        errorText: sanitizeNodeWorkerDiagnostic(error, "node worker spawn failed", scrubber.scrub),
       });
     }
     if (!adapter.pid) {
+      if (container) {
+        await this.requireContainerLifecycle().remove(container, params.input);
+      }
       adapter.kill("SIGKILL");
       adapter.dispose();
-      return this.store.finish({
+      return this.capacity.finish({
         launchId: params.input.launchId,
         planHash: params.planHash,
         supervisor: params.supervisor,
@@ -515,44 +546,40 @@ class NodeWorkerSupervisor {
     try {
       worker = requireNodeWorkerProcessIdentity(adapter.pid);
     } catch (error) {
+      if (container) {
+        await this.requireContainerLifecycle().remove(container, params.input);
+      }
       adapter.kill("SIGKILL");
       await adapter.wait().catch(() => undefined);
       adapter.dispose();
-      return this.store.finish({
+      return this.capacity.finish({
         launchId: params.input.launchId,
         planHash: params.planHash,
         supervisor: params.supervisor,
         worker: null,
         state: "failed",
-        errorText: sanitizeDiagnostic(
-          formatErrorMessage(error),
+        errorText: sanitizeNodeWorkerDiagnostic(
+          error,
           "node worker process identity unavailable",
           scrubber.scrub,
         ),
       });
     }
-    let journalReleased = false;
-    let releaseJournalPromise!: () => void;
-    const journalReady = new Promise<void>((resolve) => {
-      releaseJournalPromise = resolve;
-    });
-    const releaseJournal = () => {
-      if (!journalReleased) {
-        journalReleased = true;
-        releaseJournalPromise();
-      }
-    };
+    const { journalReady, releaseJournal } = createNodeWorkerJournalGate();
     const active = {
       state: "running",
       adapter,
       journalReady,
+      gatewayNamespace: params.input.gatewayNamespace,
       launchId: params.input.launchId,
       planHash: params.planHash,
       releaseJournal,
       scrubber,
+      connectionFailure,
       supervisor: params.supervisor,
       worker,
-    } as RunningChild;
+      ...(container ? { container } : {}),
+    } as NodeWorkerRunningChild;
     active.done = this.observeChild(active);
     this.active.set(active.launchId, active);
     void active.done.catch(() => undefined);
@@ -563,10 +590,28 @@ class NodeWorkerSupervisor {
         planHash: active.planHash,
         supervisor: params.supervisor,
         worker,
+        ...(container ? { container } : {}),
       });
     } catch (error) {
       active.releaseJournal();
-      await this.stopChild(active, "interrupted").catch(() => undefined);
+      if (container) {
+        await this.stopChild(active, "interrupted");
+        this.active.delete(active.launchId);
+        this.capacity.finish({
+          launchId: active.launchId,
+          planHash: active.planHash,
+          supervisor: params.supervisor,
+          worker: null,
+          state: "failed",
+          errorText: sanitizeNodeWorkerDiagnostic(
+            error,
+            "node worker container identity could not be persisted",
+            scrubber.scrub,
+          ),
+        });
+      } else {
+        await this.stopChild(active, "interrupted").catch(() => undefined);
+      }
       throw error;
     }
     active.releaseJournal();
@@ -575,7 +620,11 @@ class NodeWorkerSupervisor {
       return this.store.get(active.launchId) ?? running;
     }
     if (running.state !== "running") {
-      adapter.closeStartGate?.();
+      if (container) {
+        await this.stopChild(active, "interrupted");
+      } else {
+        adapter.closeStartGate?.();
+      }
       return running;
     }
     if (this.closed) {
@@ -583,7 +632,7 @@ class NodeWorkerSupervisor {
       return this.store.get(active.launchId) ?? running;
     }
     try {
-      await adapter.openStartGate?.();
+      await startNodeWorkerLaunchTransport({ adapter, descriptor: params.descriptor, container });
     } catch {
       await this.stopChild(active, "interrupted");
       return this.store.get(active.launchId) ?? running;
@@ -591,79 +640,33 @@ class NodeWorkerSupervisor {
     return running;
   }
 
-  private async observeChild(active: RunningChild): Promise<void> {
-    const stdout = createCapturedOutputBuffers();
-    const stderr = createCapturedOutputBuffers();
-    active.adapter.onStdout((chunk) =>
-      appendCapturedOutput(stdout, chunk, STDOUT_MAX_BYTES, "head"),
-    );
-    active.adapter.onStderr((chunk) =>
-      appendCapturedOutput(
-        stderr,
-        chunk,
-        STDERR_MAX_BYTES + active.scrubber.maxRepresentationBytes,
-        "tail",
-      ),
-    );
-    let outcome: TerminalOutcome;
-    try {
-      const exit = await active.adapter.wait();
-      await active.journalReady;
-      if (active.stopState) {
-        outcome = Object.freeze({
-          state: active.stopState,
-          errorText:
-            active.stopState === "cancelled"
-              ? "node worker launch cancelled"
-              : "node worker launch interrupted during node-host shutdown",
-        });
-      } else if (exit.code === 0 && exit.signal === null) {
-        try {
-          outcome = Object.freeze({
-            state: "completed",
-            resultJson: successfulResult(stdout, active.scrubber.scrub),
-          });
-        } catch (error) {
-          outcome = Object.freeze({
-            state: "failed",
-            errorText: sanitizeDiagnostic(
-              formatErrorMessage(error),
-              "invalid worker result",
-              active.scrubber.scrub,
-            ),
-          });
-        }
-      } else {
-        const detail = finalizeCapturedOutput(stderr, "tail", true).toString("utf8");
-        const exitLabel = exit.signal ? `signal ${exit.signal}` : `exit code ${String(exit.code)}`;
-        outcome = Object.freeze({
-          state: "failed",
-          errorText: sanitizeDiagnostic(
-            `node worker failed with ${exitLabel}${detail ? `: ${detail}` : ""}`,
-            "node worker failed",
-            active.scrubber.scrub,
-          ),
-        });
+  private async observeChild(active: NodeWorkerRunningChild): Promise<void> {
+    const outcome = await observeNodeWorkerChildOutput(active);
+    if (active.container) {
+      try {
+        await this.cleanupActiveContainer(active);
+      } catch {
+        // Keep the launch running until a later cancel/status can prove the
+        // container was removed; failed cleanup must never release its slot.
+        active.deferredOutcome = outcome;
+        return;
       }
-    } catch (error) {
-      await active.journalReady;
-      outcome = Object.freeze({
-        state: active.stopState ?? "failed",
-        errorText: sanitizeDiagnostic(
-          formatErrorMessage(error),
-          "node worker wait failed",
-          active.scrubber.scrub,
-        ),
-      });
-    } finally {
-      active.adapter.dispose();
     }
-    const observed: ObservedTerminal = {
+    this.observeTerminalOutcome(active, outcome);
+  }
+
+  private observeTerminalOutcome(
+    active: NodeWorkerRunningChild,
+    outcome: NodeWorkerTerminalOutcome,
+  ): void {
+    const observed: NodeWorkerObservedTerminal = {
       state: "observed",
+      gatewayNamespace: active.gatewayNamespace,
       launchId: active.launchId,
       planHash: active.planHash,
       supervisor: active.supervisor,
       worker: active.worker,
+      ...(active.container ? { container: active.container } : {}),
       outcome,
     };
     if (this.active.get(active.launchId) !== active) {
@@ -677,13 +680,41 @@ class NodeWorkerSupervisor {
     }
   }
 
-  private async stopChild(active: RunningChild, state: StopState): Promise<void> {
+  private async cleanupActiveContainer(active: NodeWorkerRunningChild): Promise<void> {
+    if (!active.container) {
+      return;
+    }
+    if (!active.containerCleanup) {
+      const cleanup = this.requireContainerLifecycle()
+        .remove(active.container, active)
+        .finally(() => {
+          if (active.containerCleanup === cleanup) {
+            active.containerCleanup = undefined;
+          }
+        });
+      active.containerCleanup = cleanup;
+    }
+    await active.containerCleanup;
+  }
+
+  private async stopChild(
+    active: NodeWorkerRunningChild,
+    state: NodeWorkerStopState,
+  ): Promise<void> {
     active.stopState ??= state;
+    if (active.container) {
+      // The attach client owns no workload; fence the container and prove its
+      // removal before its launch can become terminal or release capacity.
+      await this.cleanupActiveContainer(active);
+    }
     active.adapter.kill("SIGTERM");
     const forceKill = setTimeout(() => active.adapter.kill("SIGKILL"), STOP_GRACE_MS);
     forceKill.unref?.();
     try {
       await active.done;
+      if (active.deferredOutcome) {
+        this.observeTerminalOutcome(active, active.deferredOutcome);
+      }
     } finally {
       clearTimeout(forceKill);
     }
@@ -691,10 +722,7 @@ class NodeWorkerSupervisor {
 }
 
 export function createNodeWorkerSupervisor(
-  options: {
-    bundleRoot?: string;
-    env?: NodeJS.ProcessEnv;
-  } = {},
+  options: NodeWorkerSupervisorOptions = {},
 ): NodeWorkerSupervisor {
   return new NodeWorkerSupervisor(options);
 }

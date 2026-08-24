@@ -1,10 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Selectable } from "kysely";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
+import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import type { DB as OpenClawStateDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   runOpenClawStateWriteTransaction,
@@ -26,8 +28,19 @@ type NodeWorkerLaunchState =
   | "cancelled";
 export type NodeWorkerTerminalState = Exclude<NodeWorkerLaunchState, "pending" | "running">;
 
-type NodeWorkerLaunchDatabase = Pick<OpenClawStateDatabase, "node_worker_launches">;
-type NodeWorkerLaunchRow = Selectable<NodeWorkerLaunchDatabase["node_worker_launches"]>;
+export type NodeWorkerContainerIdentity = {
+  engine: "docker" | "podman";
+  containerId: string;
+  engineTarget: string;
+};
+
+type NodeWorkerLaunchDatabase = Pick<
+  OpenClawStateDatabase,
+  "node_worker_launch_containers" | "node_worker_launches"
+>;
+type NodeWorkerLaunchRow = Selectable<NodeWorkerLaunchDatabase["node_worker_launches"]> & {
+  container_json?: string | null;
+};
 
 export type NodeWorkerLaunchReceipt = {
   launchId: string;
@@ -41,6 +54,7 @@ export type NodeWorkerLaunchReceipt = {
   state: NodeWorkerLaunchState;
   supervisor: NodeWorkerProcessIdentity;
   worker: NodeWorkerProcessIdentity | null;
+  container?: NodeWorkerContainerIdentity;
   resultJson: string | null;
   errorText: string | null;
   completedAtMs: number | null;
@@ -48,7 +62,7 @@ export type NodeWorkerLaunchReceipt = {
   updatedAtMs: number;
 };
 
-type NodeWorkerLaunchClaim = Pick<
+export type NodeWorkerLaunchClaim = Pick<
   NodeWorkerLaunchReceipt,
   | "environmentId"
   | "gatewayNamespace"
@@ -60,13 +74,22 @@ type NodeWorkerLaunchClaim = Pick<
   | "sessionId"
 >;
 
-type NodeWorkerLaunchClaimResult = {
-  action: "start" | "replay" | "recover";
-  receipt: NodeWorkerLaunchReceipt;
-};
+export type NodeWorkerLaunchClaimResult =
+  | {
+      action: "start" | "replay" | "recover";
+      receipt: NodeWorkerLaunchReceipt;
+      nonterminalCount: number;
+    }
+  | {
+      action: "at-capacity";
+      nonterminalCount: number;
+    };
 
 const NODE_WORKER_LAUNCH_SCHEMA_START = "CREATE TABLE IF NOT EXISTS node_worker_launches (";
-const NODE_WORKER_LAUNCH_SCHEMA_END = "\n) STRICT;";
+const NODE_WORKER_LAUNCH_SCHEMA_END = "\n  WHERE completed_at_ms IS NOT NULL;";
+const NODE_WORKER_LAUNCH_CONTAINER_SCHEMA_START =
+  "CREATE TABLE IF NOT EXISTS node_worker_launch_containers (";
+const NODE_WORKER_LAUNCH_CONTAINER_SCHEMA_END = "\n) STRICT;";
 const initializedDatabases = new WeakSet<DatabaseSync>();
 const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "completed",
@@ -74,39 +97,153 @@ const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "interrupted",
   "cancelled",
 ]);
+const TERMINAL_RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1_000;
+const TERMINAL_PRUNE_BATCH_LIMIT = 256;
 
-function ensureNodeWorkerLaunchSchema(database: DatabaseSync): void {
-  const start = OPENCLAW_STATE_SCHEMA_SQL.indexOf(NODE_WORKER_LAUNCH_SCHEMA_START);
-  const end =
-    start >= 0 ? OPENCLAW_STATE_SCHEMA_SQL.indexOf(NODE_WORKER_LAUNCH_SCHEMA_END, start) : -1;
+function ensureNodeWorkerLaunchSchema(
+  database: DatabaseSync,
+  kind: "journal" | "container" = "journal",
+): void {
+  const startMarker =
+    kind === "journal"
+      ? NODE_WORKER_LAUNCH_SCHEMA_START
+      : NODE_WORKER_LAUNCH_CONTAINER_SCHEMA_START;
+  const endMarker =
+    kind === "journal" ? NODE_WORKER_LAUNCH_SCHEMA_END : NODE_WORKER_LAUNCH_CONTAINER_SCHEMA_END;
+  const start = OPENCLAW_STATE_SCHEMA_SQL.indexOf(startMarker);
+  const end = start >= 0 ? OPENCLAW_STATE_SCHEMA_SQL.indexOf(endMarker, start) : -1;
   if (start < 0 || end < start) {
-    throw new Error("OpenClaw node worker launch schema marker is missing.");
+    throw new Error(`OpenClaw node worker launch ${kind} schema marker is missing.`);
   }
-  database.exec(OPENCLAW_STATE_SCHEMA_SQL.slice(start, end + NODE_WORKER_LAUNCH_SCHEMA_END.length)); // sqlite-allow-raw -- Canonical feature-local additive DDL only.
+  database.exec(OPENCLAW_STATE_SCHEMA_SQL.slice(start, end + endMarker.length)); // sqlite-allow-raw -- Canonical feature-local additive DDL only.
 }
 
 function query(database: DatabaseSync) {
   return getNodeSqliteKysely<NodeWorkerLaunchDatabase>(database);
 }
 
+function selectLaunchRows(database: DatabaseSync) {
+  return query(database)
+    .selectFrom("node_worker_launches")
+    .selectAll("node_worker_launches")
+    .$if(tableExists(database, "node_worker_launch_containers"), (selection) =>
+      selection
+        .leftJoin(
+          "node_worker_launch_containers",
+          "node_worker_launch_containers.launch_id",
+          "node_worker_launches.launch_id",
+        )
+        .select("node_worker_launch_containers.container_json"),
+    );
+}
+
 function readRow(database: DatabaseSync, launchId: string): NodeWorkerLaunchRow | undefined {
   return executeSqliteQueryTakeFirstSync(
     database,
-    query(database)
-      .selectFrom("node_worker_launches")
-      .selectAll()
-      .where("launch_id", "=", launchId),
+    selectLaunchRows(database).where("node_worker_launches.launch_id", "=", launchId),
   );
+}
+
+function readNonterminalCount(database: DatabaseSync): number {
+  return (
+    executeSqliteQueryTakeFirstSync(
+      database,
+      query(database)
+        .selectFrom("node_worker_launches")
+        .select((expression) => expression.fn.countAll<number>().as("count"))
+        .where("state", "in", ["pending", "running"]),
+    )?.count ?? 0
+  );
+}
+
+function readNonterminalRows(database: DatabaseSync): NodeWorkerLaunchRow[] {
+  return executeSqliteQuerySync(
+    database,
+    selectLaunchRows(database)
+      .where("node_worker_launches.state", "in", ["pending", "running"])
+      .orderBy("node_worker_launches.launch_id", "asc"),
+  ).rows;
+}
+
+function pruneTerminalRows(params: {
+  database: DatabaseSync;
+  cutoffMs: number;
+  limit: number;
+  excludeLaunchId?: string;
+}): number {
+  let candidates = query(params.database)
+    .selectFrom("node_worker_launches")
+    .select("launch_id")
+    .where("state", "in", ["completed", "failed", "interrupted", "cancelled"])
+    .where("completed_at_ms", "<=", params.cutoffMs)
+    .orderBy("completed_at_ms", "asc")
+    .orderBy("launch_id", "asc")
+    .limit(params.limit);
+  if (params.excludeLaunchId) {
+    candidates = candidates.where("launch_id", "!=", params.excludeLaunchId);
+  }
+  const launchIds = executeSqliteQuerySync(params.database, candidates).rows.map(
+    (row) => row.launch_id,
+  );
+  if (launchIds.length === 0) {
+    return 0;
+  }
+  if (tableExists(params.database, "node_worker_launch_containers")) {
+    executeSqliteQuerySync(
+      params.database,
+      query(params.database)
+        .deleteFrom("node_worker_launch_containers")
+        .where("launch_id", "in", launchIds),
+    );
+  }
+  const result = executeSqliteQuerySync(
+    params.database,
+    query(params.database)
+      .deleteFrom("node_worker_launches")
+      .where("launch_id", "in", launchIds)
+      .where("state", "in", ["completed", "failed", "interrupted", "cancelled"])
+      .where("completed_at_ms", "<=", params.cutoffMs),
+  );
+  return Number(result.numAffectedRows ?? 0n);
 }
 
 function processIdentity(pid: number, startTime: number): NodeWorkerProcessIdentity {
   return { pid, startTime };
 }
 
+function containerIdentity(value: string | null | undefined): NodeWorkerContainerIdentity | null {
+  if (value == null) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new Error("invalid node worker container identity");
+  }
+  if (
+    !isRecord(parsed) ||
+    Object.keys(parsed).length !== 3 ||
+    (parsed.engine !== "docker" && parsed.engine !== "podman") ||
+    typeof parsed.containerId !== "string" ||
+    typeof parsed.engineTarget !== "string"
+  ) {
+    throw new Error("invalid node worker container identity");
+  }
+  const identity: NodeWorkerContainerIdentity = {
+    engine: parsed.engine,
+    containerId: parsed.containerId,
+    engineTarget: parsed.engineTarget,
+  };
+  validateContainerIdentity(identity);
+  return identity;
+}
+
 function receiptFromRow(row: NodeWorkerLaunchRow): NodeWorkerLaunchReceipt {
   if (!isNodeWorkerLaunchState(row.state)) {
     throw new Error(`invalid node worker launch state ${row.state}`);
   }
+  const container = containerIdentity(row.container_json);
   return {
     launchId: row.launch_id,
     planHash: row.plan_hash,
@@ -122,6 +259,7 @@ function receiptFromRow(row: NodeWorkerLaunchRow): NodeWorkerLaunchReceipt {
       row.worker_pid === null || row.worker_start_time === null
         ? null
         : processIdentity(row.worker_pid, row.worker_start_time),
+    ...(container ? { container } : {}),
     resultJson: row.result_json,
     errorText: row.error_text,
     completedAtMs: row.completed_at_ms,
@@ -152,6 +290,12 @@ function validateTimestamp(value: number): void {
   }
 }
 
+function validatePruneLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new Error("node worker launch prune limit must be between 1 and 1000");
+  }
+}
+
 function validateProcessIdentity(identity: NodeWorkerProcessIdentity): void {
   if (
     !Number.isSafeInteger(identity.pid) ||
@@ -161,6 +305,22 @@ function validateProcessIdentity(identity: NodeWorkerProcessIdentity): void {
     identity.startTime < 0
   ) {
     throw new Error("node worker process identity must contain a bounded pid and start time");
+  }
+}
+
+function validateContainerIdentity(identity: NodeWorkerContainerIdentity): void {
+  if (identity.engine !== "docker" && identity.engine !== "podman") {
+    throw new Error("node worker container engine must be docker or podman");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(identity.containerId)) {
+    throw new Error(
+      "node worker container id must contain exactly 64 lowercase hexadecimal digits",
+    );
+  }
+  if (!/^[a-f0-9]{64}$/u.test(identity.engineTarget)) {
+    throw new Error(
+      "node worker container engine target must contain exactly 64 lowercase hexadecimal digits",
+    );
   }
 }
 
@@ -247,12 +407,16 @@ export class NodeWorkerLaunchStore {
   claim(
     claim: NodeWorkerLaunchClaim,
     supervisor: NodeWorkerProcessIdentity,
+    capacity: number,
     nowMs = Date.now(),
   ): NodeWorkerLaunchClaimResult {
     validateIdentifier(claim.launchId, "node worker launch id");
     validatePlanHash(claim.planHash);
     validateTimestamp(nowMs);
     validateProcessIdentity(supervisor);
+    if (!Number.isSafeInteger(capacity) || capacity < 1) {
+      throw new Error("node worker capacity must be a positive safe integer");
+    }
 
     // Process inspection is intentionally outside SQLite. The second transaction
     // re-reads the exact owner tuple before an adoption or recovery decision.
@@ -269,8 +433,25 @@ export class NodeWorkerLaunchStore {
       : undefined;
 
     return this.write("node-worker-launch.claim", (database) => {
+      const finalize = (result: NodeWorkerLaunchClaimResult): NodeWorkerLaunchClaimResult => {
+        // Preserve the exact replay fence while this launch is being resolved;
+        // unrelated receipts age out in the same transaction as admission.
+        pruneTerminalRows({
+          database,
+          cutoffMs: Math.max(0, nowMs - TERMINAL_RECEIPT_RETENTION_MS),
+          limit: TERMINAL_PRUNE_BATCH_LIMIT,
+          excludeLaunchId: claim.launchId,
+        });
+        return result;
+      };
       let current = readRow(database, claim.launchId);
       if (!current) {
+        // The pending row is the physical slot reservation. Count and insert stay
+        // in one transaction so concurrent supervisors cannot over-admit.
+        const nonterminalCount = readNonterminalCount(database);
+        if (nonterminalCount >= capacity) {
+          return finalize({ action: "at-capacity", nonterminalCount });
+        }
         executeSqliteQuerySync(
           database,
           query(database).insertInto("node_worker_launches").values({
@@ -294,10 +475,11 @@ export class NodeWorkerLaunchStore {
             updated_at_ms: nowMs,
           }),
         );
-        return {
+        return finalize({
           action: "start",
           receipt: receiptFromRow(requireMatchingRow(database, claim.launchId, claim.planHash)),
-        };
+          nonterminalCount: readNonterminalCount(database),
+        });
       }
       if (current.plan_hash !== claim.planHash) {
         throw new Error(`node worker launch ${claim.launchId} was replayed with a different plan`);
@@ -329,10 +511,11 @@ export class NodeWorkerLaunchStore {
             .where("worker_start_time", "is", null),
         );
         current = requireMatchingRow(database, claim.launchId, claim.planHash);
-        return {
+        return finalize({
           action: rowHasSupervisor(current, supervisor) ? "start" : "replay",
           receipt: receiptFromRow(current),
-        };
+          nonterminalCount: readNonterminalCount(database),
+        });
       }
       if (
         current.state === "running" &&
@@ -340,10 +523,42 @@ export class NodeWorkerLaunchStore {
         sameObservedOwner(current, observed) &&
         previousOwnerDefinitelyStale
       ) {
-        return { action: "recover", receipt: receiptFromRow(current) };
+        return finalize({
+          action: "recover",
+          receipt: receiptFromRow(current),
+          nonterminalCount: readNonterminalCount(database),
+        });
       }
-      return { action: "replay", receipt: receiptFromRow(current) };
+      return finalize({
+        action: "replay",
+        receipt: receiptFromRow(current),
+        nonterminalCount: readNonterminalCount(database),
+      });
     });
+  }
+
+  listNonterminal(): NodeWorkerLaunchReceipt[] {
+    return this.write("node-worker-launch.list-nonterminal", (database) =>
+      readNonterminalRows(database).map(receiptFromRow),
+    );
+  }
+
+  nonterminalCount(): number {
+    return this.write("node-worker-launch.count-nonterminal", readNonterminalCount);
+  }
+
+  pruneExpiredTerminal(params: { nowMs?: number; limit?: number } = {}): number {
+    const nowMs = params.nowMs ?? Date.now();
+    const limit = params.limit ?? TERMINAL_PRUNE_BATCH_LIMIT;
+    validateTimestamp(nowMs);
+    validatePruneLimit(limit);
+    return this.write("node-worker-launch.prune-terminal", (database) =>
+      pruneTerminalRows({
+        database,
+        cutoffMs: Math.max(0, nowMs - TERMINAL_RECEIPT_RETENTION_MS),
+        limit,
+      }),
+    );
   }
 
   get(launchId: string): NodeWorkerLaunchReceipt | undefined {
@@ -424,12 +639,16 @@ export class NodeWorkerLaunchStore {
     planHash: string;
     supervisor: NodeWorkerProcessIdentity;
     worker: NodeWorkerProcessIdentity;
+    container?: NodeWorkerContainerIdentity;
     nowMs?: number;
   }): NodeWorkerLaunchReceipt {
     const nowMs = params.nowMs ?? Date.now();
     validateTimestamp(nowMs);
     validateProcessIdentity(params.supervisor);
     validateProcessIdentity(params.worker);
+    if (params.container) {
+      validateContainerIdentity(params.container);
+    }
     return this.write("node-worker-launch.mark-running", (database) => {
       const current = requireMatchingRow(database, params.launchId, params.planHash);
       if (TERMINAL_STATES.has(current.state)) {
@@ -440,6 +659,22 @@ export class NodeWorkerLaunchStore {
       }
       if (!rowHasSupervisor(current, params.supervisor) || !rowHasWorker(current, null)) {
         return receiptFromRow(current);
+      }
+      if (params.container) {
+        ensureNodeWorkerLaunchSchema(database, "container");
+        executeSqliteQuerySync(
+          database,
+          query(database)
+            .insertInto("node_worker_launch_containers")
+            .values({
+              launch_id: params.launchId,
+              container_json: JSON.stringify({
+                engine: params.container.engine,
+                containerId: params.container.containerId,
+                engineTarget: params.container.engineTarget,
+              }),
+            }),
+        );
       }
       const updatedAtMs = Math.max(nowMs, current.created_at_ms, current.updated_at_ms);
       executeSqliteQuerySync(

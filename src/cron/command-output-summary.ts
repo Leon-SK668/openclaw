@@ -48,11 +48,12 @@ const URL_TRAILING_PROSE_CHARS = new Set([
 ]);
 const URL_PROSE_SUFFIX_CHARS = new Set([...URL_TRAILING_PROSE_CHARS, ")"]);
 const STANDALONE_URL_LINE_PATTERN = /^\s*(?:https?:\/\/|www\.)\S+\s*$/i;
-const GENERATED_OUTPUT_SECTION_HEADER_PATTERN = /^stdout:$/i;
-const CODE_CANDIDATE_PATTERN = /\b(?:[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})\b/g;
+const CODE_CANDIDATE_PATTERN =
+  /\b(?:\d{4}|[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})\b/g;
 const GROUPED_CODE_TOKEN_PATTERN =
   /(?<![A-Z0-9])[A-Z0-9]{3,12}(?:(?:-| )[A-Z0-9]{3,12})+(?![A-Z0-9])/g;
 const PLAIN_CODE_TOKEN_PATTERN = /(?<![A-Z0-9])[A-Z0-9]{6,12}(?![A-Z0-9])/g;
+const SHORT_NUMERIC_CODE_TOKEN_PATTERN = /(?<![A-Z0-9])\d{4}(?![A-Z0-9])/g;
 const MAX_CODE_TOKEN_GROUPS = 5;
 const BARE_SEPARATED_CODE_PATTERN =
   /^(\s*)(?=[A-Z0-9 -]*(?:\d|-))[A-Z0-9]{4}(?:[- ][A-Z0-9]{3,8}){1,4}(\s*)$/;
@@ -68,7 +69,7 @@ const DIRECT_CODE_VALUE_SUFFIX_PATTERN = /^\s*(?:[.,;:!?)]\s*)?$/;
 const CONTINUATION_CODE_VALUE_SUFFIX_PATTERN =
   /^\s+(?:(?:in|into|on)\s+(?:the\s+)?(?:browser|app|client)|to\s+continue)\b/i;
 const PLAIN_CODE_LABEL_PREFIX_PATTERN = /^\s*code\s*[:=]\s*$/i;
-const CODE_VALUE_PATTERN = /^(?:[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
+const CODE_VALUE_PATTERN = /^(?:\d{4}|[A-Z0-9]{4}(?:-[A-Z0-9]{3,8}){1,4}|[A-Z0-9]{6,12})$/;
 // Common terminal labels are command diagnostics, not device codes.
 const CRON_OUTPUT_STATUS_LINE_PATTERN =
   /^(?:status|result|(?:(?:status|job|result|test|tests|make|task|command|process|run|build|step)(?:\s*:\s*|\s+))?(?:success|succeeded|failed|failure|passed|skipped|complete|completed|cancelled|canceled|finished|pending|queued|running|started|waiting|timeout|timed out|warning|error|aborted|blocked|paused|retrying|stopped|terminated))$/i;
@@ -142,22 +143,26 @@ function containsLine(haystack: string | undefined, needle: string): boolean {
   return haystack.split(/\r?\n/).some((line) => line.trim() === needle.trim());
 }
 
+function buildOutputStreamSummary(output: string, preservedLines?: string[]): string | undefined {
+  const tail = trimOutput(output);
+  const preserved = normalizeLines(preservedLines).filter((line) => !containsLine(tail, line));
+  if (preserved.length === 0) {
+    return tail;
+  }
+  const actionBlock = `${ACTION_REQUIRED_OUTPUT_HEADER}\n${preserved.join("\n")}`;
+  return tail ? `${actionBlock}\n\n${tail}` : actionBlock;
+}
+
 export function buildCronCommandSummary(params: {
   stdout: string;
   stderr: string;
   preservedStdoutLines?: string[];
   preservedStderrLines?: string[];
 }): string | undefined {
-  const tail = combineOutput({ stdout: params.stdout, stderr: params.stderr });
-  const preserved = [
-    ...normalizeLines(params.preservedStdoutLines),
-    ...normalizeLines(params.preservedStderrLines),
-  ].filter((line) => !containsLine(tail, line));
-  if (preserved.length === 0) {
-    return tail;
-  }
-  const actionBlock = `${ACTION_REQUIRED_OUTPUT_HEADER}\n${preserved.join("\n")}`;
-  return tail ? `${actionBlock}\n\n${tail}` : actionBlock;
+  return combineOutput({
+    stdout: buildOutputStreamSummary(params.stdout, params.preservedStdoutLines),
+    stderr: buildOutputStreamSummary(params.stderr, params.preservedStderrLines),
+  });
 }
 
 function cronCommandSummaryNeedsExternalRedaction(summary: string | undefined): boolean {
@@ -247,6 +252,7 @@ function redactEmbeddedCodeCandidates(
     const end = start + match[0].length;
     const candidate = line.slice(start, end);
     const attachedToPrompt = isCodeCandidateAttachedToPrompt(scan, start, end, allowPlainCodeLabel);
+    const isShortNumericCode = /^\d{4}$/.test(candidate);
     const isUnambiguousCodeShape = /[\d -]/.test(candidate);
     const candidateSuffix = line.slice(end);
     const isUrlHandoffCode =
@@ -256,7 +262,8 @@ function redactEmbeddedCodeCandidates(
         CONTINUATION_CODE_VALUE_SUFFIX_PATTERN.test(candidateSuffix));
     const shouldRedact =
       attachedToPrompt ||
-      (!isCronCommandTerminalStatusLine(candidate) &&
+      (!isShortNumericCode &&
+        !isCronCommandTerminalStatusLine(candidate) &&
         (mode === "action" || mode === "preserved") &&
         (isUnambiguousCodeShape || isUrlHandoffCode));
     result += line.slice(cursor, start);
@@ -334,6 +341,9 @@ function redactKnownCodeOccurrences(line: string, knownCodes: ReadonlySet<string
   return line
     .replace(GROUPED_CODE_TOKEN_PATTERN, (token) => redactKnownGroupedCodes(token, knownCodes))
     .replace(PLAIN_CODE_TOKEN_PATTERN, (token) =>
+      knownCodes.has(token) ? "[redacted-code]" : token,
+    )
+    .replace(SHORT_NUMERIC_CODE_TOKEN_PATTERN, (token) =>
       knownCodes.has(token) ? "[redacted-code]" : token,
     );
 }
@@ -445,7 +455,6 @@ export function redactCronCommandSummaryForExternalDelivery(
   }
   let inPreservedActionBlock = false;
   let actionPromptCarry: ActionPromptCarry = "none";
-  let pendingPreservedOutputHeader = false;
   const redactedCodes = new Set<string>();
   const redactedSummary = summary
     .split(/(\r?\n)/)
@@ -457,13 +466,9 @@ export function redactCronCommandSummaryForExternalDelivery(
         if (inPreservedActionBlock) {
           // normalizeLines removes blank entries, so this is the block/tail delimiter.
           inPreservedActionBlock = false;
-          pendingPreservedOutputHeader = actionPromptCarry !== "none";
         }
         return part;
       }
-      const isGeneratedOutputHeader =
-        pendingPreservedOutputHeader && GENERATED_OUTPUT_SECTION_HEADER_PATTERN.test(part);
-      pendingPreservedOutputHeader = false;
       if (part.startsWith(ACTION_REQUIRED_OUTPUT_HEADER)) {
         inPreservedActionBlock = true;
       }
@@ -517,9 +522,6 @@ export function redactCronCommandSummaryForExternalDelivery(
         actionPromptCarry = "url-handoff";
       } else if (isActionLine) {
         actionPromptCarry = "code-or-explanation";
-      } else if (isGeneratedOutputHeader && promptCarry !== "none") {
-        // buildCronCommandSummary inserts stdout: between preserved prompts and tail output.
-        actionPromptCarry = promptCarry;
       } else if (promptCarry !== "none" && isTerminalStatusLine) {
         actionPromptCarry = promptCarry;
       } else if (
