@@ -133,14 +133,19 @@ describe("subagent registry persistence resume", () => {
     });
   });
 
-  it("retries pending child delivery before a recovered requester-turn wake", async () => {
+  it.each([
+    { label: "successful", status: "ok" as const },
+    { label: "timed-out", status: "timeout" as const },
+  ])("retries pending $label child delivery after restart", async ({ label, status }) => {
     tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
     const stateDir = tempStateDir;
     await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
+      const runId = `run-pending-${label}-delivery`;
+      const childSessionKey = `agent:main:subagent:pending-${label}-delivery`;
       const run: SubagentRunRecord = {
-        runId: "run-pending-delivery",
+        runId,
         requesterTurnRunId: "run-requester",
-        childSessionKey: "agent:main:subagent:pending-delivery",
+        childSessionKey,
         requesterSessionKey: "agent:main:main",
         requesterDisplayKey: "main",
         task: "deliver before waking requester",
@@ -151,7 +156,7 @@ describe("subagent registry persistence resume", () => {
           status: "terminal",
           startedAt: 110,
           endedAt: 200,
-          outcome: { status: "ok" },
+          outcome: { status },
         },
         expectsCompletionMessage: true,
         completion: { required: true, resultText: "done", capturedAt: 200 },
@@ -160,12 +165,12 @@ describe("subagent registry persistence resume", () => {
           payload: {
             requesterSessionKey: "agent:main:main",
             requesterDisplayKey: "main",
-            childSessionKey: "agent:main:subagent:pending-delivery",
-            childRunId: "run-pending-delivery",
+            childSessionKey,
+            childRunId: runId,
             task: "deliver before waking requester",
             startedAt: 110,
             endedAt: 200,
-            outcome: { status: "ok" },
+            outcome: { status },
             expectsCompletionMessage: true,
           },
         },
@@ -176,8 +181,8 @@ describe("subagent registry persistence resume", () => {
         stateDir,
         agentId: "main",
         sessionKey: run.childSessionKey,
-        sessionId: "sess-pending-delivery",
-        defaultSessionId: "sess-pending-delivery",
+        sessionId: `sess-pending-${label}-delivery`,
+        defaultSessionId: `sess-pending-${label}-delivery`,
       });
 
       mod.initSubagentRegistry();
@@ -188,8 +193,9 @@ describe("subagent registry persistence resume", () => {
         interval: 10,
       });
       expect(announceSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ childRunId: "run-pending-delivery" }),
+        expect.objectContaining({ childRunId: runId, outcome: { status } }),
       );
+      expect(mod.getSubagentRunByRunId(runId)?.execution.outcome).toEqual({ status });
     });
   });
 
@@ -354,6 +360,82 @@ describe("subagent registry persistence resume", () => {
           }),
         }),
       );
+    });
+  });
+
+  it("bounds restored requester-settle wakes after Gateway activation", async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+    const stateDir = tempStateDir;
+    let activeWakes = 0;
+    let maxActiveWakes = 0;
+    const wakeResolvers: Array<() => void> = [];
+    const wakeRequester = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          activeWakes += 1;
+          maxActiveWakes = Math.max(maxActiveWakes, activeWakes);
+          wakeResolvers.push(() => {
+            activeWakes -= 1;
+            resolve(false);
+          });
+        }),
+    );
+    mod.testing.setDepsForTest({
+      ...createSubagentRegistryTestDeps({
+        callGateway: vi.mocked(callGatewayModule.callGateway),
+        maybeWakeRequesterAfterAllChildrenSettled: wakeRequester,
+      }),
+    });
+
+    await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
+      const endedAt = Date.now();
+      const restoredRuns = Array.from(
+        { length: 3 },
+        (_, index): SubagentRunRecord => ({
+          runId: `run-restored-wake-${index}`,
+          childSessionKey: `agent:main:subagent:restored-wake-${index}`,
+          requesterSessionKey: `agent:main:requester-${index}`,
+          requesterDisplayKey: `requester-${index}`,
+          task: "resume a durable requester wake",
+          cleanup: "keep",
+          createdAt: endedAt - 1_000,
+          endedReason: "subagent-complete",
+          execution: {
+            status: "terminal",
+            startedAt: endedAt - 500,
+            endedAt,
+            outcome: { status: "ok" },
+          },
+          completion: { required: true, resultText: "done", capturedAt: endedAt },
+          delivery: { status: "delivered", deliveredAt: endedAt },
+          cleanupHandled: true,
+          cleanupCompletedAt: endedAt,
+          requesterSettleWake: { status: "pending", attemptCount: 0 },
+        }),
+      );
+      saveSubagentRegistryToSqlite(
+        new Map(restoredRuns.map((entry) => [entry.runId, entry] as const)),
+      );
+
+      mod.initSubagentRegistry();
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(wakeRequester).not.toHaveBeenCalled();
+
+      activateRegistry();
+      await vi.waitFor(() => expect(wakeRequester).toHaveBeenCalledTimes(2));
+      expect(activeWakes).toBe(2);
+      expect(maxActiveWakes).toBe(2);
+
+      wakeResolvers.shift()?.();
+      await vi.waitFor(() => expect(wakeRequester).toHaveBeenCalledTimes(3));
+      expect(maxActiveWakes).toBe(2);
+
+      for (const resolveWake of wakeResolvers) {
+        resolveWake();
+      }
+      await vi.waitFor(() => expect(activeWakes).toBe(0));
     });
   });
 

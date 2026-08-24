@@ -1991,7 +1991,7 @@ describe("subagent registry seam flow", () => {
     expect(mod.getSubagentRunByRunId(runId)?.execution.endedAt).toBeUndefined();
   });
 
-  it("requeues a ready settle wake on the next sweeper tick after a worker error", async () => {
+  it("requeues durable requester-settle obligations after a worker error", async () => {
     const endedAt = Date.now() - 1_000;
     mod.addSubagentRunForTests({
       runId: "run-settle-retry",
@@ -2011,10 +2011,6 @@ describe("subagent registry seam flow", () => {
       expect(mocks.maybeWakeRequesterAfterAllChildrenSettled).toHaveBeenCalledTimes(1),
     );
     await waitForFast(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
-    expect(mod.getSubagentRunByRunId("run-settle-retry")?.requesterSettleWake).toEqual({
-      status: "pending",
-      attemptCount: 0,
-    });
 
     await mod.testing.sweepOnceForTests();
     await waitForFast(() =>

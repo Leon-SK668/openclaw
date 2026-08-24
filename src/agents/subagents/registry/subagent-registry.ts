@@ -3,7 +3,6 @@ import type { AgentWaitParams } from "../../../../packages/gateway-protocol/src/
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { callGateway } from "../../../gateway/call.js";
 import type { GatewayContextResolver } from "../../../gateway/server-methods/types.js";
-import { hasInProcessGatewayContext } from "../../../gateway/server-plugins-node-runtime.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
 import { bindGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
 import {
@@ -64,10 +63,9 @@ const subagentRegistryBootstrapState: {
 } = {};
 
 const resumeRetryTimers = new Set<ReturnType<typeof setTimeout>>();
+let activeGatewayContextResolver: GatewayContextResolver | undefined;
 const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 const GATEWAY_ADMISSION_RETRY_DELAY_MS = 1_000;
-let restoredRequesterSettleWakeReady: (() => boolean) | undefined;
-let activeGatewayContextResolver: GatewayContextResolver | undefined;
 /** Admission pressure for recoverable completion deliveries; rows are never pruned for capacity. */
 export function getSubagentDeliveryBacklogPressure(): {
   suspended: number;
@@ -223,7 +221,7 @@ function finalizeResumedAnnounceGiveUpInBackground(
   });
 }
 
-export function resumeSubagentRun(runId: string, requesterSettleWakeReady?: () => boolean) {
+export function resumeSubagentRun(runId: string, source: "live" | "restore" = "live") {
   if (!runId || resumedRuns.has(runId)) {
     return;
   }
@@ -247,7 +245,7 @@ export function resumeSubagentRun(runId: string, requesterSettleWakeReady?: () =
     typeof entry.execution.endedAt === "number" &&
     !yieldedWakeWaitingForDelivery
   ) {
-    resumeRequesterSettleWake(runId, entry, requesterSettleWakeReady);
+    resumeRequesterSettleWake(runId, entry, source);
     return;
   }
   if (entry.cleanupCompletedAt) {
@@ -325,16 +323,13 @@ const subagentRestorer = createSubagentRegistryRestorer({
   runs: subagentRuns,
   resumedRuns,
   deps: () => subagentRegistryDeps,
+  getGatewayContextResolver: () => activeGatewayContextResolver,
   persist: persistSubagentRuns,
   persistOrThrow: persistSubagentRunsOrThrow,
-  settleRequesterTurn: (args) =>
-    settleRequesterTurnAfterSessionSpawns({
-      ...args,
-      requesterSettleWakeReady: restoredRequesterSettleWakeReady,
-    }),
+  settleRequesterTurn: settleRequesterTurnAfterSessionSpawns,
   ensureListener: () => subagentListener.ensure(),
   startSweeper: () => subagentSweeper.start(),
-  resumeRun: (runId) => resumeSubagentRun(runId, restoredRequesterSettleWakeReady),
+  resumeRun: (runId) => resumeSubagentRun(runId, "restore"),
   listSwarmRunsForGroup: (groupId, requesterSessionKey, requesterAgentId) =>
     listSwarmRunsForGroup(groupId, requesterSessionKey, requesterAgentId),
   startQueuedSubagentRun: (runId, gatewayRunId, lifecycleGeneration) =>
@@ -359,7 +354,6 @@ const subagentRestorer = createSubagentRegistryRestorer({
     subagentRunManager.settleFailedQueuedSubagentLaunch(runId, error),
   completeCollectorLaunchCleanup: (runId) => publicApi.completeCollectorLaunchCleanup(runId),
   warn: (message, meta) => log.warn(message, meta),
-  getGatewayContextResolver: () => activeGatewayContextResolver,
 });
 
 function resolveSubagentWaitTimeoutMs(cfg: OpenClawConfig, runTimeoutSeconds?: number) {
@@ -538,8 +532,6 @@ export function adoptPausedSubagentRunForFollowUp(params: {
 }
 
 function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
-  restoredRequesterSettleWakeReady = undefined;
-  activeGatewayContextResolver = undefined;
   clearScheduledResumeTimers();
   for (const timer of resumeRetryTimers) {
     clearTimeout(timer);
@@ -553,6 +545,7 @@ function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   clearSubagentRunsReadCacheForTest();
   subagentSweeper.reset();
   subagentRestorer.reset();
+  activeGatewayContextResolver = undefined;
   subagentListener.reset();
   if (opts?.persist !== false) {
     persistSubagentRuns();
@@ -600,10 +593,7 @@ export const recordSwarmStructuredOutput = publicApi.recordSwarmStructuredOutput
 export const listSwarmRunsForGroup = publicApi.listSwarmRunsForGroup;
 export const getSwarmRunByLaunchReplayKey = publicApi.getSwarmRunByLaunchReplayKey;
 export const countActiveRunsForSession = publicApi.countActiveRunsForSession;
-export function initSubagentRegistry(options?: { waitForInProcessGatewayContext?: boolean }) {
-  if (options?.waitForInProcessGatewayContext) {
-    restoredRequesterSettleWakeReady = hasInProcessGatewayContext;
-  }
+export function initSubagentRegistry() {
   const state = subagentRegistryBootstrapState;
   if (!state.ready || !state.restorer) {
     state.pending = true;
@@ -611,7 +601,6 @@ export function initSubagentRegistry(options?: { waitForInProcessGatewayContext?
   }
   state.restorer.restoreOnce();
 }
-
 export function activateSubagentRegistry(resolveGatewayContext: GatewayContextResolver) {
   activeGatewayContextResolver = resolveGatewayContext;
   for (const entry of subagentRuns.values()) {
