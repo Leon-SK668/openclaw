@@ -127,14 +127,13 @@ verifyDepsBeforeRun: false
 blockExoticSubdeps: true
 
 overrides:
-  "@agentclientprotocol/codex-acp@1.1.7>@openai/codex": 0.147.0
+  "@agentclientprotocol/codex-acp@1.1.7>@openai/codex": 0.148.0
   "@anthropic-ai/sdk": 0.115.0
   "@opentelemetry/core": 2.10.0
   "@opentelemetry/propagator-jaeger": 2.10.0
   "@aws-sdk/core": 3.977.1
   "@aws-sdk/credential-provider-node": 3.972.72
   "@aws-sdk/xml-builder": 3.972.37
-  hono: 4.12.32
   "@hono/node-server": 2.0.12
   axios: 1.18.1
   fast-uri: 4.1.2
@@ -174,7 +173,6 @@ allowBuilds:
   "@discordjs/opus": false
   esbuild: true
   koffi: false
-  node-llama-cpp: false
   onnxruntime-node: false
   protobufjs: true
   sharp: true
