@@ -283,7 +283,11 @@ function resolveUsageCredentialProviderIds(params: {
       if (!isUsageProviderManifestEligible({ plugin, state: params.state })) {
         continue;
       }
-      for (const providerId of pluginProviderIds) {
+      const credentialProviderIds = normalizeProviderIds([
+        ...pluginProviderIds,
+        ...(plugin.syntheticAuthRefs ?? []),
+      ]);
+      for (const providerId of credentialProviderIds) {
         providerIds.add(providerId);
       }
     }

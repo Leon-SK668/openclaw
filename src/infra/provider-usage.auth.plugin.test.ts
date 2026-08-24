@@ -44,6 +44,12 @@ vi.mock("../plugins/manifest-contract-eligibility.js", () => ({
   loadManifestMetadataSnapshot: () => ({
     plugins: [
       {
+        id: "anthropic",
+        origin: "bundled",
+        providers: ["anthropic"],
+        syntheticAuthRefs: ["claude-cli"],
+      },
+      {
         id: "minimax",
         origin: "bundled",
         providers: ["minimax", "minimax-portal"],
@@ -291,6 +297,73 @@ describe("resolveProviderAuths plugin boundary", () => {
     expect(resolveProviderUsageAuthWithPluginMock).toHaveBeenCalledTimes(1);
     expect(providerCalls(resolveProviderUsageAuthWithPluginMock)).toEqual(["anthropic"]);
     expect(ensureAuthProfileStoreMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps usage auth when an owned synthetic auth ref has OAuth credentials", async () => {
+    const store = {
+      profiles: {
+        "claude-cli:default": {
+          type: "oauth",
+          provider: "claude-cli",
+          access: "claude-cli-access",
+          refresh: "claude-cli-refresh",
+          expires: Date.now() + 3_600_000,
+          subscriptionType: "max",
+          rateLimitTier: "default_max_20x",
+        },
+      },
+    };
+    hasAnyAuthProfileStoreSourceMock.mockReturnValue(true);
+    ensureAuthProfileStoreWithoutExternalProfilesMock.mockReturnValue(store as never);
+    ensureAuthProfileStoreMock.mockReturnValue(store as never);
+    resolveAuthProfileOrderMock.mockImplementation((params: unknown) => {
+      const provider =
+        params && typeof params === "object" && "provider" in params
+          ? (params as { provider?: unknown }).provider
+          : undefined;
+      return provider === "claude-cli" ? ["claude-cli:default"] : [];
+    });
+    resolveApiKeyForProfileMock.mockResolvedValue({
+      apiKey: "claude-cli-access",
+      provider: "claude-cli",
+    });
+    resolveProviderUsageAuthWithPluginMock.mockImplementationOnce(async (rawParams) => {
+      const params = rawParams as {
+        context: {
+          resolveOAuthToken: (options?: { provider?: string }) => Promise<{
+            token: string;
+            subscriptionType?: string;
+            rateLimitTier?: string;
+          } | null>;
+        };
+      };
+      return (
+        (await params.context.resolveOAuthToken()) ??
+        (await params.context.resolveOAuthToken({ provider: "claude-cli" }))
+      );
+    });
+
+    await expect(
+      resolveProviderAuthsForTest({
+        providers: ["anthropic"],
+        agentDir: "/tmp/openclaw-agent",
+        env: {},
+      }),
+    ).resolves.toEqual([
+      {
+        provider: "anthropic",
+        token: "claude-cli-access",
+        subscriptionType: "max",
+        rateLimitTier: "default_max_20x",
+      },
+    ]);
+    expect(providerCalls(resolveProviderUsageAuthWithPluginMock)).toEqual(["anthropic"]);
+    expect(resolveApiKeyForProfileMock).toHaveBeenCalledWith({
+      cfg: {},
+      store,
+      profileId: "claude-cli:default",
+      agentDir: "/tmp/openclaw-agent",
+    });
   });
 
   it("keeps plugin usage auth when an owned alias provider has auth-profile credentials", async () => {
