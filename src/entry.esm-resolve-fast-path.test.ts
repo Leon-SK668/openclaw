@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../test/helpers/temp-dir.js";
 import { installDistEsmResolveFastPath } from "./entry.esm-resolve-fast-path.js";
 
 type ResolveHook = (
@@ -8,6 +13,7 @@ type ResolveHook = (
 ) => { url: string; format?: string | null; shortCircuit?: boolean };
 
 const DIST_ROOT = "file:///opt/openclaw/dist/";
+const DIST_ENTRY_PATH = path.resolve("dist/entry.js");
 
 function installCapturedHook(entryFileUrl: string): ResolveHook {
   let hook: ResolveHook | undefined;
@@ -16,6 +22,8 @@ function installCapturedHook(entryFileUrl: string): ResolveHook {
       hook = options.resolve as ResolveHook;
       return { deregister: () => {} };
     },
+    execArgv: [],
+    nodeOptions: undefined,
   });
   expect(installed).toBe(true);
   if (!hook) {
@@ -97,8 +105,9 @@ describe("installDistEsmResolveFastPath gating", () => {
       return { deregister: () => {} };
     };
     const root = "file:///opt/openclaw-idempotent/dist/";
-    expect(installDistEsmResolveFastPath(`${root}entry.js`, { registerHooks })).toBe(true);
-    expect(installDistEsmResolveFastPath(`${root}index.js`, { registerHooks })).toBe(true);
+    const deps = { registerHooks, execArgv: [], nodeOptions: undefined };
+    expect(installDistEsmResolveFastPath(`${root}entry.js`, deps)).toBe(true);
+    expect(installDistEsmResolveFastPath(`${root}index.js`, deps)).toBe(true);
     expect(registered).toBe(1);
   });
 
@@ -115,7 +124,181 @@ describe("installDistEsmResolveFastPath gating", () => {
     expect(
       installDistEsmResolveFastPath("file:///opt/openclaw-two/dist/entry.js", {
         registerHooks: undefined,
+        execArgv: [],
+        nodeOptions: undefined,
       }),
     ).toBe(false);
+  });
+
+  it.each([
+    { name: "CLI --import", execArgv: ["--import", "./hook.mjs"], nodeOptions: undefined },
+    { name: "CLI --import=", execArgv: ["--import=./hook.mjs"], nodeOptions: undefined },
+    { name: "CLI --require", execArgv: ["--require", "./hook.cjs"], nodeOptions: undefined },
+    { name: "CLI --require=", execArgv: ["--require=./hook.cjs"], nodeOptions: undefined },
+    { name: "CLI -r", execArgv: ["-r", "./hook.cjs"], nodeOptions: undefined },
+    { name: "CLI --loader", execArgv: ["--loader", "./hook.mjs"], nodeOptions: undefined },
+    { name: "CLI --loader=", execArgv: ["--loader=./hook.mjs"], nodeOptions: undefined },
+    {
+      name: "CLI --experimental-loader",
+      execArgv: ["--experimental-loader", "./hook.mjs"],
+      nodeOptions: undefined,
+    },
+    {
+      name: "CLI --experimental-loader=",
+      execArgv: ["--experimental-loader=./hook.mjs"],
+      nodeOptions: undefined,
+    },
+    {
+      name: "CLI --experimental_loader",
+      execArgv: ["--experimental_loader", "./hook.mjs"],
+      nodeOptions: undefined,
+    },
+    {
+      name: "CLI --experimental_loader=",
+      execArgv: ["--experimental_loader=./hook.mjs"],
+      nodeOptions: undefined,
+    },
+    {
+      name: "CLI --experimental-config-file",
+      execArgv: ["--experimental-config-file"],
+      nodeOptions: undefined,
+    },
+    {
+      name: "CLI --experimental-config-file=",
+      execArgv: ["--experimental-config-file=./node.config.json"],
+      nodeOptions: undefined,
+    },
+    {
+      name: "CLI --experimental-default-config-file",
+      execArgv: ["--experimental-default-config-file"],
+      nodeOptions: undefined,
+    },
+    { name: "NODE_OPTIONS --import", execArgv: [], nodeOptions: "--import ./hook.mjs" },
+    {
+      name: "NODE_OPTIONS quoted --import token",
+      execArgv: [],
+      nodeOptions: '"--import" ./hook.mjs',
+    },
+    {
+      name: "NODE_OPTIONS quoted --require value",
+      execArgv: [],
+      nodeOptions: '--enable-source-maps --require "./my hook.cjs"',
+    },
+    { name: "NODE_OPTIONS --loader", execArgv: [], nodeOptions: "--loader ./hook.mjs" },
+    {
+      name: "NODE_OPTIONS --experimental-loader=",
+      execArgv: [],
+      nodeOptions: "--experimental-loader=./hook.mjs",
+    },
+    {
+      name: "NODE_OPTIONS --experimental_loader",
+      execArgv: [],
+      nodeOptions: "--experimental_loader ./hook.mjs",
+    },
+  ])(
+    "declines when a resolver hook may be configured through $name",
+    ({ execArgv, nodeOptions }) => {
+      let registered = 0;
+      const installed = installDistEsmResolveFastPath(
+        `file:///opt/openclaw-preload-${registered}-${execArgv.length}/dist/entry.js`,
+        {
+          registerHooks: () => {
+            registered += 1;
+            return { deregister: () => {} };
+          },
+          execArgv,
+          nodeOptions,
+        },
+      );
+
+      expect(installed).toBe(false);
+      expect(registered).toBe(0);
+    },
+  );
+});
+
+describe.skipIf(!fs.existsSync(DIST_ENTRY_PATH))("built dist resolver hook chaining", () => {
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+  it.each([
+    {
+      name: "synchronous preload",
+      nodeOption: "--import",
+      source: `import { registerHooks } from "node:module";
+registerHooks({ resolve: recordRuntimeGuard });`,
+    },
+    {
+      name: "asynchronous loader",
+      nodeOption: "--loader",
+      source:
+        "export async function resolve(specifier, context, nextResolve) { return recordRuntimeGuard(specifier, context, nextResolve); }",
+    },
+    {
+      name: "quoted NODE_OPTIONS synchronous preload",
+      nodeOption: "--import",
+      nodeOptions: true,
+      source: `import { registerHooks } from "node:module";
+registerHooks({ resolve: recordRuntimeGuard });`,
+    },
+    {
+      name: "underscore asynchronous loader",
+      nodeOption: "--experimental_loader",
+      source:
+        "export async function resolve(specifier, context, nextResolve) { return recordRuntimeGuard(specifier, context, nextResolve); }",
+    },
+    {
+      name: "configuration-file synchronous preload",
+      nodeConfig: true,
+      nodeOption: "--experimental-config-file",
+      source: `import { registerHooks } from "node:module";
+registerHooks({ resolve: recordRuntimeGuard });`,
+    },
+  ])("preserves $name resolver hooks", ({ nodeConfig, nodeOption, nodeOptions, source }) => {
+    const root = tempDirs.make("openclaw-dist-resolver-hook-");
+    const hookPath = path.join(root, "resolver-hook.mjs");
+    const markerPath = path.join(root, "resolver-hook.log");
+    fs.writeFileSync(
+      hookPath,
+      `import { appendFileSync } from "node:fs";
+function recordRuntimeGuard(specifier, context, nextResolve) {
+  if (/^\\.\\/runtime-guard-[^/]+\\.js$/.test(specifier)) {
+    appendFileSync(process.env.OPENCLAW_TEST_RESOLVER_HOOK_MARKER, specifier + "\\n");
+  }
+  return nextResolve(specifier, context);
+}
+${source}
+`,
+    );
+    const hookUrl = pathToFileURL(hookPath).href;
+    const configPath = path.join(root, "node.config.json");
+    if (nodeConfig) {
+      fs.writeFileSync(configPath, JSON.stringify({ nodeOptions: { import: [hookUrl] } }));
+    }
+    const nodeArgs = nodeConfig
+      ? [`${nodeOption}=${configPath}`, DIST_ENTRY_PATH, "--version"]
+      : nodeOptions
+        ? [DIST_ENTRY_PATH, "--version"]
+        : [nodeOption, hookUrl, DIST_ENTRY_PATH, "--version"];
+
+    const result = spawnSync(process.execPath, nodeArgs, {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: root,
+        NODE_DISABLE_COMPILE_CACHE: "1",
+        NODE_ENV: undefined,
+        NODE_OPTIONS: nodeOptions ? `"${nodeOption}" ${hookUrl}` : undefined,
+        OPENCLAW_NO_RESPAWN: "1",
+        OPENCLAW_TEST_RESOLVER_HOOK_MARKER: markerPath,
+        VITEST: undefined,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const resolvedRuntimeGuards = fs.readFileSync(markerPath, "utf8").trim().split("\n");
+    expect(resolvedRuntimeGuards.length).toBeGreaterThan(0);
+    expect(resolvedRuntimeGuards).toEqual(
+      resolvedRuntimeGuards.filter((specifier) => /^\.\/runtime-guard-[^/]+\.js$/.test(specifier)),
+    );
   });
 });

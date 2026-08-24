@@ -12,6 +12,7 @@
  * byte-identical to Node's default resolution.
  */
 import Module from "node:module";
+import process from "node:process";
 
 type SyncResolveResult = { url: string; format?: string | null; shortCircuit?: boolean };
 type SyncResolveContext = { parentURL?: string; conditions?: readonly string[] };
@@ -28,6 +29,36 @@ const moduleWithHooks = Module as typeof Module & {
 };
 
 const installedDistRootUrls = new Set<string>();
+const NODE_OPTIONS_RESOLVER_HOOK_PATTERN =
+  /(?:^|[\s"])(?:--import|--require|-r|--loader|--experimental[-_]loader)(?:=|[\s"]|$)/u;
+
+function hasNodeResolverHookOption(params: {
+  execArgv: readonly string[];
+  nodeOptions: string | undefined;
+}): boolean {
+  if (
+    params.execArgv.some(
+      (arg) =>
+        arg === "--import" ||
+        arg.startsWith("--import=") ||
+        arg === "--require" ||
+        arg.startsWith("--require=") ||
+        arg === "-r" ||
+        arg === "--loader" ||
+        arg.startsWith("--loader=") ||
+        arg === "--experimental-loader" ||
+        arg.startsWith("--experimental-loader=") ||
+        arg === "--experimental_loader" ||
+        arg.startsWith("--experimental_loader=") ||
+        arg === "--experimental-config-file" ||
+        arg.startsWith("--experimental-config-file=") ||
+        arg === "--experimental-default-config-file",
+    )
+  ) {
+    return true;
+  }
+  return NODE_OPTIONS_RESOLVER_HOOK_PATTERN.test(params.nodeOptions ?? "");
+}
 
 /**
  * Resolves a dist-internal relative ESM specifier to its final file URL, or
@@ -73,7 +104,11 @@ function resolveDistEsmFastPathUrl(params: {
  */
 export function installDistEsmResolveFastPath(
   entryFileUrl: string,
-  deps: { registerHooks?: RegisterModuleHooks | undefined } = {},
+  deps: {
+    registerHooks?: RegisterModuleHooks | undefined;
+    execArgv?: readonly string[];
+    nodeOptions?: string | undefined;
+  } = {},
 ): boolean {
   const registerHooks =
     "registerHooks" in deps ? deps.registerHooks : moduleWithHooks.registerHooks;
@@ -82,6 +117,12 @@ export function installDistEsmResolveFastPath(
   }
   const distRootUrl = new URL("./", entryFileUrl).href;
   if (!distRootUrl.endsWith("/dist/")) {
+    return false;
+  }
+  const nodeOptions = "nodeOptions" in deps ? deps.nodeOptions : process.env.NODE_OPTIONS;
+  // Preloads and loaders can register resolver hooks before OpenClaw starts.
+  // Our later short circuit would otherwise bypass that user-owned chain.
+  if (hasNodeResolverHookOption({ execArgv: deps.execArgv ?? process.execArgv, nodeOptions })) {
     return false;
   }
   if (installedDistRootUrls.has(distRootUrl)) {
