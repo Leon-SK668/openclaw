@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { createAgent } from "../agents/agent-create.js";
 import { beginAgentDeletion } from "../agents/agent-lifecycle-registry.js";
 import { withTempHomeConfig, writeOpenClawConfig } from "../config/test-helpers.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -116,6 +117,44 @@ describe("Claw exec approvals removal", () => {
         cleanupCompleted: true,
         deleteFiles: false,
       });
+    });
+  });
+
+  it("blocks recreating the agent until destructive cleanup finishes", async () => {
+    const addPlan = await buildApprovalFixture();
+
+    await withTempHomeConfig({}, async ({ home }) => {
+      const env = { OPENCLAW_STATE_DIR: join(home, ".openclaw") };
+      setTestEnvValue("OPENCLAW_STATE_DIR", env.OPENCLAW_STATE_DIR);
+      let config: OpenClawConfig = {};
+      await applyClawAddPlan(addPlan, {
+        consentPlanIntegrity: addPlan.planIntegrity,
+        env,
+        commitConfig: async (transform) => {
+          config = transform(config);
+        },
+      });
+      await writeOpenClawConfig(home, config);
+      const plan = await buildClawRemovePlan("worker");
+      let creationDuringCleanup: Awaited<ReturnType<typeof createAgent>> | undefined;
+
+      const result = await applyClawRemovePlan(plan, {
+        consentPlanIntegrity: plan.planIntegrity,
+        trashPath: async () => {
+          creationDuringCleanup ??= await createAgent({
+            name: "worker",
+            workspace: join(home, "replacement-worker"),
+          });
+          return true;
+        },
+      });
+
+      expect(creationDuringCleanup).toMatchObject({
+        status: "error",
+        reason: "deletion-pending",
+      });
+      expect(result).toMatchObject({ status: "complete", agentRemoved: true });
+      expect(readAgentDeletionJournal("worker")).toMatchObject({ cleanupCompleted: true });
     });
   });
 

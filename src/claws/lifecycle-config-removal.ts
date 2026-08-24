@@ -172,10 +172,7 @@ export async function claimClawAgentConfigRemoval(params: ClawAgentConfigRemoval
       commitClawAgentConfigRemoval({ ...params, config }),
     );
     deletion.commit();
-    // The journal fences only the roster and approvals commit here; Claw's own filesystem cleanup
-    // runs afterwards and may legitimately end partial, so completion is recorded now.
-    deletion.finish();
-    return result;
+    return { ...result, completeDeletion: deletion.finish };
   } catch (error) {
     if (!existingJournal) {
       deletion.rollback();

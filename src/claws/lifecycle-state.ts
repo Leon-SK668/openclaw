@@ -603,6 +603,7 @@ export async function applyClawRemovePlan(
   const {
     agentRemoved,
     cleanupTargets,
+    completeDeletion,
     configBeforeDelete,
     nextConfig: committedNextConfig,
   } = configRemoval;
@@ -680,6 +681,10 @@ export async function applyClawRemovePlan(
     updateClawInstallRecordStatus(agentId, "partial", options);
   }
   releaseClawRemoveRows(plan.agentId, workspaceFiles, complete, options);
+  if (complete) {
+    // Keep replacement agents fenced until every Claw-owned destructive cleanup step is terminal.
+    completeDeletion();
+  }
   return {
     schemaVersion: CLAW_REMOVE_RESULT_SCHEMA_VERSION,
     stability: CLAW_OUTPUT_STABILITY,

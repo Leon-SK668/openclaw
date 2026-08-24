@@ -6,6 +6,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeCronJobCreate } from "../cron/normalize.js";
 import { upsertCronJobRow } from "../cron/store/row-codec.js";
 import type { CronStoredJob } from "../cron/types.js";
+import { readAgentDeletionJournal } from "../state/agent-deletion-journal.js";
 import {
   listOpenClawRegisteredAgentDatabases,
   registerOpenClawAgentDatabase,
@@ -901,6 +902,9 @@ describe("Claw status and remove", () => {
       status: "partial",
       agentRemoved: true,
       error: { code: "workspace_cleanup_failed" },
+    });
+    expect(readAgentDeletionJournal("worker")).toMatchObject({
+      cleanupCompleted: false,
     });
     await expect(
       readClawStatus("worker", { env: current.env, config: nextConfig }),
