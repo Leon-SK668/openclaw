@@ -215,7 +215,8 @@ export async function sendPayloadWithChunkedTextAndMedia<
     return lastResult;
   }
   const limit = params.textChunkLimit;
-  const chunks = limit && params.chunker ? params.chunker(text, limit) : [text];
+  const chunkedText = limit && params.chunker ? params.chunker(text, limit) : [text];
+  const chunks = resolveTextChunksWithFallback(text, chunkedText);
   const [firstChunk, ...remainingChunks] = chunks;
   if (firstChunk === undefined) {
     return params.emptyResult;
@@ -399,10 +400,11 @@ export async function sendTextMediaPayload(params: {
     return { channel: params.channel, messageId: "" };
   }
   const limit = params.adapter.textChunkLimit;
-  const chunks =
+  const chunkedText =
     limit && params.adapter.chunker
       ? params.adapter.chunker(text, limit, { formatting: params.ctx.formatting })
       : [text];
+  const chunks = resolveTextChunksWithFallback(text, chunkedText);
   let lastResult: Awaited<ReturnType<NonNullable<typeof params.adapter.sendText>>>;
   for (const chunk of chunks) {
     let childReported = false;
