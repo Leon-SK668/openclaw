@@ -3,6 +3,7 @@
 // prompter driving the Control UI / native clients).
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
+  listAgentIds,
   resolveConfiguredAgentId,
   tryResolveAgentOperationAgentId,
 } from "../../agents/agent-scope-config.js";
@@ -27,6 +28,21 @@ type InitialWizardChannelTarget =
 
 function unresolvedInitialWizardChannelTarget(channel: string): InitialWizardChannelTarget {
   return { kind: "unresolved", message: formatUnknownChannelMessage({ channel }) };
+}
+
+/** Select a setup owner before workspace-scoped channel discovery. */
+export async function selectChannelSetupAgentId(
+  cfg: OpenClawConfig,
+  prompter: WizardPrompter,
+): Promise<string> {
+  const agentIds = listAgentIds(cfg);
+  if (agentIds.length <= 1) {
+    return resolveChannelSetupOwner(cfg).agentId;
+  }
+  return await prompter.select({
+    message: "Set up channels for agent",
+    options: agentIds.map((agentId) => ({ value: agentId, label: agentId })),
+  });
 }
 
 /** Resolve omitted, matched, and unmatched channel targets without collapsing caller intent. */
@@ -287,7 +303,9 @@ export async function runChannelsSetupWizard(
     );
   }
   const cfg = (snapshot.sourceConfig ?? snapshot.config) as OpenClawConfig;
-  const target = await resolveInitialWizardChannelTarget(opts.channel, cfg);
+  const agentId = await selectChannelSetupAgentId(cfg, prompter);
+  const workspaceDir = resolveChannelSetupOwner(cfg, agentId).workspaceDir;
+  const target = await resolveInitialWizardChannelTarget(opts.channel, cfg, workspaceDir);
   if (target.kind === "unresolved") {
     throw new Error(target.message);
   }
@@ -296,6 +314,7 @@ export async function runChannelsSetupWizard(
     ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
     runtime,
     prompter,
+    workspaceDir,
     ...(target.kind === "resolved" ? { initialChannel: target.channel } : {}),
     deferDeviceLinkToClient: true,
     ...(opts.onConfigured ? { onConfigured: opts.onConfigured } : {}),

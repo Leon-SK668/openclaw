@@ -144,16 +144,13 @@ async function channelsAddCommandImpl(
 
   const useWizard = shouldUseWizard(params);
   if (useWizard) {
-    const { resolveInitialWizardChannelTarget, runChannelsAddWizardFlow } =
+    const {
+      resolveInitialWizardChannelTarget,
+      runChannelsAddWizardFlow,
+      selectChannelSetupAgentId,
+    } =
       await import("./add-wizard.js");
-    const workspaceDir =
-      opts.agent === undefined ? undefined : resolveChannelSetupOwner(cfg, opts.agent).workspaceDir;
-    const target = await resolveInitialWizardChannelTarget(opts.channel, cfg, workspaceDir);
-    if (target.kind === "unresolved") {
-      runtime.error(target.message);
-      runtime.exit(1);
-      return;
-    }
+    const prompter = createClackPrompter();
     if (!isTerminalInteractive()) {
       runtime.error(
         "Interactive channel setup requires a TTY. Use `openclaw channels add --channel <id> --use-env` or pass the channel's credential flags for non-interactive setup.",
@@ -161,11 +158,21 @@ async function channelsAddCommandImpl(
       runtime.exit(1);
       return;
     }
+    const workspaceDir =
+      opts.agent === undefined
+        ? resolveChannelSetupOwner(cfg, await selectChannelSetupAgentId(cfg, prompter)).workspaceDir
+        : resolveChannelSetupOwner(cfg, opts.agent).workspaceDir;
+    const target = await resolveInitialWizardChannelTarget(opts.channel, cfg, workspaceDir);
+    if (target.kind === "unresolved") {
+      runtime.error(target.message);
+      runtime.exit(1);
+      return;
+    }
     await runChannelsAddWizardFlow({
       cfg,
       ...(baseHash !== undefined ? { baseHash } : {}),
       runtime,
-      prompter: createClackPrompter(),
+      prompter,
       ...(workspaceDir ? { workspaceDir } : {}),
       ...(target.kind === "resolved" ? { initialChannel: target.channel } : {}),
       ...(params?.beforePersistentEffect
