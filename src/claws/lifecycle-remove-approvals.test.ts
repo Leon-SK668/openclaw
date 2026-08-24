@@ -55,9 +55,10 @@ async function buildApprovalFixture() {
 
 describe("Claw exec approvals removal", () => {
   it.each([
-    { label: "config-file commit", useCommitConfig: false },
-    { label: "commitConfig seam", useCommitConfig: true },
-  ])("removes only the claw agent policy through the $label", async ({ useCommitConfig }) => {
+    { label: "config-file commit", commit: false, complete: true },
+    { label: "commitConfig seam", commit: true, complete: true },
+    { label: "partial cleanup", commit: false, complete: false },
+  ])("removes only the claw agent policy through the $label", async ({ commit, complete }) => {
     const addPlan = await buildApprovalFixture();
 
     await withTempHomeConfig({}, async ({ home }) => {
@@ -86,15 +87,15 @@ describe("Claw exec approvals removal", () => {
           },
         },
       });
-      const plan = useCommitConfig
+      const plan = commit
         ? await buildClawRemovePlan("worker", { env, config })
         : await buildClawRemovePlan("worker");
       const common = {
         consentPlanIntegrity: plan.planIntegrity,
-        trashPath: async () => true,
+        trashPath: async () => complete,
       };
 
-      const result = useCommitConfig
+      const result = commit
         ? await applyClawRemovePlan(plan, {
             ...common,
             env,
@@ -105,7 +106,10 @@ describe("Claw exec approvals removal", () => {
           })
         : await applyClawRemovePlan(plan, common);
 
-      expect(result).toMatchObject({ status: "complete", agentRemoved: true });
+      expect(result).toMatchObject({
+        status: complete ? "complete" : "partial",
+        agentRemoved: true,
+      });
       expect(loadExecApprovals().agents).toEqual({
         "*": { security: "deny" },
         kept: {
@@ -114,7 +118,7 @@ describe("Claw exec approvals removal", () => {
         },
       });
       expect(readAgentDeletionJournal("worker")).toMatchObject({
-        cleanupCompleted: true,
+        cleanupCompleted: complete,
         deleteFiles: false,
       });
     });

@@ -600,13 +600,8 @@ export async function applyClawRemovePlan(
     trashPath: options.trashPath,
     onModified: () => new ClawRemoveError("agent_modified", "Agent config changed during remove."),
   });
-  const {
-    agentRemoved,
-    cleanupTargets,
-    completeDeletion,
-    configBeforeDelete,
-    nextConfig: committedNextConfig,
-  } = configRemoval;
+  const { agentRemoved, cleanupTargets, configBeforeDelete } = configRemoval;
+  const committedNextConfig = configRemoval.nextConfig;
   if (!options.commitConfig || options.purgeSessions) {
     const purgeSessions =
       options.purgeSessions ??
@@ -681,9 +676,9 @@ export async function applyClawRemovePlan(
     updateClawInstallRecordStatus(agentId, "partial", options);
   }
   releaseClawRemoveRows(plan.agentId, workspaceFiles, complete, options);
+  // Keep replacement agents fenced until every Claw-owned destructive cleanup step is terminal.
   if (complete) {
-    // Keep replacement agents fenced until every Claw-owned destructive cleanup step is terminal.
-    completeDeletion();
+    configRemoval.completeDeletion();
   }
   return {
     schemaVersion: CLAW_REMOVE_RESULT_SCHEMA_VERSION,
