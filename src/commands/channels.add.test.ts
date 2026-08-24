@@ -887,7 +887,7 @@ describe("channelsAddCommand", () => {
     expect(selection).toMatchObject({
       step: { type: "select", message: "Set up channels for agent" },
     });
-    if (selection.done) {
+    if (selection.done || !selection.step) {
       throw new Error("Expected agent selection step");
     }
     try {
