@@ -1061,6 +1061,7 @@ describe("TUI shutdown safety", () => {
 
   it("does not keep a clean standalone TUI alive for the watchdog deadline", () => {
     const unref = vi.fn();
+    const clearTimeoutFn = vi.fn();
     const setTimeoutFn = vi.fn((_callback: () => void, delayMs: number) => {
       expect(delayMs).toBe(2000);
       return { unref };
@@ -1068,21 +1069,14 @@ describe("TUI shutdown safety", () => {
     const exit = vi.fn();
     const writeStderr = vi.fn();
 
-    scheduleProcessExitAfterTuiReturn({ setTimeoutFn, exit, writeStderr });
+    const timer = scheduleProcessExitAfterTuiReturn({ setTimeoutFn, exit, writeStderr });
+    cancelProcessExitAfterTuiReturn(timer, clearTimeoutFn);
 
     expect(setTimeoutFn).toHaveBeenCalledOnce();
     expect(unref).toHaveBeenCalledOnce();
+    expect(clearTimeoutFn).toHaveBeenCalledWith(timer);
     expect(writeStderr).not.toHaveBeenCalled();
     expect(exit).not.toHaveBeenCalled();
-  });
-
-  it("cancels a scheduled post-return process exit", () => {
-    const timer = { unref: vi.fn() };
-    const clearTimeoutFn = vi.fn();
-
-    cancelProcessExitAfterTuiReturn(timer, clearTimeoutFn);
-
-    expect(clearTimeoutFn).toHaveBeenCalledWith(timer);
   });
 
   it("forces standalone TUI exit on deadline while another handle lingers", async () => {

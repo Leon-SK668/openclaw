@@ -529,9 +529,7 @@ export function beginTuiShutdown(params: {
     })
     .finally(() => {
       if (params.keepHardExitArmed !== true) {
-        const clearTimeoutFn =
-          params.clearTimeoutFn ??
-          ((timer) => clearTimeout(timer as unknown as ReturnType<typeof setTimeout>));
+        const clearTimeoutFn = params.clearTimeoutFn ?? cancelProcessExitAfterTuiReturn;
         clearTimeoutFn(hardExitTimer);
       }
       params.disposeStatus();
