@@ -236,19 +236,22 @@ export class SubagentLifecycleController {
     entry: SubagentRunRecord,
     source: "live" | "restore" = "live",
   ) => {
-    if (source === "restore") {
+    if (source === "restore" && !this.hasScheduledRequesterSettleWakeRun(runId)) {
       this.restoredRequesterSettleWakeRuns.add(runId);
     }
     scheduleRequesterSettleWake(this, runId, entry);
   };
 
-  settleRequesterTurnAfterSessionSpawns = (args: {
-    requesterSessionKey: string;
-    requesterAgentId?: string;
-    requesterTurnRunId: string;
-    requesterYielded: boolean;
-    acceptedSessionSpawns: readonly AcceptedSessionSpawn[];
-  }) =>
+  settleRequesterTurnAfterSessionSpawns = (
+    args: {
+      requesterSessionKey: string;
+      requesterAgentId?: string;
+      requesterTurnRunId: string;
+      requesterYielded: boolean;
+      acceptedSessionSpawns: readonly AcceptedSessionSpawn[];
+    },
+    source: "live" | "restore" = "live",
+  ) =>
     settleRequesterTurnAfterSessionSpawns({
       ...args,
       runs: this.options.runs,
@@ -257,6 +260,9 @@ export class SubagentLifecycleController {
         if (this.hasScheduledRequesterSettleWakeRun(runId)) {
           this.markRequesterSettleWakeRearm(runId);
           return;
+        }
+        if (source === "restore") {
+          this.restoredRequesterSettleWakeRuns.add(runId);
         }
         scheduleRequesterSettleWake(this, runId, entry);
       },
