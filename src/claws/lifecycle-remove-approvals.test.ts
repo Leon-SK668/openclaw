@@ -7,14 +7,17 @@ import { withTempHomeConfig, writeOpenClawConfig } from "../config/test-helpers.
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadExecApprovals, saveExecApprovals } from "../infra/exec-approvals.js";
 import { readAgentDeletionJournal } from "../state/agent-deletion-journal.js";
-import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  openOpenClawStateDatabase,
+} from "../state/openclaw-state-db.js";
 import { captureEnv, setTestEnvValue } from "../test-utils/env.js";
 import { applyClawAddPlan } from "./add.js";
 import {
   claimClawAgentConfigRemoval,
   digestClawAgentRemovalSurface,
 } from "./lifecycle-config-removal.js";
-import { applyClawRemovePlan, buildClawRemovePlan } from "./lifecycle-state.js";
+import { applyClawRemovePlan, buildClawRemovePlan, readClawStatus } from "./lifecycle-state.js";
 import { buildClawAddPlan } from "./lifecycle.js";
 import { parseClawManifest } from "./schema.js";
 import type { ClawSourceIdentity } from "./types.js";
@@ -159,6 +162,55 @@ describe("Claw exec approvals removal", () => {
       });
       expect(result).toMatchObject({ status: "complete", agentRemoved: true });
       expect(readAgentDeletionJournal("worker")).toMatchObject({ cleanupCompleted: true });
+    });
+  });
+
+  it("keeps the Claw retry owner when deletion journal completion is interrupted", async () => {
+    const addPlan = await buildApprovalFixture();
+
+    await withTempHomeConfig({}, async ({ home }) => {
+      const env = { OPENCLAW_STATE_DIR: join(home, ".openclaw") };
+      setTestEnvValue("OPENCLAW_STATE_DIR", env.OPENCLAW_STATE_DIR);
+      let config: OpenClawConfig = {};
+      await applyClawAddPlan(addPlan, {
+        consentPlanIntegrity: addPlan.planIntegrity,
+        env,
+        commitConfig: async (transform) => {
+          config = transform(config);
+        },
+      });
+      await writeOpenClawConfig(home, config);
+      const plan = await buildClawRemovePlan("worker", { env, config });
+      const state = openOpenClawStateDatabase({ env });
+      state.db.exec(`
+        CREATE TRIGGER fail_claw_deletion_completion
+        BEFORE UPDATE OF cleanup_completed ON agent_deletion_journal
+        WHEN NEW.cleanup_completed = 1
+        BEGIN
+          SELECT RAISE(ABORT, 'injected deletion journal completion failure');
+        END;
+      `);
+
+      await expect(
+        applyClawRemovePlan(plan, {
+          consentPlanIntegrity: plan.planIntegrity,
+          env,
+          config,
+          commitConfig: async (transform) => {
+            config = transform(config);
+          },
+          trashPath: async () => true,
+        }),
+      ).rejects.toThrow("injected deletion journal completion failure");
+
+      expect(readAgentDeletionJournal("worker", { env })).toMatchObject({
+        cleanupCompleted: false,
+      });
+      await expect(readClawStatus("worker", { env, config })).resolves.toMatchObject({
+        records: [
+          expect.objectContaining({ install: expect.objectContaining({ agentId: "worker" }) }),
+        ],
+      });
     });
   });
 
