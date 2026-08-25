@@ -523,7 +523,10 @@ export async function deliverTextOrMediaReply(params: {
   if (!params.text) {
     return "empty";
   }
-  const chunks = params.chunkText ? params.chunkText(params.text) : [params.text];
+  const chunks = resolveTextChunksWithFallback(
+    params.text.trim() ? params.text : "",
+    params.chunkText ? params.chunkText(params.text) : [params.text],
+  );
   let sentText = false;
   for (const chunk of chunks) {
     if (!chunk) {

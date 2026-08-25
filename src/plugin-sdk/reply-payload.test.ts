@@ -923,6 +923,24 @@ describe("deliverTextOrMediaReply", () => {
     expect(sendMedia).not.toHaveBeenCalled();
   });
 
+  it("preserves non-empty text when the reply chunker returns no chunks", async () => {
+    const sendMedia = vi.fn(async () => undefined);
+    const sendText = vi.fn(async () => undefined);
+
+    await expect(
+      deliverTextOrMediaReply({
+        payload: { text: "visible reply" },
+        text: "visible reply",
+        chunkText: () => [],
+        sendText,
+        sendMedia,
+      }),
+    ).resolves.toBe("text");
+
+    expect(sendText).toHaveBeenCalledExactlyOnceWith("visible reply");
+    expect(sendMedia).not.toHaveBeenCalled();
+  });
+
   it("returns empty when chunking produces no sendable text", async () => {
     const sendMedia = vi.fn(async () => undefined);
     const sendText = vi.fn(async () => undefined);
