@@ -40,6 +40,7 @@ import { getRemoteSkillEligibility } from "../../skills/runtime/remote.js";
 import { resolveReusableWorkspaceSkillSnapshot } from "../../skills/runtime/session-snapshot.js";
 import type { SkillEligibilityContext } from "../../skills/types.js";
 import { normalizeMessageChannel } from "../../utils/message-channel.js";
+import { buildThreadingToolContext } from "./agent-runner-utils.js";
 import type { HandleCommandsParams } from "./commands-types.js";
 import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js";
 
@@ -274,21 +275,28 @@ export async function resolveCommandsSystemPromptBundle(
   const messageToolHints = runtimeChannel
     ? resolveChannelMessageToolHints(channelPromptContext)
     : undefined;
-  const currentChannelId =
+  const threadingContext = buildThreadingToolContext({
+    sessionCtx: params.ctx,
+    config: params.cfg,
+    hasRepliedRef: undefined,
+  });
+  const fallbackChannelId =
     params.ctx.NativeChannelId?.trim() ||
     params.ctx.ChatId?.trim() ||
     params.ctx.OriginatingTo?.trim() ||
     params.command.to ||
     params.command.channelId;
-  const currentThreadId = params.ctx.MessageThreadId ?? params.ctx.TransportThreadId;
+  const fallbackThreadId = params.ctx.MessageThreadId ?? params.ctx.TransportThreadId;
   const channelActions = runtimeChannel
     ? listChannelSupportedActions(
         buildEmbeddedMessageActionDiscoveryInput({
           cfg: params.cfg,
           channel: runtimeChannel,
-          currentChannelId,
-          currentThreadTs: currentThreadId === undefined ? undefined : String(currentThreadId),
-          currentMessageId: params.ctx.MessageSidFull ?? params.ctx.MessageSid,
+          currentChannelId: threadingContext.currentChannelId ?? fallbackChannelId,
+          currentThreadTs:
+            threadingContext.currentThreadTs ??
+            (fallbackThreadId === undefined ? undefined : String(fallbackThreadId)),
+          currentMessageId: threadingContext.currentMessageId,
           accountId,
           sessionKey: params.sessionKey,
           sessionId: targetSessionEntry?.sessionId,
