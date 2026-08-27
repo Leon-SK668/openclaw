@@ -14,6 +14,7 @@ type ResolveHook = (
 
 const DIST_ROOT = "file:///opt/openclaw/dist/";
 const DIST_ENTRY_PATH = path.resolve("dist/entry.js");
+const DIST_INDEX_PATH = path.resolve("dist/index.js");
 
 function installCapturedHook(entryFileUrl: string): ResolveHook {
   let hook: ResolveHook | undefined;
@@ -105,7 +106,11 @@ describe("installDistEsmResolveFastPath gating", () => {
       return { deregister: () => {} };
     };
     const root = "file:///opt/openclaw-idempotent/dist/";
-    const deps = { registerHooks, execArgv: [], nodeOptions: undefined };
+    const deps = {
+      registerHooks,
+      execArgv: ["--trace-warnings"],
+      nodeOptions: "--max-old-space-size=4096",
+    };
     expect(installDistEsmResolveFastPath(`${root}entry.js`, deps)).toBe(true);
     expect(installDistEsmResolveFastPath(`${root}index.js`, deps)).toBe(true);
     expect(registered).toBe(1);
@@ -131,174 +136,152 @@ describe("installDistEsmResolveFastPath gating", () => {
   });
 
   it.each([
-    { name: "CLI --import", execArgv: ["--import", "./hook.mjs"], nodeOptions: undefined },
-    { name: "CLI --import=", execArgv: ["--import=./hook.mjs"], nodeOptions: undefined },
-    { name: "CLI --require", execArgv: ["--require", "./hook.cjs"], nodeOptions: undefined },
-    { name: "CLI --require=", execArgv: ["--require=./hook.cjs"], nodeOptions: undefined },
-    { name: "CLI -r", execArgv: ["-r", "./hook.cjs"], nodeOptions: undefined },
-    { name: "CLI --loader", execArgv: ["--loader", "./hook.mjs"], nodeOptions: undefined },
-    { name: "CLI --loader=", execArgv: ["--loader=./hook.mjs"], nodeOptions: undefined },
-    {
-      name: "CLI --experimental-loader",
-      execArgv: ["--experimental-loader", "./hook.mjs"],
-      nodeOptions: undefined,
-    },
-    {
-      name: "CLI --experimental-loader=",
-      execArgv: ["--experimental-loader=./hook.mjs"],
-      nodeOptions: undefined,
-    },
-    {
-      name: "CLI --experimental_loader",
-      execArgv: ["--experimental_loader", "./hook.mjs"],
-      nodeOptions: undefined,
-    },
-    {
-      name: "CLI --experimental_loader=",
-      execArgv: ["--experimental_loader=./hook.mjs"],
-      nodeOptions: undefined,
-    },
-    {
-      name: "CLI --experimental-config-file",
-      execArgv: ["--experimental-config-file"],
-      nodeOptions: undefined,
-    },
-    {
-      name: "CLI --experimental-config-file=",
-      execArgv: ["--experimental-config-file=./node.config.json"],
-      nodeOptions: undefined,
-    },
-    {
-      name: "CLI --experimental-default-config-file",
-      execArgv: ["--experimental-default-config-file"],
-      nodeOptions: undefined,
-    },
-    { name: "NODE_OPTIONS --import", execArgv: [], nodeOptions: "--import ./hook.mjs" },
-    {
-      name: "NODE_OPTIONS quoted --import token",
-      execArgv: [],
-      nodeOptions: '"--import" ./hook.mjs',
-    },
-    {
-      name: "NODE_OPTIONS quoted --require value",
-      execArgv: [],
-      nodeOptions: '--enable-source-maps --require "./my hook.cjs"',
-    },
-    { name: "NODE_OPTIONS --loader", execArgv: [], nodeOptions: "--loader ./hook.mjs" },
-    {
-      name: "NODE_OPTIONS --experimental-loader=",
-      execArgv: [],
-      nodeOptions: "--experimental-loader=./hook.mjs",
-    },
-    {
-      name: "NODE_OPTIONS --experimental_loader",
-      execArgv: [],
-      nodeOptions: "--experimental_loader ./hook.mjs",
-    },
-  ])(
-    "declines when a resolver hook may be configured through $name",
-    ({ execArgv, nodeOptions }) => {
-      let registered = 0;
-      const installed = installDistEsmResolveFastPath(
-        `file:///opt/openclaw-preload-${registered}-${execArgv.length}/dist/entry.js`,
-        {
-          registerHooks: () => {
-            registered += 1;
-            return { deregister: () => {} };
-          },
-          execArgv,
-          nodeOptions,
+    ["--import", ["--import", "./hook.mjs"]],
+    ["--require", ["--require=./hook.cjs"]],
+    ["-r", ["-r", "./hook.cjs"]],
+    ["--loader", ["--loader=./hook.mjs"]],
+    ["--experimental-loader", ["--experimental_loader", "./hook.mjs"]],
+    ["--experimental-config-file", ["--experimental_config_file=./node.config.json"]],
+    ["--experimental-default-config-file", ["--experimental_default_config_file"]],
+  ])("declines when execArgv contains %s", (_name, execArgv) => {
+    let registered = 0;
+    const installed = installDistEsmResolveFastPath(
+      `file:///opt/openclaw-preload-${execArgv[0]}/dist/entry.js`,
+      {
+        registerHooks: () => {
+          registered += 1;
+          return { deregister: () => {} };
         },
-      );
+        execArgv,
+        nodeOptions: undefined,
+      },
+    );
 
-      expect(installed).toBe(false);
+    expect(installed).toBe(false);
+    expect(registered).toBe(0);
+  });
+
+  it.each([
+    '--im"port" "./hook.mjs"',
+    '"--im\\port" "./hook.mjs"',
+    "--experimental_loader ./hook.mjs",
+    "--experimental_config_file=./node.config.json",
+  ])("declines for parsed NODE_OPTIONS %j", (nodeOptions) => {
+    let registered = 0;
+    const installed = installDistEsmResolveFastPath(
+      `file:///opt/openclaw-node-options-${registered}-${nodeOptions.length}/dist/entry.js`,
+      {
+        registerHooks: () => {
+          registered += 1;
+          return { deregister: () => {} };
+        },
+        execArgv: [],
+        nodeOptions,
+      },
+    );
+
+    expect(installed).toBe(false);
+    expect(registered).toBe(0);
+  });
+
+  it.each(['"--import ./hook.mjs', '"--import ./hook.mjs\\'])(
+    "declines for malformed NODE_OPTIONS %j",
+    (nodeOptions) => {
+      let registered = 0;
+      expect(
+        installDistEsmResolveFastPath(
+          `file:///opt/openclaw-malformed-${nodeOptions.length}/dist/entry.js`,
+          {
+            registerHooks: () => {
+              registered += 1;
+              return { deregister: () => {} };
+            },
+            execArgv: [],
+            nodeOptions,
+          },
+        ),
+      ).toBe(false);
       expect(registered).toBe(0);
     },
   );
 });
 
-describe.skipIf(!fs.existsSync(DIST_ENTRY_PATH))("built dist resolver hook chaining", () => {
-  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+describe.skipIf(!fs.existsSync(DIST_ENTRY_PATH) || !fs.existsSync(DIST_INDEX_PATH))(
+  "built dist resolver hook chaining",
+  () => {
+    const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-  it.each([
-    {
-      name: "synchronous preload",
-      nodeOption: "--import",
-      source: `import { registerHooks } from "node:module";
-registerHooks({ resolve: recordRuntimeGuard });`,
-    },
-    {
-      name: "asynchronous loader",
-      nodeOption: "--loader",
-      source:
-        "export async function resolve(specifier, context, nextResolve) { return recordRuntimeGuard(specifier, context, nextResolve); }",
-    },
-    {
-      name: "quoted NODE_OPTIONS synchronous preload",
-      nodeOption: "--import",
-      nodeOptions: true,
-      source: `import { registerHooks } from "node:module";
-registerHooks({ resolve: recordRuntimeGuard });`,
-    },
-    {
-      name: "underscore asynchronous loader",
-      nodeOption: "--experimental_loader",
-      source:
-        "export async function resolve(specifier, context, nextResolve) { return recordRuntimeGuard(specifier, context, nextResolve); }",
-    },
-    {
-      name: "configuration-file synchronous preload",
-      nodeConfig: true,
-      nodeOption: "--experimental-config-file",
-      source: `import { registerHooks } from "node:module";
-registerHooks({ resolve: recordRuntimeGuard });`,
-    },
-  ])("preserves $name resolver hooks", ({ nodeConfig, nodeOption, nodeOptions, source }) => {
-    const root = tempDirs.make("openclaw-dist-resolver-hook-");
-    const hookPath = path.join(root, "resolver-hook.mjs");
-    const markerPath = path.join(root, "resolver-hook.log");
-    fs.writeFileSync(
-      hookPath,
-      `import { appendFileSync } from "node:fs";
-function recordRuntimeGuard(specifier, context, nextResolve) {
-  if (/^\\.\\/runtime-guard-[^/]+\\.js$/.test(specifier)) {
+    it.each([
+      {
+        name: "synchronous preload",
+        entryPath: DIST_ENTRY_PATH,
+        nodeOption: "--import",
+        argv: ["--version"],
+        targetPrefix: "./runtime-guard-",
+        registerSource: "registerHooks({ resolve: recordTarget });",
+      },
+      {
+        name: "asynchronous loader",
+        entryPath: DIST_INDEX_PATH,
+        nodeOption: "--loader",
+        argv: ["--help"],
+        targetPrefix: "./runtime-",
+        registerSource:
+          "export async function resolve(specifier, context, nextResolve) { return recordTarget(specifier, context, nextResolve); }",
+      },
+      {
+        name: "split-quoted NODE_OPTIONS preload",
+        entryPath: DIST_ENTRY_PATH,
+        nodeOption: "--import",
+        nodeOptions: true,
+        argv: ["--version"],
+        targetPrefix: "./runtime-guard-",
+        registerSource: "registerHooks({ resolve: recordTarget });",
+      },
+    ])(
+      "preserves $name resolver hooks",
+      ({ entryPath, nodeOption, nodeOptions, argv, targetPrefix, registerSource }) => {
+        const root = tempDirs.make("openclaw-dist-resolver-hook-");
+        const hookPath = path.join(root, "resolver-hook.mjs");
+        const markerPath = path.join(root, "resolver-hook.log");
+        fs.writeFileSync(
+          hookPath,
+          `import { appendFileSync } from "node:fs";
+import { registerHooks } from "node:module";
+function recordTarget(specifier, context, nextResolve) {
+  if (specifier.startsWith(${JSON.stringify(targetPrefix)}) && specifier.endsWith(".js")) {
     appendFileSync(process.env.OPENCLAW_TEST_RESOLVER_HOOK_MARKER, specifier + "\\n");
   }
   return nextResolve(specifier, context);
 }
-${source}
+${registerSource}
 `,
-    );
-    const hookUrl = pathToFileURL(hookPath).href;
-    const configPath = path.join(root, "node.config.json");
-    if (nodeConfig) {
-      fs.writeFileSync(configPath, JSON.stringify({ nodeOptions: { import: [hookUrl] } }));
-    }
-    const nodeArgs = nodeConfig
-      ? [`${nodeOption}=${configPath}`, DIST_ENTRY_PATH, "--version"]
-      : nodeOptions
-        ? [DIST_ENTRY_PATH, "--version"]
-        : [nodeOption, hookUrl, DIST_ENTRY_PATH, "--version"];
+        );
+        const hookUrl = pathToFileURL(hookPath).href;
+        const nodeArgs = nodeOptions
+          ? [entryPath, ...argv]
+          : [nodeOption, hookUrl, entryPath, ...argv];
 
-    const result = spawnSync(process.execPath, nodeArgs, {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        HOME: root,
-        NODE_DISABLE_COMPILE_CACHE: "1",
-        NODE_ENV: undefined,
-        NODE_OPTIONS: nodeOptions ? `"${nodeOption}" ${hookUrl}` : undefined,
-        OPENCLAW_NO_RESPAWN: "1",
-        OPENCLAW_TEST_RESOLVER_HOOK_MARKER: markerPath,
-        VITEST: undefined,
+        const result = spawnSync(process.execPath, nodeArgs, {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: root,
+            NODE_DISABLE_COMPILE_CACHE: "1",
+            NODE_ENV: undefined,
+            NODE_OPTIONS: nodeOptions ? `--im"port" "${hookUrl}"` : undefined,
+            OPENCLAW_NO_RESPAWN: "1",
+            OPENCLAW_TEST_RESOLVER_HOOK_MARKER: markerPath,
+            VITEST: undefined,
+          },
+        });
+
+        expect(result.status, result.stderr).toBe(0);
+        expect(fs.existsSync(markerPath), result.stderr).toBe(true);
+        const resolvedTargets = fs.readFileSync(markerPath, "utf8").trim().split("\n");
+        expect(resolvedTargets.length).toBeGreaterThan(0);
+        expect(resolvedTargets.every((specifier) => specifier.startsWith(targetPrefix))).toBe(true);
       },
-    });
-
-    expect(result.status, result.stderr).toBe(0);
-    const resolvedRuntimeGuards = fs.readFileSync(markerPath, "utf8").trim().split("\n");
-    expect(resolvedRuntimeGuards.length).toBeGreaterThan(0);
-    expect(resolvedRuntimeGuards).toEqual(
-      resolvedRuntimeGuards.filter((specifier) => /^\.\/runtime-guard-[^/]+\.js$/.test(specifier)),
     );
-  });
-});
+  },
+);

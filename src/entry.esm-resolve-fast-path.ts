@@ -13,51 +13,36 @@
  */
 import Module from "node:module";
 import process from "node:process";
+import { parseNodeOptionsEnvVar } from "./infra/node-options.js";
 
-type SyncResolveResult = { url: string; format?: string | null; shortCircuit?: boolean };
-type SyncResolveContext = { parentURL?: string; conditions?: readonly string[] };
-type SyncResolveHook = (
-  specifier: string,
-  context: SyncResolveContext,
-  nextResolve: (specifier: string, context?: SyncResolveContext) => SyncResolveResult,
-) => SyncResolveResult;
-type RegisterModuleHooks = (options: { resolve?: SyncResolveHook }) => { deregister: () => void };
-
-// SAFETY: Module.registerHooks ships in every supported Node runtime but is missing from the bundled type declarations; the optional member keeps callers probing before use (Bun lacks it).
-const moduleWithHooks = Module as typeof Module & {
-  registerHooks?: RegisterModuleHooks;
-};
+// Bun lacks registerHooks, so keep the runtime probe despite supported Node types.
+const moduleWithHooks: { registerHooks?: typeof Module.registerHooks } = Module;
 
 const installedDistRootUrls = new Set<string>();
-const NODE_OPTIONS_RESOLVER_HOOK_PATTERN =
-  /(?:^|[\s"])(?:--import|--require|-r|--loader|--experimental[-_]loader)(?:=|[\s"]|$)/u;
+const NODE_RESOLVER_HOOK_OPTIONS = new Set([
+  "--import",
+  "--require",
+  "-r",
+  "--loader",
+  "--experimental-loader",
+  "--experimental-config-file",
+  "--experimental-default-config-file",
+]);
 
-function hasNodeResolverHookOption(params: {
-  execArgv: readonly string[];
-  nodeOptions: string | undefined;
-}): boolean {
-  if (
-    params.execArgv.some(
-      (arg) =>
-        arg === "--import" ||
-        arg.startsWith("--import=") ||
-        arg === "--require" ||
-        arg.startsWith("--require=") ||
-        arg === "-r" ||
-        arg === "--loader" ||
-        arg.startsWith("--loader=") ||
-        arg === "--experimental-loader" ||
-        arg.startsWith("--experimental-loader=") ||
-        arg === "--experimental_loader" ||
-        arg.startsWith("--experimental_loader=") ||
-        arg === "--experimental-config-file" ||
-        arg.startsWith("--experimental-config-file=") ||
-        arg === "--experimental-default-config-file",
+const normalizeNodeOptionName = (token: string) =>
+  (token.split("=", 1)[0] ?? "").replaceAll("_", "-");
+
+function hasNodeResolverHookOption(
+  execArgv: readonly string[],
+  nodeOptions: string | undefined,
+): boolean {
+  const envOptions = parseNodeOptionsEnvVar(nodeOptions);
+  return (
+    envOptions === null ||
+    [...execArgv, ...envOptions].some((token) =>
+      NODE_RESOLVER_HOOK_OPTIONS.has(normalizeNodeOptionName(token)),
     )
-  ) {
-    return true;
-  }
-  return NODE_OPTIONS_RESOLVER_HOOK_PATTERN.test(params.nodeOptions ?? "");
+  );
 }
 
 /**
@@ -105,7 +90,7 @@ function resolveDistEsmFastPathUrl(params: {
 export function installDistEsmResolveFastPath(
   entryFileUrl: string,
   deps: {
-    registerHooks?: RegisterModuleHooks | undefined;
+    registerHooks?: typeof Module.registerHooks | undefined;
     execArgv?: readonly string[];
     nodeOptions?: string | undefined;
   } = {},
@@ -120,9 +105,8 @@ export function installDistEsmResolveFastPath(
     return false;
   }
   const nodeOptions = "nodeOptions" in deps ? deps.nodeOptions : process.env.NODE_OPTIONS;
-  // Preloads and loaders can register resolver hooks before OpenClaw starts.
-  // Our later short circuit would otherwise bypass that user-owned chain.
-  if (hasNodeResolverHookOption({ execArgv: deps.execArgv ?? process.execArgv, nodeOptions })) {
+  // A later short circuit would bypass preload and loader hooks registered before startup.
+  if (hasNodeResolverHookOption(deps.execArgv ?? process.execArgv, nodeOptions)) {
     return false;
   }
   if (installedDistRootUrls.has(distRootUrl)) {
