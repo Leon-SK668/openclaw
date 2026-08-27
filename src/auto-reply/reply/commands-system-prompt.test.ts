@@ -7,19 +7,71 @@ import { resolveSessionAgentIds } from "../../agents/agent-scope.js";
 import { createOpenClawCodingTools } from "../../agents/agent-tools.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "../../agents/bootstrap-files.js";
 import {
+  listChannelSupportedActions,
+  resolveChannelMessageToolHints,
+  resolveChannelReactionGuidance,
+} from "../../agents/channel-tools.js";
+import { collectRuntimeChannelCapabilities } from "../../agents/runtime-capabilities.js";
+import {
   ensureSandboxWorkspaceForSession,
   resolveSandboxRuntimeStatus,
 } from "../../agents/sandbox.js";
+import { detectRuntimeShell } from "../../agents/shell-utils.js";
 import { buildSystemPromptParams } from "../../agents/system-prompt-params.js";
 import { buildAgentSystemPrompt } from "../../agents/system-prompt.js";
+import { getMachineDisplayName } from "../../infra/machine-name.js";
+import { resolveRuntimeOsLabel } from "../../infra/os-summary.js";
 import { resolveReusableWorkspaceSkillSnapshot } from "../../skills/runtime/session-snapshot.js";
 import { resolveCommandsSystemPromptBundle } from "./commands-system-prompt.js";
 import type { HandleCommandsParams } from "./commands-types.js";
 
-const { createOpenClawCodingToolsMock, logWarnMock, makeBootstrapWarnMock } = vi.hoisted(() => ({
+const {
+  collectRuntimeChannelCapabilitiesMock,
+  createOpenClawCodingToolsMock,
+  detectRuntimeShellMock,
+  getMachineDisplayNameMock,
+  listChannelSupportedActionsMock,
+  logWarnMock,
+  makeBootstrapWarnMock,
+  resolveChannelMessageToolHintsMock,
+  resolveChannelReactionGuidanceMock,
+  resolveRuntimeOsLabelMock,
+} = vi.hoisted(() => ({
+  collectRuntimeChannelCapabilitiesMock: vi.fn(() => ["voice"]),
   createOpenClawCodingToolsMock: vi.fn(() => []),
+  detectRuntimeShellMock: vi.fn(() => "zsh"),
+  getMachineDisplayNameMock: vi.fn(async () => "test-host"),
+  listChannelSupportedActionsMock: vi.fn(() => ["send", "react"]),
   logWarnMock: vi.fn(),
   makeBootstrapWarnMock: vi.fn((params: { warn?: (message: string) => void }) => params.warn),
+  resolveChannelMessageToolHintsMock: vi.fn(() => ["Use the message tool."]),
+  resolveChannelReactionGuidanceMock: vi.fn(() => ({
+    level: "minimal" as const,
+    channel: "Telegram",
+  })),
+  resolveRuntimeOsLabelMock: vi.fn(() => "TestOS 1.0"),
+}));
+
+vi.mock("../../agents/channel-tools.js", () => ({
+  listChannelSupportedActions: listChannelSupportedActionsMock,
+  resolveChannelMessageToolHints: resolveChannelMessageToolHintsMock,
+  resolveChannelReactionGuidance: resolveChannelReactionGuidanceMock,
+}));
+
+vi.mock("../../agents/runtime-capabilities.js", () => ({
+  collectRuntimeChannelCapabilities: collectRuntimeChannelCapabilitiesMock,
+}));
+
+vi.mock("../../agents/shell-utils.js", () => ({
+  detectRuntimeShell: detectRuntimeShellMock,
+}));
+
+vi.mock("../../infra/machine-name.js", () => ({
+  getMachineDisplayName: getMachineDisplayNameMock,
+}));
+
+vi.mock("../../infra/os-summary.js", () => ({
+  resolveRuntimeOsLabel: resolveRuntimeOsLabelMock,
 }));
 
 vi.mock("../../logging/subsystem.js", () => ({
@@ -171,6 +223,74 @@ describe("resolveCommandsSystemPromptBundle", () => {
     expect(toolParams.senderName).toBe("Alice");
     expect(toolParams.senderUsername).toBe("alice_u");
     expect(toolParams.senderE164).toBe("+15551234567");
+  });
+
+  it("includes the current communication channel in reconstructed prompts", async () => {
+    const params = makeParams();
+    params.ctx.AccountId = "work";
+    params.ctx.ChatType = "group";
+    params.ctx.MessageSidFull = "message-1";
+    params.ctx.MessageThreadId = "thread-1";
+    params.ctx.NativeChannelId = "chat-1";
+    params.ctx.OriginatingTo = "telegram:chat-1";
+    params.command.accountId = "work";
+    params.command.to = "telegram:chat-1";
+
+    await resolveCommandsSystemPromptBundle(params);
+
+    expect(vi.mocked(collectRuntimeChannelCapabilities)).toHaveBeenCalledWith({
+      cfg: params.cfg,
+      channel: "telegram",
+      accountId: "work",
+    });
+    expect(vi.mocked(listChannelSupportedActions)).toHaveBeenCalledWith({
+      cfg: params.cfg,
+      channel: "telegram",
+      currentChannelId: "chat-1",
+      currentThreadTs: "thread-1",
+      currentMessageId: "message-1",
+      accountId: "work",
+      sessionKey: "agent:main:default",
+      sessionId: "session-1",
+      agentId: "main",
+      requesterSenderId: "sender-1",
+      senderIsOwner: true,
+    });
+    expect(vi.mocked(resolveChannelReactionGuidance)).toHaveBeenCalledWith({
+      cfg: params.cfg,
+      channel: "telegram",
+      accountId: "work",
+    });
+    expect(vi.mocked(resolveChannelMessageToolHints)).toHaveBeenCalledWith({
+      cfg: params.cfg,
+      channel: "telegram",
+      accountId: "work",
+    });
+    const runtimeParams = requireFirstArg(
+      vi.mocked(buildSystemPromptParams),
+      "buildSystemPromptParams",
+    );
+    expect(runtimeParams.runtime).toEqual(
+      expect.objectContaining({
+        host: "test-host",
+        os: "TestOS 1.0",
+        arch: os.arch(),
+        shell: "zsh",
+        channel: "telegram",
+        chatType: "group",
+        capabilities: ["voice"],
+        channelActions: ["send", "react"],
+      }),
+    );
+    const promptParams = requireFirstArg(
+      vi.mocked(buildAgentSystemPrompt),
+      "buildAgentSystemPrompt",
+    );
+    expect(promptParams.reactionGuidance).toEqual({ level: "minimal", channel: "Telegram" });
+    expect(promptParams.messageToolHints).toEqual(["Use the message tool."]);
+    expect(vi.mocked(getMachineDisplayName)).toHaveBeenCalledOnce();
+    expect(vi.mocked(resolveRuntimeOsLabel)).toHaveBeenCalledOnce();
+    expect(vi.mocked(detectRuntimeShell)).toHaveBeenCalledOnce();
   });
 
   it("uses the canonical target session for sandbox runtime resolution", async () => {
