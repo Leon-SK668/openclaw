@@ -37,6 +37,9 @@ const MIRROR_READ_LIMIT = 50;
 // Bounds concurrent remote rows and per-tick reads; oldest active sessions
 // beyond the cap simply wait until newer ones go idle.
 const MIRROR_MAX_SESSIONS = 32;
+// Keeping twice the receiver capacity prevents independent clocks and foreign
+// writers from making the sender under-retain retry ownership.
+const MIRROR_RETRY_CAP = 2 * BEAM_MAX_SESSIONS;
 // Leaves headroom below the receiver's hard body cap for JSON overhead drift.
 const MIRROR_BODY_BUDGET_BYTES = BEAM_MAX_BODY_BYTES - 2_048;
 // One warning per source per interval keeps a broken endpoint from flooding logs.
@@ -268,7 +271,6 @@ function mirrorCandidateKey(candidate: BeamMirrorCandidate): string {
 
 type TrackedMirrorSession = {
   candidate: BeamMirrorCandidate;
-  beamId: string;
   fingerprint: string;
   expiresAt: number;
 };
@@ -318,27 +320,21 @@ export function createBeamMirrorRunner(params: {
     }
   };
 
-  // Retry state mirrors the receiver's row cap and TTL. Once an entry exceeds
-  // either bound, no remote row remains for a terminal upload to update.
+  // Retry state keeps a bounded sender-owned superset until the receiver's TTL.
+  // The extra capacity prevents independent clocks from dropping a live row.
   const trackSuccessfulUpload = (
     key: string,
     candidate: BeamMirrorCandidate,
-    beamId: string,
     fingerprint: string,
   ) => {
-    tracked.set(key, { candidate, beamId, fingerprint, expiresAt: now() + BEAM_RETENTION_MS });
-    if (tracked.size <= BEAM_MAX_SESSIONS) {
+    tracked.set(key, { candidate, fingerprint, expiresAt: now() + BEAM_RETENTION_MS });
+    if (tracked.size <= MIRROR_RETRY_CAP) {
       return;
     }
-    // The receiver orders rows by write time, then Beam ID, and protects this write.
+    // Never discard the upload just accepted by the receiver, even after a clock rollback.
     let oldest: [string, TrackedMirrorSession] | undefined;
     for (const item of tracked) {
-      if (
-        item[0] !== key &&
-        (!oldest ||
-          item[1].expiresAt < oldest[1].expiresAt ||
-          (item[1].expiresAt === oldest[1].expiresAt && item[1].beamId < oldest[1].beamId))
-      ) {
+      if (item[0] !== key && (!oldest || item[1].expiresAt < oldest[1].expiresAt)) {
         oldest = item;
       }
     }
@@ -557,7 +553,7 @@ export function createBeamMirrorRunner(params: {
           const uploaded = await upload(mirror.endpoint, token, payload);
           signal.throwIfAborted();
           if (uploaded) {
-            trackSuccessfulUpload(key, candidate, payload.beamId, fingerprint);
+            trackSuccessfulUpload(key, candidate, fingerprint);
           }
         } catch (error) {
           signal.throwIfAborted();

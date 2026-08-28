@@ -1,13 +1,11 @@
-import fs from "node:fs";
 import { createServer } from "node:http";
-import os from "node:os";
-import path from "node:path";
 import {
   createPluginStateKeyedStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { ActiveSessionCatalog } from "openclaw/plugin-sdk/session-catalog-runtime";
-import { describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
+import { afterEach, describe, expect, it } from "vitest";
 import { createBeamRequestHandler } from "./http.js";
 import { beamMirrorId, createBeamMirrorRunner, type BeamMirrorUpload } from "./mirror.js";
 import type { BeamStore } from "./store.js";
@@ -16,6 +14,7 @@ import { BEAM_MAX_SESSIONS, BEAM_RETENTION_MS, type BeamStoredSession } from "./
 const NOW = Date.parse("2026-07-27T12:00:00.000Z");
 type TestSession = { threadId: string; recencyAt: number };
 type SentRequest = { payload: BeamMirrorUpload; status: number };
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 function retryRuntime(endpoint: string): Parameters<typeof createBeamMirrorRunner>[0]["runtime"] {
   return {
@@ -189,11 +188,10 @@ describe("Beam terminal retry policy", () => {
     }
   });
 
-  it("keeps receiver-retained retry state after refresh and capacity overflow", async () => {
-    const refreshedThreadId = "session-256";
-    const targetThreadId = "session-129";
+  it("keeps receiver-retained retry state with independent clocks", async () => {
+    const targetThreadId = "session-273";
     const targetBeamId = beamMirrorId("claude", "gateway:local", targetThreadId);
-    const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "beam-capacity-")));
+    const stateDir = tempDirs.make("beam-capacity-");
     const stateEnv: NodeJS.ProcessEnv = { OPENCLAW_STATE_DIR: stateDir };
     resetPluginStateStoreForTests();
     const keyedStore = createPluginStateKeyedStoreForTests<BeamStoredSession>("beam-capacity", {
@@ -253,19 +251,13 @@ describe("Beam terminal retry policy", () => {
     }
 
     let activeSessions: TestSession[] = [];
-    const transcriptVersions = new Map<string, number>();
-    const catalog = retryCatalog(
-      () => activeSessions,
-      (threadId) => `${threadId}:v${transcriptVersions.get(threadId) ?? 1}`,
-    );
+    const catalog = retryCatalog(() => activeSessions);
     const runner = createBeamMirrorRunner({
       runtime: retryRuntime(`http://127.0.0.1:${address.port}/api/v1/beam/sessions`),
       logger: { warn: () => {}, info: () => {} },
       now: () => NOW,
       listCatalogs: () => [catalog],
     });
-    const dateNow = vi.spyOn(Date, "now").mockReturnValue(NOW);
-
     try {
       let createdSessions = 0;
       for (let batch = 0; createdSessions < BEAM_MAX_SESSIONS; batch += 1) {
@@ -278,9 +270,6 @@ describe("Beam terminal retry policy", () => {
         await runner.tick();
       }
 
-      transcriptVersions.set(refreshedThreadId, 2);
-      activeSessions = [{ threadId: refreshedThreadId, recencyAt: NOW + 100 }];
-      await runner.tick();
       activeSessions = [{ threadId: "session-500", recencyAt: NOW + 101 }];
       await runner.tick();
       await expect(store.get(targetBeamId)).resolves.toMatchObject({ completed: false });
@@ -300,9 +289,7 @@ describe("Beam terminal retry policy", () => {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
-      dateNow.mockRestore();
       resetPluginStateStoreForTests();
-      fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
 });
