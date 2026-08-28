@@ -1,6 +1,13 @@
+import fs from "node:fs";
 import { createServer } from "node:http";
+import os from "node:os";
+import path from "node:path";
+import {
+  createPluginStateKeyedStoreForTests,
+  resetPluginStateStoreForTests,
+} from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { ActiveSessionCatalog } from "openclaw/plugin-sdk/session-catalog-runtime";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createBeamRequestHandler } from "./http.js";
 import { beamMirrorId, createBeamMirrorRunner, type BeamMirrorUpload } from "./mirror.js";
 import type { BeamStore } from "./store.js";
@@ -153,7 +160,6 @@ describe("Beam terminal retry policy", () => {
       status: (payload) => {
         if (payload.beamId === overflowBeamId && payload.completed) {
           overflowTerminalAttempts += 1;
-          return overflowTerminalAttempts === 1 ? 503 : 200;
         }
         return 200;
       },
@@ -172,21 +178,31 @@ describe("Beam terminal retry policy", () => {
       await runner.tick();
       await runner.tick();
 
-      expect(overflowTerminalAttempts).toBe(1);
+      expect(overflowTerminalAttempts).toBe(0);
       expect(
         sent
           .filter((request) => request.payload.beamId === overflowBeamId)
           .map((request) => request.payload.completed),
-      ).toEqual([false, true]);
+      ).toEqual([false]);
     } finally {
       await runner.stop();
     }
   });
 
-  it("keeps a receiver-retained refreshed row through capacity overflow", async () => {
-    const targetThreadId = "session-256";
+  it("keeps receiver-retained retry state after refresh and capacity overflow", async () => {
+    const refreshedThreadId = "session-256";
+    const targetThreadId = "session-129";
     const targetBeamId = beamMirrorId("claude", "gateway:local", targetThreadId);
-    const values = new Map<string, BeamStoredSession>();
+    const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "beam-capacity-")));
+    const stateEnv: NodeJS.ProcessEnv = { OPENCLAW_STATE_DIR: stateDir };
+    resetPluginStateStoreForTests();
+    const keyedStore = createPluginStateKeyedStoreForTests<BeamStoredSession>("beam-capacity", {
+      namespace: "sessions",
+      maxEntries: BEAM_MAX_SESSIONS,
+      overflowPolicy: "evict-oldest",
+      defaultTtlMs: BEAM_RETENTION_MS,
+      env: stateEnv,
+    });
     const acceptedTargetStates: boolean[] = [];
     let phase: "build" | "final" = "build";
     let rejectedTargetWrites = 0;
@@ -202,20 +218,13 @@ describe("Beam terminal retry policy", () => {
         if (session.completed && phase === "final" && session.beamId !== targetBeamId) {
           throw new Error("hold non-target terminal state");
         }
-        values.delete(session.beamId);
-        values.set(session.beamId, session);
         if (session.beamId === targetBeamId) {
           acceptedTargetStates.push(session.completed);
         }
-        if (values.size > BEAM_MAX_SESSIONS) {
-          const oldest = values.keys().next();
-          if (!oldest.done) {
-            values.delete(oldest.value);
-          }
-        }
+        await keyedStore.register(session.beamId, session);
       },
-      get: async (beamId) => values.get(beamId),
-      list: async () => [...values.values()],
+      get: (beamId) => keyedStore.lookup(beamId),
+      list: async () => (await keyedStore.entries()).map((entry) => entry.value),
     };
     let requestNumber = 0;
     const handler = createBeamRequestHandler({
@@ -255,6 +264,7 @@ describe("Beam terminal retry policy", () => {
       now: () => NOW,
       listCatalogs: () => [catalog],
     });
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(NOW);
 
     try {
       let createdSessions = 0;
@@ -268,12 +278,12 @@ describe("Beam terminal retry policy", () => {
         await runner.tick();
       }
 
-      transcriptVersions.set(targetThreadId, 2);
-      activeSessions = [{ threadId: targetThreadId, recencyAt: NOW + 100 }];
+      transcriptVersions.set(refreshedThreadId, 2);
+      activeSessions = [{ threadId: refreshedThreadId, recencyAt: NOW + 100 }];
       await runner.tick();
       activeSessions = [{ threadId: "session-500", recencyAt: NOW + 101 }];
       await runner.tick();
-      expect(values.get(targetBeamId)?.completed).toBe(false);
+      await expect(store.get(targetBeamId)).resolves.toMatchObject({ completed: false });
 
       activeSessions = [];
       phase = "final";
@@ -282,14 +292,17 @@ describe("Beam terminal retry policy", () => {
       }
 
       expect(rejectedTargetWrites).toBe(1);
-      expect(acceptedTargetStates).toEqual([false, false, true]);
-      expect(values.get(targetBeamId)?.completed).toBe(true);
+      expect(acceptedTargetStates).toEqual([false, true]);
+      await expect(store.get(targetBeamId)).resolves.toMatchObject({ completed: true });
     } finally {
       await runner.stop();
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      dateNow.mockRestore();
+      resetPluginStateStoreForTests();
+      fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
 });

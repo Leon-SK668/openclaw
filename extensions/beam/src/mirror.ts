@@ -268,6 +268,7 @@ function mirrorCandidateKey(candidate: BeamMirrorCandidate): string {
 
 type TrackedMirrorSession = {
   candidate: BeamMirrorCandidate;
+  beamId: string;
   fingerprint: string;
   expiresAt: number;
 };
@@ -322,18 +323,27 @@ export function createBeamMirrorRunner(params: {
   const trackSuccessfulUpload = (
     key: string,
     candidate: BeamMirrorCandidate,
+    beamId: string,
     fingerprint: string,
   ) => {
-    // The receiver refreshes eviction order on every accepted write.
-    // Move this entry to the tail so both capacity owners evict the same row.
-    tracked.delete(key);
-    tracked.set(key, { candidate, fingerprint, expiresAt: now() + BEAM_RETENTION_MS });
+    tracked.set(key, { candidate, beamId, fingerprint, expiresAt: now() + BEAM_RETENTION_MS });
     if (tracked.size <= BEAM_MAX_SESSIONS) {
       return;
     }
-    for (const oldestKey of tracked.keys()) {
-      tracked.delete(oldestKey);
-      break;
+    // The receiver orders rows by write time, then Beam ID, and protects this write.
+    let oldest: [string, TrackedMirrorSession] | undefined;
+    for (const item of tracked) {
+      if (
+        item[0] !== key &&
+        (!oldest ||
+          item[1].expiresAt < oldest[1].expiresAt ||
+          (item[1].expiresAt === oldest[1].expiresAt && item[1].beamId < oldest[1].beamId))
+      ) {
+        oldest = item;
+      }
+    }
+    if (oldest) {
+      tracked.delete(oldest[0]);
     }
   };
 
@@ -547,7 +557,7 @@ export function createBeamMirrorRunner(params: {
           const uploaded = await upload(mirror.endpoint, token, payload);
           signal.throwIfAborted();
           if (uploaded) {
-            trackSuccessfulUpload(key, candidate, fingerprint);
+            trackSuccessfulUpload(key, candidate, payload.beamId, fingerprint);
           }
         } catch (error) {
           signal.throwIfAborted();
@@ -561,6 +571,12 @@ export function createBeamMirrorRunner(params: {
       for (const [key, entry] of tracked) {
         signal.throwIfAborted();
         if (selectedKeys.has(key)) {
+          continue;
+        }
+        const confirmedInactive =
+          fullyObservedHosts.has(`${entry.candidate.catalogId}\0${entry.candidate.hostId}`) &&
+          !activeKeys.has(key);
+        if (!confirmedInactive) {
           continue;
         }
         // A terminal retry cannot update a receiver row after this shared deadline.
@@ -585,11 +601,7 @@ export function createBeamMirrorRunner(params: {
           }
         }
         tracked.delete(key);
-        // Retrying extends a completion decision across ticks, so require full host evidence.
-        const confirmedInactive =
-          fullyObservedHosts.has(`${entry.candidate.catalogId}\0${entry.candidate.hostId}`) &&
-          !activeKeys.has(key);
-        if (!uploaded && confirmedInactive) {
+        if (!uploaded) {
           // Move failed work behind later entries so one broken session cannot starve them.
           tracked.set(key, entry);
         }
