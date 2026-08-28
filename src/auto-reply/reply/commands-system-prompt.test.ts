@@ -358,6 +358,20 @@ describe("resolveCommandsSystemPromptBundle", () => {
     );
   });
 
+  it("does not treat the channel provider as a conversation target", async () => {
+    const params = makeParams();
+    params.command.channelId = "telegram";
+
+    await resolveCommandsSystemPromptBundle(params);
+
+    expect(vi.mocked(listChannelSupportedActions)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        currentChannelId: undefined,
+      }),
+    );
+  });
+
   it("uses the canonical target session for sandbox runtime resolution", async () => {
     const params = makeParams();
     params.ctx.SessionKey = "agent:main:telegram:slash-session";

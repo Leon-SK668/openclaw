@@ -284,8 +284,7 @@ export async function resolveCommandsSystemPromptBundle(
     params.ctx.NativeChannelId?.trim() ||
     params.ctx.ChatId?.trim() ||
     params.ctx.OriginatingTo?.trim() ||
-    params.command.to ||
-    params.command.channelId;
+    params.command.to;
   const fallbackThreadId = params.ctx.MessageThreadId ?? params.ctx.TransportThreadId;
   const channelActions = runtimeChannel
     ? listChannelSupportedActions(
