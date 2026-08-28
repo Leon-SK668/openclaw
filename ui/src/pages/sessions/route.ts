@@ -1,3 +1,4 @@
+import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import type { RouteLocation } from "@openclaw/uirouter";
 import { definePage } from "@openclaw/uirouter";
 import { html } from "lit";
@@ -10,6 +11,7 @@ import {
   type SessionListSnapshot,
 } from "../../lib/sessions/index.ts";
 import { parseAgentSessionKey } from "../../lib/sessions/session-key.ts";
+import { loadSessionsPagePreferences } from "./page-state.ts";
 
 export type SessionsRouteData = {
   // Client identity alone cannot distinguish provider replacement or reconnect epochs.
@@ -32,14 +34,24 @@ type SessionsPageListFilters = {
   deepLinkSessionKey?: string | null;
 };
 
-function routeOptions(location: RouteLocation) {
+function routeOptions(
+  location: RouteLocation,
+  storedStatusFilter: SessionArchivedFilter = "active",
+) {
   const search = new URLSearchParams(location.search);
   const expandedSessionKey = search.get("session")?.trim() || null;
   // The retired internal `showArchived` param is deliberately not read; Sessions
   // URLs are not a shipped contract and stale links fall back to the Active view.
   const requestedStatus = search.get("status");
-  const statusFilter: SessionArchivedFilter =
-    requestedStatus === "archived" ? "archived" : requestedStatus === "all" ? "all" : "active";
+  const statusFilter: SessionArchivedFilter = search.has("status")
+    ? requestedStatus === "archived"
+      ? "archived"
+      : requestedStatus === "all"
+        ? "all"
+        : "active"
+    : expandedSessionKey
+      ? "active"
+      : storedStatusFilter;
   return { expandedSessionKey, statusFilter };
 }
 
@@ -73,11 +85,13 @@ async function loadSessionsRoute(
   const gateway = context.gateway;
   const gatewaySnapshot = gateway.snapshot;
   const sessions = context.sessions;
-  const options = routeOptions(location);
+  const preferences = loadSessionsPagePreferences();
+  const options = routeOptions(location, preferences.statusFilter);
   const query = sessionsPageListQuery(context, {
-    limit: SESSIONS_PAGE_DEFAULT_LIMIT,
-    includeGlobal: true,
-    includeUnknown: false,
+    activeMinutes: parseStrictPositiveInteger(preferences.activeMinutes),
+    limit: parseStrictPositiveInteger(preferences.limit) ?? SESSIONS_PAGE_DEFAULT_LIMIT,
+    includeGlobal: preferences.includeGlobal,
+    includeUnknown: preferences.includeUnknown,
     statusFilter: options.statusFilter,
     deepLinkSessionKey: options.expandedSessionKey,
   });
@@ -103,7 +117,7 @@ async function loadSessionsRoute(
 export const page = definePage({
   ...routePageSpec("sessions"),
   loaderDeps: (context: ApplicationContext, location: RouteLocation) => {
-    const options = routeOptions(location);
+    const options = routeOptions(location, loadSessionsPagePreferences().statusFilter);
     return `${options.expandedSessionKey ?? ""}\u0000${options.statusFilter}\u0000${context.agentSelection.state.scopeId ?? "all"}`;
   },
   loader: (context: ApplicationContext, { location }) => loadSessionsRoute(context, location),
