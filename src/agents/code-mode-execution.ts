@@ -35,6 +35,7 @@ import {
   activeRuns,
   cancelPendingBridgeStates,
   cancelPendingBridgeStatesById,
+  codeModeAbortedResult,
   codeModeWaitingReason,
   createCodeModeBridgeDispatchState,
   createPendingBridgeStates,
@@ -295,16 +296,7 @@ async function settleCodeModeResult(params: {
   // rounds; maxPendingToolCalls stays a per-batch concurrency cap enforced in
   // the worker.
   const settleDeadline = () => params.deadlineMs + params.approvalWait.pausedMs;
-  const abortedResult = () => ({
-    status: "failed" as const,
-    error: "code mode execution aborted",
-    code: "aborted" as const,
-    failurePhase: params.bridgeDispatch.started ? ("bridge" as const) : ("host" as const),
-    bridgeDispatchStarted: params.bridgeDispatch.started,
-    output: output.slice(deliveredOutputCount),
-    replaySafe: params.replaySafe,
-    telemetry: telemetry(params.runtime),
-  });
+  const abortedResult = () => codeModeAbortedResult({ ...params, output, deliveredOutputCount });
   // Bridge tool calls (search/describe/call/namespace) run through the same
   // policy-checked executor whether the model awaits them one at a time or in a
   // batch, so resolve them inline within the exec deadline and resume the VM
@@ -316,22 +308,14 @@ async function settleCodeModeResult(params: {
     result.pendingRequests.length > 0 &&
     result.pendingRequests.every((request) => request.method !== "yield")
   ) {
-    if (params.replaySafe) {
-      // Replay-safe runs never inline-drain: namespace calls stay a hard error
-      // and other pending work falls through to the replay-safe snapshot check.
-      if (result.pendingRequests.every((request) => request.method === "namespace")) {
-        cancelPendingBridgeStates(pending);
-        return {
-          status: "failed" as const,
-          error: "restart-safe code mode cannot call namespace tools.",
-          code: "invalid_input" as const,
-          failurePhase: params.bridgeDispatch.started ? ("bridge" as const) : ("input" as const),
-          bridgeDispatchStarted: params.bridgeDispatch.started,
-          output: output.slice(deliveredOutputCount),
-          replaySafe: true,
-          telemetry: telemetry(params.runtime),
-        };
-      }
+    if (
+      params.replaySafe &&
+      !pendingBridgeRequestsReplaySafe(
+        result.pendingRequests,
+        params.runtime,
+        params.catalogProjection,
+      )
+    ) {
       break;
     }
     const remainingMs = settleDeadline() - Date.now();
@@ -396,7 +380,7 @@ async function settleCodeModeResult(params: {
           runId: activeRunId,
           replayId: params.codeModeReplayId,
           pending,
-          replaySafe: false,
+          replaySafe: params.replaySafe,
           settlementMode: result.settlementMode,
           snapshotBytes: result.snapshotBytes,
           parentToolCallId: params.parentToolCallId,
@@ -408,6 +392,7 @@ async function settleCodeModeResult(params: {
           output,
           deliveredOutputCount,
           bridgeDispatch: params.bridgeDispatch,
+          signal: params.signal,
         });
       }
       // Deliver the settled frontier only. Unresolved sibling promises remain
@@ -463,8 +448,9 @@ async function settleCodeModeResult(params: {
       cancelPendingBridgeStates(pending);
       return {
         status: "failed" as const,
-        error:
-          "restart-safe code mode cannot call tool surfaces that are not proven replay-safe; recovery runs must use audited read, grep, or find tools.",
+        error: result.pendingRequests.every((request) => request.method === "namespace")
+          ? "restart-safe code mode cannot call namespace tools."
+          : "restart-safe code mode cannot call tool surfaces that are not proven replay-safe; recovery runs must use audited read, grep, or find tools.",
         code: "invalid_input" as const,
         failurePhase: params.bridgeDispatch.started ? ("bridge" as const) : ("input" as const),
         bridgeDispatchStarted: params.bridgeDispatch.started,
@@ -524,6 +510,7 @@ async function settleCodeModeResult(params: {
           output,
           deliveredOutputCount,
           bridgeDispatch: params.bridgeDispatch,
+          signal: params.signal,
         });
       } catch (error) {
         cancelPendingBridgeStates(pending);
@@ -612,6 +599,11 @@ export async function runWait(params: {
   // pending calls, the resume worker, and the inline settle phase.
   const deadlineMs = Date.now() + state.config.timeoutMs;
   const approvalWait = observeAgentRunApprovalWait(state.ctx);
+  // Snapshot closure wakes an observing wait even if its guest budget just expired.
+  // Transfer releases this signal; worker execution keeps its normal per-call signal.
+  const parkedSignal = params.signal
+    ? AbortSignal.any([params.signal, state.ownerSignal])
+    : state.ownerSignal;
   let releaseActiveRunSlot: (() => void) | undefined;
   try {
     const ready = await waitForPending(
@@ -619,7 +611,7 @@ export async function runWait(params: {
       state.settlementMode,
       Math.max(1, deadlineMs - Date.now()),
       approvalWait,
-      params.signal,
+      parkedSignal,
     );
     const resumeBudgetMs = ready
       ? usableResumeBudgetMs(deadlineMs + approvalWait.pausedMs, state.config)
@@ -627,7 +619,7 @@ export async function runWait(params: {
     if (!ready || resumeBudgetMs === undefined) {
       // An aborted wait drops the suspended run: nothing will resume it, and
       // parking it would pin a process-global active-run slot until TTL expiry.
-      if (params.signal?.aborted) {
+      if (parkedSignal.aborted) {
         disposeCodeModeRun(state.runId);
         return {
           status: "failed" as const,

@@ -67,10 +67,12 @@ type CronRunPluginGenerationLease = {
 async function acquireCronRunPluginGeneration(context: {
   agentId: string;
   workspaceDir: string;
+  abortSignal?: AbortSignal;
 }): Promise<CronRunPluginGenerationLease | undefined> {
   try {
     const dispatchRuntime = await loadPublishedGatewayReplyDispatchRuntime({
       agentId: context.agentId,
+      abortSignal: context.abortSignal,
     });
     if (!dispatchRuntime) {
       return undefined;
@@ -86,7 +88,11 @@ async function acquireCronRunPluginGeneration(context: {
         allowGatewaySubagentBinding: true,
         workspaceDir: context.workspaceDir,
       },
-      { catalogMode: "static", pluginGeneration: dispatchRuntime.pluginGeneration },
+      {
+        catalogMode: "static",
+        pluginGeneration: dispatchRuntime.pluginGeneration,
+        abortSignal: context.abortSignal,
+      },
     );
     let leaseActive = true;
     return {
@@ -251,7 +257,7 @@ export async function runCronIsolatedAgentTurn(params: {
 
   let outcome: "completed" | "error" = "completed";
   let outcomeError: string | undefined;
-  let cronRunSessionCleanupAttempted = false;
+  let cronRunSessionCleanupHandled = false;
   try {
     assertAgentRunLifecycleGenerationCurrent(runLifecycleGeneration);
     const existingRunContext = getAgentRunContext(initialSessionId);
@@ -331,7 +337,10 @@ export async function runCronIsolatedAgentTurn(params: {
           ),
         ),
       );
-    const pluginGenerationLease = await acquireCronRunPluginGeneration(prepared.context);
+    const pluginGenerationLease = await acquireCronRunPluginGeneration({
+      ...prepared.context,
+      abortSignal,
+    });
     let execution: Awaited<ReturnType<typeof runExecutionWithAdmission>>;
     try {
       execution = pluginGenerationLease
@@ -349,8 +358,8 @@ export async function runCronIsolatedAgentTurn(params: {
       execution,
       abortReason,
       isAborted,
-      markCronRunSessionCleanupAttempted: () => {
-        cronRunSessionCleanupAttempted = true;
+      markCronRunSessionCleanupHandled: () => {
+        cronRunSessionCleanupHandled = true;
       },
       // Self-deleting sessions must release before their own lifecycle mutation.
       // Other runs retain admission through delivery and release in finally.
@@ -417,7 +426,7 @@ export async function runCronIsolatedAgentTurn(params: {
       });
     } finally {
       try {
-        if (!cronRunSessionCleanupAttempted) {
+        if (!cronRunSessionCleanupHandled) {
           await cleanupCronRunSessionAfterRun({
             job: params.job,
             agentSessionKey: prepared.context.agentSessionKey,

@@ -59,6 +59,7 @@ import type { AgentToolResult } from "./runtime/index.js";
 import { createSessionSlug } from "./session-slug.js";
 import { maybeWrapCommandWithShellSnapshot } from "./shell-snapshot.js";
 import { createStreamingBinaryOutputSanitizer, getShellConfig } from "./shell-utils.js";
+import { registerTrustedToolNoStartError } from "./tool-result-error.js";
 import { withoutGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
 export { applyPathPrepend, normalizePathPrepend } from "../infra/path-prepend.js";
 
@@ -256,17 +257,23 @@ export function resolveExecTarget(params: {
 }) {
   const sandboxRequired = params.sandboxRequired === true;
   if (sandboxRequired && !params.sandboxAvailable) {
-    throw new Error("This session requires a sandbox, but its sandbox runtime is unavailable.");
+    throw registerTrustedToolNoStartError(
+      new Error("This session requires a sandbox, but its sandbox runtime is unavailable."),
+    );
   }
   if (sandboxRequired && params.elevatedRequested) {
-    throw new Error("Elevated execution is unavailable because this session requires a sandbox.");
+    throw registerTrustedToolNoStartError(
+      new Error("Elevated execution is unavailable because this session requires a sandbox."),
+    );
   }
   // Session isolation outranks every agent, session, and request-scoped host preference.
   const configuredTarget = sandboxRequired ? "auto" : (params.configuredTarget ?? "auto");
   const requestedTarget = params.requestedTarget ?? null;
   if (sandboxRequired && (requestedTarget === "gateway" || requestedTarget === "node")) {
-    throw new Error(
-      `exec host not allowed (requested ${renderExecTargetLabel(requestedTarget)}; this session requires a sandbox).`,
+    throw registerTrustedToolNoStartError(
+      new Error(
+        `exec host not allowed (requested ${renderExecTargetLabel(requestedTarget)}; this session requires a sandbox).`,
+      ),
     );
   }
   if (
@@ -288,10 +295,12 @@ export function resolveExecTarget(params: {
             : [renderExecTargetLabel(requestedTarget), "auto"],
       ),
     ).join(" or ");
-    throw new Error(
-      `exec host not allowed (requested ${renderExecTargetLabel(requestedTarget)}; ` +
-        `configured host is ${renderExecTargetLabel(configuredTarget)}; ` +
-        `set tools.exec.host=${allowedConfig} to allow this override).`,
+    throw registerTrustedToolNoStartError(
+      new Error(
+        `exec host not allowed (requested ${renderExecTargetLabel(requestedTarget)}; ` +
+          `configured host is ${renderExecTargetLabel(configuredTarget)}; ` +
+          `set tools.exec.host=${allowedConfig} to allow this override).`,
+      ),
     );
   }
   const selectedTarget = requestedTarget ?? configuredTarget;
@@ -645,6 +654,7 @@ function wrapPosixCommandWithPathPrepend(
 
 /** Starts a host or sandbox exec process and registers it for polling/backgrounding. */
 export async function runExecProcess({
+  startupSignal: initialStartupSignal,
   onUpdate: initialOnUpdate,
   beforeSpawn: initialBeforeSpawn,
   onSettledBeforeNotify: initialOnSettledBeforeNotify,
@@ -683,6 +693,8 @@ export async function runExecProcess({
   timeoutSec: number | null;
   /** Whether exec may return a supervised session for later continuation. */
   processContinuationAvailable?: boolean;
+  /** Cancels startup only; background process lifetime belongs to the supervisor. */
+  startupSignal?: AbortSignal;
   onUpdate?: (partialResult: AgentToolResult<ExecToolDetails>) => void;
   /** Runs after process finalization and before the exit wake is queued. */
   onSettledBeforeNotify?: (outcome: ExecProcessOutcome) => void;
@@ -737,6 +749,7 @@ export async function runExecProcess({
   // Foreground delivery keeps its caller context only until yield, abort, or exit.
   // Clearing the callback also releases the completed turn's captured authority.
   let onUpdate = initialOnUpdate && AsyncLocalStorage.bind(initialOnUpdate);
+  let startupSignal = initialStartupSignal;
   let beforeSpawn = initialBeforeSpawn;
   let onSettledBeforeNotify = initialOnSettledBeforeNotify;
 
@@ -949,15 +962,21 @@ export async function runExecProcess({
   };
 
   const assertPreSpawnAuthorized = async () => {
+    startupSignal?.throwIfAborted();
     const denied = await beforeSpawn?.();
+    startupSignal?.throwIfAborted();
     if (denied) {
       throw new ExecProcessPreflightError(denied);
     }
   };
-  const spawn = (input: SpawnInput) =>
-    withoutGatewayToolCallerIdentity(() => supervisor.spawn(input));
+  const spawn = (input: SpawnInput) => {
+    // No await between the final cancellation check and supervisor admission.
+    startupSignal?.throwIfAborted();
+    return withoutGatewayToolCallerIdentity(() => supervisor.spawn(input));
+  };
 
   try {
+    startupSignal?.throwIfAborted();
     const spawnSpec = await prepareSpawnSpec();
     usingPty = spawnSpec.mode === "pty";
     const spawnBase = {
@@ -981,6 +1000,7 @@ export async function runExecProcess({
           ptyCommand: spawnSpec.ptyCommand,
         });
       } catch (err) {
+        startupSignal?.throwIfAborted();
         const warning = `Warning: PTY spawn failed (${String(err)}); retrying without PTY for \`${opts.command}\`.`;
         logWarn(
           `exec: PTY spawn failed (${String(err)}); retrying without PTY for "${opts.command}".`,
@@ -1024,6 +1044,7 @@ export async function runExecProcess({
     });
     throw error;
   } finally {
+    startupSignal = undefined;
     beforeSpawn = undefined;
   }
   session.stdin = managedRun.stdin;

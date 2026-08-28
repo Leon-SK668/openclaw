@@ -61,6 +61,7 @@ import {
 } from "./navigation-surface.ts";
 import { isBrowserPanelAvailable, isDesktopPanelAvailable } from "./panel-availability.ts";
 import { NAV_WIDTH_MAX, NAV_WIDTH_MIN } from "./settings.ts";
+import { retryStaleChunkReloadWhenReachable } from "./stale-chunk-reload.ts";
 
 type DebugOverlayElement = HTMLElement & {
   toggle: () => void;
@@ -498,7 +499,8 @@ export class ShellChromeOwner {
     this.requestLazyElement(KEYBOARD_SHORTCUTS_ELEMENT, descriptor);
   };
 
-  /** Open overlays and editable controls own Escape before settings can exit. */
+  // Open controls own Escape. Slotted options hide their listbox in shadow DOM,
+  // so recognize the open select host before Settings can consume the key.
   shouldIgnoreSettingsEscape(event: KeyboardEvent): boolean {
     const host = this.host;
     const overlaySnapshot = host.context?.overlays.snapshot;
@@ -516,7 +518,7 @@ export class ShellChromeOwner {
     return (
       target instanceof Element &&
       target.closest(
-        "input, textarea, select, [contenteditable], dialog, [role='dialog'], [role='menu'], [role='listbox']",
+        "input, textarea, select, wa-select[open], [contenteditable], dialog, [role='dialog'], [role='menu'], [role='listbox']",
       ) !== null
     );
   }
@@ -692,10 +694,18 @@ export class ShellChromeOwner {
     });
   }
 
-  private dispatchLazyShellEvent(event: LazyShellEvent): boolean {
-    return window.dispatchEvent(
-      new CustomEvent(event.eventType, { cancelable: true, detail: event.detail }),
-    );
+  retryPendingLazyAction(canReload: () => boolean): Promise<boolean> {
+    const event = this.pendingLazyAction;
+    return event
+      ? retryStaleChunkReloadWhenReachable({
+          canReload: () =>
+            canReload() && this.pendingLazyAction === event && persistLazyShellAction(event),
+        })
+      : Promise.resolve(false);
+  }
+
+  private dispatchLazyShellEvent({ eventType, detail }: LazyShellEvent): boolean {
+    return window.dispatchEvent(new CustomEvent(eventType, { cancelable: true, detail }));
   }
 
   private clearPendingLazyAction(event: LazyShellEvent): void {
