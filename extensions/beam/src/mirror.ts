@@ -18,7 +18,13 @@ import {
 } from "openclaw/plugin-sdk/ssrf-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
-import { BEAM_MAX_BODY_BYTES, BEAM_MAX_ITEM_CHARS, BEAM_MAX_ITEMS } from "./types.js";
+import {
+  BEAM_MAX_BODY_BYTES,
+  BEAM_MAX_ITEM_CHARS,
+  BEAM_MAX_ITEMS,
+  BEAM_MAX_SESSIONS,
+  BEAM_RETENTION_MS,
+} from "./types.js";
 
 const MIRROR_CONFIG_PATH = "plugins.entries.beam.config.mirror";
 const MIRROR_TOKEN_PATH = `${MIRROR_CONFIG_PATH}.token`;
@@ -256,9 +262,14 @@ function hostCandidates(
   return out;
 }
 
+function mirrorCandidateKey(candidate: BeamMirrorCandidate): string {
+  return `${candidate.catalogId}\0${candidate.hostId}\0${candidate.threadId}`;
+}
+
 type TrackedMirrorSession = {
   candidate: BeamMirrorCandidate;
   fingerprint: string;
+  expiresAt: number;
 };
 
 type BeamMirrorRunner = {
@@ -267,7 +278,7 @@ type BeamMirrorRunner = {
 };
 
 export function createBeamMirrorRunner(params: {
-  runtime: PluginRuntime;
+  runtime: { config: Pick<PluginRuntime["config"], "current"> };
   logger: { warn: (message: string) => void; info: (message: string) => void };
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
@@ -303,6 +314,26 @@ export function createBeamMirrorRunner(params: {
       return await Promise.race([operation, aborted]);
     } finally {
       signal.removeEventListener("abort", abort);
+    }
+  };
+
+  // Retry state mirrors the receiver's row cap and TTL. Once an entry exceeds
+  // either bound, no remote row remains for a terminal upload to update.
+  const trackSuccessfulUpload = (
+    key: string,
+    candidate: BeamMirrorCandidate,
+    fingerprint: string,
+  ) => {
+    // The receiver refreshes eviction order on every accepted write.
+    // Move this entry to the tail so both capacity owners evict the same row.
+    tracked.delete(key);
+    tracked.set(key, { candidate, fingerprint, expiresAt: now() + BEAM_RETENTION_MS });
+    if (tracked.size <= BEAM_MAX_SESSIONS) {
+      return;
+    }
+    for (const oldestKey of tracked.keys()) {
+      tracked.delete(oldestKey);
+      break;
     }
   };
 
@@ -470,6 +501,7 @@ export function createBeamMirrorRunner(params: {
       }
       const catalogById = new Map(catalogs.map((catalog) => [catalog.id, catalog]));
       const candidates: BeamMirrorCandidate[] = [];
+      const fullyObservedHosts = new Set<string>();
       for (const catalog of catalogs) {
         signal.throwIfAborted();
         try {
@@ -478,17 +510,28 @@ export function createBeamMirrorRunner(params: {
           );
           signal.throwIfAborted();
           candidates.push(...hostCandidates(catalog.id, hosts, activeSinceMs));
+          for (const host of hosts) {
+            if (
+              host.kind === "gateway" &&
+              host.connected &&
+              !host.error &&
+              host.nextCursor === undefined
+            ) {
+              fullyObservedHosts.add(`${catalog.id}\0${host.hostId}`);
+            }
+          }
         } catch (error) {
           signal.throwIfAborted();
           warnThrottled(`beam mirror list failed for ${catalog.id}: ${String(error)}`);
         }
       }
       candidates.sort((left, right) => right.recencyAt - left.recencyAt);
+      const activeKeys = new Set(candidates.map(mirrorCandidateKey));
       const selected = candidates.slice(0, MIRROR_MAX_SESSIONS);
       const selectedKeys = new Set<string>();
       for (const candidate of selected) {
         signal.throwIfAborted();
-        const key = `${candidate.catalogId}\0${candidate.hostId}\0${candidate.threadId}`;
+        const key = mirrorCandidateKey(candidate);
         selectedKeys.add(key);
         const catalog = catalogById.get(candidate.catalogId);
         if (!catalog) {
@@ -504,7 +547,7 @@ export function createBeamMirrorRunner(params: {
           const uploaded = await upload(mirror.endpoint, token, payload);
           signal.throwIfAborted();
           if (uploaded) {
-            tracked.set(key, { candidate, fingerprint });
+            trackSuccessfulUpload(key, candidate, fingerprint);
           }
         } catch (error) {
           signal.throwIfAborted();
@@ -513,22 +556,42 @@ export function createBeamMirrorRunner(params: {
       }
       // Sessions that left the active window get one final completed upload so
       // remote rows flip from live to completed instead of lingering until TTL.
+      const tickNow = now();
+      const terminalEntries: Array<[string, TrackedMirrorSession]> = [];
       for (const [key, entry] of tracked) {
         signal.throwIfAborted();
         if (selectedKeys.has(key)) {
           continue;
         }
-        tracked.delete(key);
-        const catalog = catalogById.get(entry.candidate.catalogId);
-        if (!catalog) {
-          continue;
+        // A terminal retry cannot update a receiver row after this shared deadline.
+        if (entry.expiresAt <= tickNow) {
+          tracked.delete(key);
+        } else if (terminalEntries.length < MIRROR_MAX_SESSIONS) {
+          terminalEntries.push([key, entry]);
         }
-        try {
-          const payload = await buildUpload(agentId, catalog, entry.candidate, true);
-          signal.throwIfAborted();
-          await upload(mirror.endpoint, token, payload);
-        } catch {
-          // The session store may already be gone; the receiver TTL cleans up.
+      }
+      for (const [key, entry] of terminalEntries) {
+        signal.throwIfAborted();
+        let uploaded = false;
+        const catalog = catalogById.get(entry.candidate.catalogId);
+        if (catalog) {
+          try {
+            const payload = await buildUpload(agentId, catalog, entry.candidate, true);
+            signal.throwIfAborted();
+            uploaded = await upload(mirror.endpoint, token, payload);
+            signal.throwIfAborted();
+          } catch {
+            signal.throwIfAborted();
+          }
+        }
+        tracked.delete(key);
+        // Retrying extends a completion decision across ticks, so require full host evidence.
+        const confirmedInactive =
+          fullyObservedHosts.has(`${entry.candidate.catalogId}\0${entry.candidate.hostId}`) &&
+          !activeKeys.has(key);
+        if (!uploaded && confirmedInactive) {
+          // Move failed work behind later entries so one broken session cannot starve them.
+          tracked.set(key, entry);
         }
       }
     } catch (error) {
