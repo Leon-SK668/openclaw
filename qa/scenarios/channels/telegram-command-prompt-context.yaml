@@ -92,7 +92,7 @@ flow:
                   expr: "state.getSnapshot().messages.filter((message) => message.direction === 'outbound').length"
               - sendNativeCommand:
                   command:
-                    expr: "`export ${config.exportPath}`"
+                    expr: "`export_session ${config.exportPath}`"
                   conversation:
                     id:
                       ref: config.conversationId
