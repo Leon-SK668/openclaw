@@ -120,4 +120,30 @@ describe("resolveAgentRuntimePrompt", () => {
       }),
     );
   });
+
+  it("normalizes absent message-action targets", async () => {
+    await resolveAgentRuntimePrompt({
+      config: {},
+      agentId: "main",
+      model: "openai/gpt-test",
+      channel: "telegram",
+      accountId: null,
+      currentChannelId: null,
+      currentThreadTs: null,
+      currentMessageId: null,
+      senderId: null,
+      senderIsOwner: null,
+    });
+
+    expect(listChannelSupportedActionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentChannelId: undefined,
+        currentThreadTs: undefined,
+        currentMessageId: undefined,
+        accountId: undefined,
+        requesterSenderId: undefined,
+        senderIsOwner: undefined,
+      }),
+    );
+  });
 });

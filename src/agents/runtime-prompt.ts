@@ -50,14 +50,16 @@ export async function resolveAgentRuntimePrompt(params: {
     : undefined;
   const channelActions = runtimeChannel
     ? listChannelSupportedActions({
-        ...channelPromptContext,
-        currentChannelId: params.currentChannelId,
-        currentThreadTs: params.currentThreadTs,
-        currentMessageId: params.currentMessageId,
-        sessionKey: params.sessionKey,
-        sessionId: params.sessionId,
-        agentId: params.agentId,
-        requesterSenderId: params.senderId,
+        cfg: params.config,
+        channel: runtimeChannel,
+        currentChannelId: params.currentChannelId ?? undefined,
+        currentThreadTs: params.currentThreadTs ?? undefined,
+        currentMessageId: params.currentMessageId ?? undefined,
+        accountId: params.accountId ?? undefined,
+        sessionKey: params.sessionKey ?? undefined,
+        sessionId: params.sessionId ?? undefined,
+        agentId: params.agentId ?? undefined,
+        requesterSenderId: params.senderId ?? undefined,
         senderIsOwner: params.senderIsOwner ?? undefined,
       })
     : undefined;
