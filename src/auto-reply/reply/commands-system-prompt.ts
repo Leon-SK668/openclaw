@@ -1,37 +1,25 @@
 // Implements system prompt inspection commands for agent runtime sessions.
-import os from "node:os";
 import { isAcpRuntimeSpawnAvailable } from "../../acp/runtime/availability.js";
 import { resolveSessionAgentIds } from "../../agents/agent-scope.js";
 import { createOpenClawCodingTools } from "../../agents/agent-tools.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "../../agents/bootstrap-files.js";
-import {
-  listChannelSupportedActions,
-  resolveChannelMessageToolHints,
-  resolveChannelReactionGuidance,
-} from "../../agents/channel-tools.js";
 import type { EmbeddedContextFile } from "../../agents/embedded-agent-helpers.js";
-import { buildEmbeddedMessageActionDiscoveryInput } from "../../agents/embedded-agent-runner/message-action-discovery-input.js";
 import { resolveEmbeddedFullAccessState } from "../../agents/embedded-agent-runner/sandbox-info.js";
 import {
   mapSandboxSkillEntriesForPrompt,
   resolveSandboxSkillRuntimeInputs,
 } from "../../agents/embedded-agent-runner/sandbox-skills.js";
 import { resolveNodeExecEligibility } from "../../agents/exec-defaults.js";
-import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
 import { resolveAgentPromptSurfaceForSessionKey } from "../../agents/prompt-surface.js";
-import { collectRuntimeChannelCapabilities } from "../../agents/runtime-capabilities.js";
+import { resolveAgentRuntimePrompt } from "../../agents/runtime-prompt.js";
 import type { AgentTool } from "../../agents/runtime/index.js";
 import {
   ensureSandboxWorkspaceForSession,
   resolveSandboxRuntimeStatus,
 } from "../../agents/sandbox.js";
-import { detectRuntimeShell } from "../../agents/shell-utils.js";
 import { buildConfiguredAgentSystemPrompt } from "../../agents/system-prompt-config.js";
-import { buildSystemPromptParams } from "../../agents/system-prompt-params.js";
 import type { WorkspaceBootstrapFile } from "../../agents/workspace.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
-import { getMachineDisplayName } from "../../infra/machine-name.js";
-import { resolveRuntimeOsLabel } from "../../infra/os-summary.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { listRegisteredPluginAgentPromptGuidance } from "../../plugins/command-registry-state.js";
 import { resolveSkillsPrompt } from "../../skills/loading/workspace-skill-prompt.js";
@@ -39,7 +27,6 @@ import { resolveEmbeddedRunSkillEntries } from "../../skills/runtime/embedded-ru
 import { getRemoteSkillEligibility } from "../../skills/runtime/remote.js";
 import { resolveReusableWorkspaceSkillSnapshot } from "../../skills/runtime/session-snapshot.js";
 import type { SkillEligibilityContext } from "../../skills/types.js";
-import { normalizeMessageChannel } from "../../utils/message-channel.js";
 import { buildThreadingToolContext } from "./agent-runner-utils.js";
 import type { HandleCommandsParams } from "./commands-types.js";
 import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js";
@@ -249,32 +236,9 @@ export async function resolveCommandsSystemPromptBundle(
   })();
   const toolNames = tools.map((t) => t.name);
   const promptSurface = resolveAgentPromptSurfaceForSessionKey(params.sessionKey);
-  const defaultModelRef = resolveDefaultModelForAgent({
-    cfg: params.cfg,
-    agentId: sessionAgentId,
-  });
-  const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
-  // Command prompts must project the same inbound runtime facts as normal agent runs;
-  // otherwise /context and /export-session report a different transport environment.
-  const machineName = await getMachineDisplayName();
-  const runtimeChannel = normalizeMessageChannel(params.command.channel);
   const accountId = params.command.accountId ?? params.ctx.AccountId;
-  const runtimeCapabilities = collectRuntimeChannelCapabilities({
-    cfg: params.cfg,
-    channel: runtimeChannel,
-    accountId,
-  });
-  const channelPromptContext = {
-    cfg: params.cfg,
-    channel: runtimeChannel,
-    accountId,
-  };
-  const reactionGuidance = runtimeChannel
-    ? resolveChannelReactionGuidance(channelPromptContext)
-    : undefined;
-  const messageToolHints = runtimeChannel
-    ? resolveChannelMessageToolHints(channelPromptContext)
-    : undefined;
+  // Thread adapters own provider-specific targets. Command-only route fallbacks cover
+  // synthetic command contexts that bypass the normal inbound attempt preparation.
   const threadingContext = buildThreadingToolContext({
     sessionCtx: params.ctx,
     config: params.cfg,
@@ -286,46 +250,26 @@ export async function resolveCommandsSystemPromptBundle(
     params.ctx.OriginatingTo?.trim() ||
     params.command.to;
   const fallbackThreadId = params.ctx.MessageThreadId ?? params.ctx.TransportThreadId;
-  const channelActions = runtimeChannel
-    ? listChannelSupportedActions(
-        buildEmbeddedMessageActionDiscoveryInput({
-          cfg: params.cfg,
-          channel: runtimeChannel,
-          currentChannelId: threadingContext.currentChannelId ?? fallbackChannelId,
-          currentThreadTs:
-            threadingContext.currentThreadTs ??
-            (fallbackThreadId === undefined ? undefined : String(fallbackThreadId)),
-          currentMessageId: threadingContext.currentMessageId,
-          accountId,
-          sessionKey: params.sessionKey,
-          sessionId: targetSessionEntry?.sessionId,
-          agentId: sessionAgentId,
-          senderId: params.ctx.SenderId ?? params.command.senderId,
-          senderIsOwner: params.command.senderIsOwner,
-        }),
-      )
-    : undefined;
-  const { runtimeInfo, userTimezone, userDate } = buildSystemPromptParams({
-    config: params.cfg,
-    agentId: sessionAgentId,
-    workspaceDir,
-    cwd: process.cwd(),
-    runtime: {
+  const { runtimeInfo, userTimezone, userDate, reactionGuidance, messageToolHints } =
+    await resolveAgentRuntimePrompt({
+      config: params.cfg,
+      agentId: sessionAgentId,
+      workspaceDir,
+      cwd: process.cwd(),
       sessionKey: params.sessionKey,
       sessionId: targetSessionEntry?.sessionId,
-      host: machineName,
-      os: resolveRuntimeOsLabel(),
-      arch: os.arch(),
-      node: process.version,
       model: `${params.provider}/${params.model}`,
-      defaultModel: defaultModelLabel,
-      shell: detectRuntimeShell(),
-      channel: runtimeChannel,
+      channel: params.command.channel,
+      accountId,
       chatType: normalizeChatType(params.ctx.ChatType ?? targetSessionEntry?.chatType),
-      capabilities: runtimeCapabilities,
-      channelActions,
-    },
-  });
+      currentChannelId: threadingContext.currentChannelId ?? fallbackChannelId,
+      currentThreadTs:
+        threadingContext.currentThreadTs ??
+        (fallbackThreadId === undefined ? undefined : String(fallbackThreadId)),
+      currentMessageId: threadingContext.currentMessageId,
+      senderId: params.ctx.SenderId ?? params.command.senderId,
+      senderIsOwner: params.command.senderIsOwner,
+    });
   const fullAccessState = resolveEmbeddedFullAccessState({
     execElevated: {
       enabled: params.elevated.enabled,
