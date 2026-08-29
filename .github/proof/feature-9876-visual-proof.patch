@@ -1,0 +1,32 @@
+diff --git a/apps/macos/Tests/OpenClawIPCTests/Feature9876VisualProofTests.swift b/apps/macos/Tests/OpenClawIPCTests/Feature9876VisualProofTests.swift
+new file mode 100644
+--- /dev/null
++++ b/apps/macos/Tests/OpenClawIPCTests/Feature9876VisualProofTests.swift
+@@ -0,0 +1,27 @@
++import AppKit
++import Foundation
++import Testing
++@testable import OpenClaw
++
++@Suite(.serialized)
++@MainActor
++struct Feature9876VisualProofTests {
++    @Test func `capture exec approval session context`() throws {
++        let outputPath = try #require(ProcessInfo.processInfo.environment["OPENCLAW_PROOF_PNG"])
++        let view = ExecApprovalsPromptPresenter.buildAccessoryView(
++            ExecApprovalPromptRequest(
++                command: "/usr/bin/git status --short",
++                sessionKey: "agent:main:telegram:dm:12345"))
++        view.appearance = NSAppearance(named: .aqua)
++        view.wantsLayer = true
++        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
++        view.layoutSubtreeIfNeeded()
++
++        let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
++        view.cacheDisplay(in: view.bounds, to: bitmap)
++        let png = try #require(bitmap.representation(using: .png, properties: [:]))
++        try png.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
++
++        #expect(FileManager.default.fileExists(atPath: outputPath))
++    }
++}
