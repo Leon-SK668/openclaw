@@ -18,6 +18,12 @@ function buildQaTargetCore(params: {
   threadId?: string | null;
 }): string {
   if (params.threadId) {
+    // Direct/group thread targets need their kind and escaped ids to survive
+    // message-action parse/build cycles; channel threads retain shipped syntax.
+    if (params.chatType !== "channel") {
+      const kind = params.chatType === "direct" ? "dm" : "group";
+      return `thread:/v1/${kind}/${encodeURIComponent(params.conversationId)}/${encodeURIComponent(params.threadId)}`;
+    }
     return `thread:${params.conversationId}/${params.threadId}`;
   }
   return `${params.chatType === "direct" ? "dm" : params.chatType}:${params.conversationId}`;

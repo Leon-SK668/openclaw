@@ -10,6 +10,12 @@ describe("qa-channel protocol", () => {
     expect(buildQaTarget({ chatType: "channel", conversationId: "Room", threadId: "Topic" })).toBe(
       "thread:Room/Topic",
     );
+    expect(buildQaTarget({ chatType: "direct", conversationId: "Alice", threadId: "Topic" })).toBe(
+      "thread:/v1/dm/Alice/Topic",
+    );
+    expect(
+      buildQaTarget({ chatType: "group", conversationId: "Room/One", threadId: "Topic/Two" }),
+    ).toBe("thread:/v1/group/Room%2FOne/Topic%2FTwo");
   });
 
   it("parses canonical targets without folding ids or prefix casing", () => {
