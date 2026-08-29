@@ -7,6 +7,10 @@ scenario:
   coverage:
     primary:
       - telegram.built-in-commands
+  gatewayConfigPatch:
+    commands:
+      ownerAllowFrom:
+        - telegram:100001
   regressionRefs:
     - openclaw/openclaw#20837
   objective: Verify a Telegram topic export reconstructs the session prompt with Telegram runtime context.
