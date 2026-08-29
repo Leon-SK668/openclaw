@@ -22,6 +22,16 @@ describe("qa-channel protocol", () => {
       conversationId: "Room",
       threadId: "Topic",
     });
+    expect(parseQaTarget("thread:/v1/group/Room%2FOne/Topic%2FTwo")).toEqual({
+      chatType: "group",
+      conversationId: "Room/One",
+      threadId: "Topic/Two",
+    });
+    expect(parseQaTarget("thread:/v1/dm/Alice/Topic")).toEqual({
+      chatType: "direct",
+      conversationId: "Alice",
+      threadId: "Topic",
+    });
     expect(parseQaTarget("bare-id", { defaultChatType: "group" })).toEqual({
       chatType: "group",
       conversationId: "bare-id",
@@ -30,6 +40,9 @@ describe("qa-channel protocol", () => {
       "qa-channel target prefixes must be lowercase",
     );
     expect(() => parseQaTarget("thread:Room/")).toThrow("invalid qa-channel thread target");
+    expect(() => parseQaTarget("thread:/v1/group/Room/%GG")).toThrow(
+      "invalid qa-channel thread target",
+    );
   });
 
   it("sanitizes QA bus tool-call arguments before persistence", () => {
