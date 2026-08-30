@@ -1,0 +1,85 @@
+name: PR 132763 exact-head Markdown preview proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr132763-markdown-preview-proof
+  cancel-in-progress: false
+
+env:
+  CANDIDATE_SHA: 1f600a4d2f793962c0020c3a0687769d2e658ec6
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  proof:
+    name: Exact-head Control UI proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - name: Checkout proof harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .proof-harness
+          persist-credentials: false
+          sparse-checkout: .github/proof
+
+      - name: Verify candidate identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          cache-mode: "off"
+          install-bun: "false"
+          node-version: "24.x"
+
+      - name: Install Playwright Chromium
+        run: node --import tsx scripts/ensure-playwright-chromium.mts
+
+      - name: Install exact-head proof producer
+        run: >-
+          install -D -m 0644
+          .proof-harness/.github/proof/pr132763-markdown-preview.e2e.test.ts
+          ui/src/e2e/pr132763-markdown-preview-proof.e2e.test.ts
+
+      - name: Run exact-head Control UI proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=".artifacts/control-ui-e2e/pr132763-markdown-preview"
+          mkdir -p "$artifact_dir"
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.ui-e2e.config.ts \
+            --configLoader runner \
+            ui/src/e2e/pr132763-markdown-preview-proof.e2e.test.ts \
+            2>&1 | tee "$artifact_dir/vitest.log"
+
+      - name: Verify receipt identity
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const receipt = JSON.parse(fs.readFileSync(".artifacts/control-ui-e2e/pr132763-markdown-preview/receipt.json", "utf8"));
+            if (receipt.productHead !== process.env.CANDIDATE_SHA) process.exit(1);
+          '
+
+      - name: Upload exact-head proof artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr132763-markdown-preview-exact-head-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/control-ui-e2e/pr132763-markdown-preview
+          if-no-files-found: error
+          retention-days: 30
