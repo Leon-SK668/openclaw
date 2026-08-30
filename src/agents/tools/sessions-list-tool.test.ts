@@ -359,6 +359,7 @@ describe("sessions-list-tool", () => {
     const key = "agent:main:main";
     const entry: SessionEntry = {
       sessionId: "session-main",
+      updatedAt: 1,
       color: "blue",
     };
     const projected = buildGatewaySessionRow({
