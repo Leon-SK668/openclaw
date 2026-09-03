@@ -495,11 +495,13 @@ describe("deliverAgentCommandResult payload normalization", () => {
   });
 
   it("normalizes reply-media paths before outbound delivery", async () => {
-    const normalizerFn = vi.fn(async (payload: ReplyPayload): Promise<ReplyPayload> => ({
-      ...payload,
-      mediaUrl: "/tmp/agent-workspace/out/photo.png",
-      mediaUrls: ["/tmp/agent-workspace/out/photo.png"],
-    }));
+    const normalizerFn = vi.fn(
+      async (payload: ReplyPayload): Promise<ReplyPayload> => ({
+        ...payload,
+        mediaUrl: "/tmp/agent-workspace/out/photo.png",
+        mediaUrls: ["/tmp/agent-workspace/out/photo.png"],
+      }),
+    );
     createReplyMediaPathNormalizerMock.mockReturnValue(normalizerFn);
     deliverOutboundPayloadsMock.mockResolvedValue([]);
 
@@ -807,6 +809,12 @@ describe("deliverAgentCommandResult payload normalization", () => {
       },
       field: "acceptedSessionSpawns",
       expected: [{ runId: "child-run", childSessionKey: "agent:main:subagent:child" }],
+    },
+    {
+      name: "runtime-owned continuation",
+      result: { runtimeContinuationStarted: true },
+      field: "runtimeContinuationStarted",
+      expected: true,
     },
     {
       name: "successful cron add",
