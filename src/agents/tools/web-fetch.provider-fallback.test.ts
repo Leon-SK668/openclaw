@@ -513,6 +513,13 @@ describe("web_fetch provider fallback normalization", () => {
         tools: { web: { fetch: { cacheTtlMinutes: 15 } } },
       } as OpenClawConfig,
       sandboxed: false,
+      runtimeWebFetch: {
+        providerConfigured: "firecrawl",
+        providerSource: "configured",
+        selectedProvider: "firecrawl",
+        selectedProviderKeySource: "config",
+        diagnostics: [],
+      },
     });
     const url = "https://example.com/direct-recovery-after-fallback";
 
