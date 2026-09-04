@@ -4,7 +4,6 @@
  * Fetches HTTP(S) content through SSRF guards, provider config, caching, and bounded extraction.
  */
 import { resolveIntegerOption } from "@openclaw/normalization-core/number-coercion";
-import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
@@ -14,10 +13,8 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { sha256Hex } from "../../infra/crypto-digest.js";
-import { pruneMapToMaxSize } from "../../infra/map-size.js";
 import { SsrFBlockedError, type LookupFn, type SsrFPolicy } from "../../infra/net/ssrf.js";
 import { logDebug, logWarn } from "../../logger.js";
-import { getActivePluginRegistryVersion } from "../../plugins/runtime.js";
 import { assertSecretOwnerAvailable } from "../../secrets/runtime-degraded-state.js";
 import { runtimeWebSecretOwnerId } from "../../secrets/runtime-web-secret-owner.js";
 import type { RuntimeWebFetchMetadata } from "../../secrets/runtime-web-tools.types.js";
@@ -83,10 +80,6 @@ const DEFAULT_FETCH_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 const FETCH_CACHE = new Map<string, CacheEntry<Record<string, unknown>>>();
-const FETCH_PROVIDER_HINT_MAX_ENTRIES = 100;
-const FETCH_PROVIDER_HINTS = new Map<string, { providerId: string; expiresAt: number }>();
-let fetchProviderHintsRegistryVersion: number | undefined;
-
 // Accept and Accept-Language are part of the fetch/readability contract,
 // User-Agent has its own tools.web.fetch.userAgent key, and Undici owns
 // Sec-Fetch-Mode.
@@ -537,34 +530,6 @@ type WebFetchPayloadResult = {
   providerId?: string;
 };
 
-function resolveFetchProviderHintKey(params: WebFetchRuntimeParams): string {
-  const registryVersion = getActivePluginRegistryVersion();
-  if (fetchProviderHintsRegistryVersion !== registryVersion) {
-    FETCH_PROVIDER_HINTS.clear();
-    fetchProviderHintsRegistryVersion = registryVersion;
-  }
-  const fetchConfig = params.config?.tools?.web?.fetch;
-  const configuredProvider =
-    fetchConfig && typeof fetchConfig === "object" && "provider" in fetchConfig
-      ? fetchConfig.provider
-      : undefined;
-  const providerSelectionFingerprint = sha256Hex(
-    stableStringify({
-      configuredProvider,
-      plugins: params.config?.plugins,
-      secrets: params.config?.secrets,
-    }),
-  );
-  return JSON.stringify([
-    registryVersion,
-    providerSelectionFingerprint,
-    params.sandboxed,
-    params.preferRuntimeProviders,
-    params.providerSource ?? "",
-    params.providerCacheKey ?? "",
-  ]);
-}
-
 function createWebFetchCacheKey(params: {
   parsedUrl: URL;
   runtime: WebFetchRuntimeParams;
@@ -837,23 +802,6 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
   if (cached) {
     return { ...cached.value, cached: true };
   }
-  const providerHintKey = resolveFetchProviderHintKey(params);
-  const providerHint = FETCH_PROVIDER_HINTS.get(providerHintKey);
-  if (providerHint && providerHint.expiresAt <= Date.now()) {
-    FETCH_PROVIDER_HINTS.delete(providerHintKey);
-  }
-  const hintedProviderCacheKey =
-    providerHint?.expiresAt > Date.now() ? providerHint.providerId : undefined;
-  const hintedCacheKey = hintedProviderCacheKey
-    ? createCacheKeyForProvider(hintedProviderCacheKey)
-    : undefined;
-  if (hintedCacheKey && hintedCacheKey !== cacheKey) {
-    const hintedCache = readCache(FETCH_CACHE, hintedCacheKey, params.cacheTtlMs);
-    if (hintedCache) {
-      return { ...hintedCache.value, cached: true };
-    }
-  }
-
   // Preserve the direct fetch's rejection; replacing it with signal.reason would
   // discard the transport's own error detail.
   const result = await fetchWebPayload(params, { cacheKey, createCacheKeyForProvider });
@@ -862,13 +810,6 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
   throwIfFetchAborted(params.signal);
   if (!result.cacheHit) {
     writeCache(FETCH_CACHE, result.cacheKey, result.payload, params.cacheTtlMs);
-  }
-  if (result.providerId && params.cacheTtlMs > 0) {
-    pruneMapToMaxSize(FETCH_PROVIDER_HINTS, FETCH_PROVIDER_HINT_MAX_ENTRIES - 1);
-    FETCH_PROVIDER_HINTS.set(providerHintKey, {
-      providerId: result.providerId,
-      expiresAt: Date.now() + params.cacheTtlMs,
-    });
   }
   return result.payload;
 }
