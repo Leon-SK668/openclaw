@@ -45,8 +45,13 @@ function memoryStore(): BeamStore & { values: Map<string, BeamStoredSession> } {
   const values = new Map<string, BeamStoredSession>();
   return {
     values,
-    put: async (entry) => {
-      values.set(entry.beamId, entry);
+    update: async (beamId, updateValue) => {
+      const next = updateValue(values.get(beamId));
+      if (!next) {
+        return false;
+      }
+      values.set(beamId, next);
+      return true;
     },
     get: async (beamId) => values.get(beamId),
     list: async () => [...values.values()],
@@ -69,7 +74,7 @@ async function serve(store: BeamStore): Promise<string> {
   const handler = createBeamRequestHandler({
     store,
     resolveClient: () => ({ clientIp: "127.0.0.1", scopes: ["operator.write"] }),
-    resolveControlUiTarget: () => ({ agentId: "main" }),
+    resolveControlUiBasePath: () => "",
   });
   const server = http.createServer((req, res) => {
     void handler(req, res);
