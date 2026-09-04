@@ -669,7 +669,7 @@ class ChatDetailPanel extends OpenClawLightDomElement {
       onOpenSessionLink: this.onOpenSessionLink,
       onOpenWorkspaceFile: this.openWorkspaceFileFromPanel,
     };
-  };
+  }
 
   private readonly handlePanelClick = (event: MouseEvent) => {
     handleSidebarClick(event, this.sidebarNavigationCallbacks());

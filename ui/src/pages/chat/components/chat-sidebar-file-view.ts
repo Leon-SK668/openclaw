@@ -232,21 +232,23 @@ export function renderSidebarFile(
                                 `
                               : nothing
                           }
-                          ${previewing
-                            ? nothing
-                            : html`
-                                <openclaw-tooltip .content=${t("chat.detailPanel.searchInFile")}>
-                                  <button
-                                    class="btn btn--sm sidebar-file-view__action"
-                                    type="button"
-                                    aria-label=${t("chat.detailPanel.searchInFile")}
-                                    aria-pressed=${String(controls.searchOpen)}
-                                    @click=${controls.onToggleSearch}
-                                  >
-                                    ${icons.search}
-                                  </button>
-                                </openclaw-tooltip>
-                              `}
+                          ${
+                            previewing
+                              ? nothing
+                              : html`
+                                  <openclaw-tooltip .content=${t("chat.detailPanel.searchInFile")}>
+                                    <button
+                                      class="btn btn--sm sidebar-file-view__action"
+                                      type="button"
+                                      aria-label=${t("chat.detailPanel.searchInFile")}
+                                      aria-pressed=${String(controls.searchOpen)}
+                                      @click=${controls.onToggleSearch}
+                                    >
+                                      ${icons.search}
+                                    </button>
+                                  </openclaw-tooltip>
+                                `
+                          }
                           ${
                             controls.onReveal
                               ? html`
@@ -282,27 +284,29 @@ export function renderSidebarFile(
           ? html`<div class="file-view__save-notice" role="alert">${t("common.copyFailed")}</div>`
           : nothing
       }
-      ${markdownFile && controls
-        ? html`
-            <div class="settings-segmented" role="group" aria-label=${content.name}>
-              ${(["source", "preview"] as const).map((mode) => {
-                const active = controls.viewMode === mode;
-                return html`
-                  <button
-                    class="settings-segmented__btn ${active
-                      ? "settings-segmented__btn--active"
-                      : ""}"
-                    type="button"
-                    aria-pressed=${String(active)}
-                    @click=${() => controls.onViewModeChange(mode)}
-                  >
-                    ${t(mode === "source" ? "agentTools.source" : "chat.workspaceFiles.preview")}
-                  </button>
-                `;
-              })}
-            </div>
-          `
-        : nothing}
+      ${
+        markdownFile && controls
+          ? html`
+              <div class="settings-segmented" role="group" aria-label=${content.name}>
+                ${(["source", "preview"] as const).map((mode) => {
+                  const active = controls.viewMode === mode;
+                  return html`
+                    <button
+                      class="settings-segmented__btn ${
+                        active ? "settings-segmented__btn--active" : ""
+                      }"
+                      type="button"
+                      aria-pressed=${String(active)}
+                      @click=${() => controls.onViewModeChange(mode)}
+                    >
+                      ${t(mode === "source" ? "agentTools.source" : "chat.workspaceFiles.preview")}
+                    </button>
+                  `;
+                })}
+              </div>
+            `
+          : nothing
+      }
       ${
         controls?.searchOpen && !previewing
           ? html`
@@ -388,26 +392,30 @@ export function renderSidebarFile(
             : nothing
         }
       </div>
-      ${markdownFile && controls
-        ? html`
-            <div class="file-view sidebar-file-preview" ?hidden=${!previewing}>
-              ${markdownHtml
-                ? html`
-                    <article
-                      class="sidebar-markdown sidebar-file-preview__content"
-                      dir=${detectTextDirection(controls.previewContent)}
-                    >
-                      ${unsafeHTML(markdownHtml)}
-                    </article>
-                  `
-                : html`
-                    <div class="sidebar-markdown-empty">
-                      ${t("chat.detailPanel.noPreviewableMarkdown")}
-                    </div>
-                  `}
-            </div>
-          `
-        : nothing}
+      ${
+        markdownFile && controls
+          ? html`
+              <div class="file-view sidebar-file-preview" ?hidden=${!previewing}>
+                ${
+                  markdownHtml
+                    ? html`
+                        <article
+                          class="sidebar-markdown sidebar-file-preview__content"
+                          dir=${detectTextDirection(controls.previewContent)}
+                        >
+                          ${unsafeHTML(markdownHtml)}
+                        </article>
+                      `
+                    : html`
+                        <div class="sidebar-markdown-empty">
+                          ${t("chat.detailPanel.noPreviewableMarkdown")}
+                        </div>
+                      `
+                }
+              </div>
+            `
+          : nothing
+      }
       ${
         controls?.editing
           ? nothing

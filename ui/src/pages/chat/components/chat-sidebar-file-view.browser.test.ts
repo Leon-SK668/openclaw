@@ -117,6 +117,7 @@ describe.runIf(browserMode)("chat file editor", () => {
     expect(panel.querySelector(".cm-content")?.textContent).toContain("const second = 2;");
     const target = panel.querySelector(".file-view__line--target");
     expect(target?.getAttribute("data-line")).toBe("2");
+    expect(panel.querySelector(".settings-segmented")).toBeNull();
   });
 
   it("renders large Markdown drafts in a responsive preview", async () => {
