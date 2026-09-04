@@ -536,6 +536,7 @@ function createWebFetchCacheKey(params: {
   ssrfPolicy?: SsrFPolicy;
   providerCacheKey?: string;
   providerSource?: string;
+  responseKind: "direct" | "provider-fallback";
 }): string {
   const headersCacheKey = resolveFetchHeadersCacheKey(params.runtime.headers);
   const cacheDiscriminators = [
@@ -549,6 +550,7 @@ function createWebFetchCacheKey(params: {
   return normalizeCacheKey(
     [
       `fetch:${params.parsedUrl.href}:${params.runtime.extractMode}:${params.runtime.maxChars}`,
+      `response-kind:${params.responseKind}`,
       ...cacheDiscriminators,
     ].join(":"),
   );
@@ -724,7 +726,10 @@ async function maybeFetchProviderWebFetchPayload(
   params: WebFetchRuntimeParams & {
     urlToFetch: string;
     cacheKey: string;
-    createCacheKeyForProvider: (providerCacheKey?: string) => string;
+    createCacheKeyForProvider: (
+      providerCacheKey: string | undefined,
+      responseKind?: "direct" | "provider-fallback",
+    ) => string;
     tookMs: number;
   },
 ): Promise<WebFetchPayloadResult | null> {
@@ -736,7 +741,7 @@ async function maybeFetchProviderWebFetchPayload(
   // Provider discovery is lazy, so use the actual fallback id for cache identity.
   // This prevents stale runtime metadata from aliasing another provider's result.
   const providerCacheKey = normalizeOptionalLowercaseString(providerFallback.provider.id);
-  const cacheKey = params.createCacheKeyForProvider(providerCacheKey);
+  const cacheKey = params.createCacheKeyForProvider(providerCacheKey, "provider-fallback");
   if (cacheKey !== params.cacheKey) {
     const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
     if (cached) {
@@ -789,13 +794,17 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
   if (!["http:", "https:"].includes(parsedUrl.protocol)) {
     throw new Error("Invalid URL: must be http or https");
   }
-  const createCacheKeyForProvider = (providerCacheKey?: string) =>
+  const createCacheKeyForProvider = (
+    providerCacheKey?: string,
+    responseKind: "direct" | "provider-fallback" = "direct",
+  ) =>
     createWebFetchCacheKey({
       parsedUrl,
       runtime: params,
       ssrfPolicy,
       providerCacheKey,
       providerSource: params.providerSource,
+      responseKind,
     });
   const cacheKey = createCacheKeyForProvider(params.providerCacheKey);
   const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
