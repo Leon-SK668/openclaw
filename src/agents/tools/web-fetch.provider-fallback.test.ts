@@ -488,6 +488,46 @@ describe("web_fetch provider fallback normalization", () => {
     expect(resolveWebFetchDefinitionMock).toHaveBeenCalledTimes(2);
   });
 
+  it("tries direct fetch before reusing a provider fallback cache entry", async () => {
+    const directFetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network failed"))
+      .mockResolvedValueOnce(
+        new Response("direct body", {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        }),
+      );
+    global.fetch = withFetchPreconnect(directFetch);
+    const providerExecute = vi.fn(async () => ({ text: "fallback body" }));
+    resolveWebFetchDefinitionMock.mockReturnValue({
+      provider: { id: "firecrawl" },
+      definition: {
+        description: "firecrawl",
+        parameters: {},
+        execute: providerExecute,
+      },
+    });
+    const tool = createWebFetchTool({
+      config: {
+        tools: { web: { fetch: { cacheTtlMinutes: 15 } } },
+      } as OpenClawConfig,
+      sandboxed: false,
+    });
+    const url = "https://example.com/direct-recovery-after-fallback";
+
+    const first = await tool?.execute?.("provider-fallback-first", { url });
+    const second = await tool?.execute?.("direct-recovery-second", { url });
+    const firstDetails = first?.details as { externalContent?: { provider?: string } };
+    const secondDetails = second?.details as { cached?: boolean; text?: string };
+
+    expect(firstDetails.externalContent?.provider).toBe("firecrawl");
+    expect(secondDetails.text).toContain("direct body");
+    expect(secondDetails.cached).toBeUndefined();
+    expect(directFetch).toHaveBeenCalledTimes(2);
+    expect(providerExecute).toHaveBeenCalledTimes(1);
+  });
+
   it("late-binds direct request headers and partitions the cache by the refreshed values", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       new Response("# Routed", {
