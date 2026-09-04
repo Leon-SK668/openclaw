@@ -443,6 +443,7 @@ class ChatDetailPanel extends OpenClawLightDomElement {
       return;
     }
     this.fileEditor?.setContent(this.fileSavedContent);
+    this.filePreviewContent = this.fileSavedContent;
     const content = this.visibleContent;
     if (content?.kind === "file") {
       setFileDraft(content, null);

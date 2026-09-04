@@ -174,6 +174,28 @@ describe.runIf(browserMode)("chat file editor", () => {
     expect(panel.querySelector(".cm-content")?.textContent).toContain("# Edited audit");
   });
 
+  it("refreshes Markdown preview after discarding edits", async () => {
+    const panel = await mountFile({
+      kind: "file",
+      path: "notes.md",
+      name: "notes.md",
+      content: "# Original",
+      edit: { hash: "hash-1", save: vi.fn(), fetchLatest: vi.fn() },
+    });
+
+    await userEvent.click(button(panel, "Edit file"));
+    await userEvent.fill(panel.querySelector<HTMLElement>(".cm-content")!, "# Draft");
+    await userEvent.click(button(panel, "Preview"));
+    await expect
+      .poll(() => panel.querySelector(".sidebar-file-preview h1")?.textContent)
+      .toBe("Draft");
+
+    await userEvent.click(button(panel, "Discard"));
+    await expect
+      .poll(() => panel.querySelector(".sidebar-file-preview h1")?.textContent)
+      .toBe("Original");
+  });
+
   it("enables save after an edit and keeps the saved content", async () => {
     const save = vi.fn().mockResolvedValue({ ok: true, hash: "hash-2" });
     const panel = await mountFile({
