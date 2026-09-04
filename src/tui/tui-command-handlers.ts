@@ -92,6 +92,7 @@ type CommandHandlerContext = {
   forgetLocalBtwRunId?: (runId: string) => void;
   hasPendingLocalBtwRuns?: () => boolean;
   retirePendingLocalBtwResults?: () => void;
+  isDynamicCommand?: (name: string) => boolean;
   consumeCompletedRunForPendingSend?: (runId: string) => boolean;
   isRunObserved?: (runId: string) => boolean;
   flushPendingHistoryRefreshIfIdle?: () => void;
@@ -138,6 +139,7 @@ export function createCommandHandlers(context: CommandHandlerContext) {
     forgetLocalBtwRunId,
     hasPendingLocalBtwRuns,
     retirePendingLocalBtwResults,
+    isDynamicCommand,
     consumeCompletedRunForPendingSend,
     isRunObserved,
     flushPendingHistoryRefreshIfIdle,
@@ -879,7 +881,9 @@ export function createCommandHandlers(context: CommandHandlerContext) {
       tui.requestRender();
       return;
     }
-    if (descriptor?.handler) {
+    if (isDynamicCommand?.(name)) {
+      await sendMessage(raw);
+    } else if (descriptor?.handler) {
       await commandHandlers[descriptor.name as TuiCommandHandlerName](args, raw);
     } else if (opts.local && isSharedTextCommand(raw)) {
       addUnsupportedLocalCommand(name);

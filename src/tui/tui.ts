@@ -1011,6 +1011,18 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     );
   };
 
+  const isDynamicSlashCommand = (name: string) => {
+    if (dynamicSlashCommandsKey !== resolveDynamicSlashCommandsKey()) {
+      return false;
+    }
+    const normalizedName = name.replace(/^\/+/, "").toLowerCase();
+    return dynamicSlashCommands.some((command) =>
+      [command.name, ...(command.textAliases ?? [])].some(
+        (candidate) => candidate.replace(/^\/+/, "").toLowerCase() === normalizedName,
+      ),
+    );
+  };
+
   void import("../agents/utils/tools-manager.js")
     .then(({ ensureTool }) => ensureTool("fd", true))
     .then((fdPath) => {
@@ -1690,6 +1702,7 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     forgetLocalBtwRunId,
     hasPendingLocalBtwRuns: clearViewBlockingLocalBtwRunIds.hasAny,
     retirePendingLocalBtwResults,
+    isDynamicCommand: isDynamicSlashCommand,
     consumeCompletedRunForPendingSend,
     isRunObserved,
     flushPendingHistoryRefreshIfIdle,

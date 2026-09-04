@@ -127,6 +127,7 @@ function createHarness(params?: {
   isRunObserved?: (runId: string) => boolean;
   hasPendingLocalBtwRuns?: () => boolean;
   retirePendingLocalBtwResults?: () => void;
+  isDynamicCommand?: (name: string) => boolean;
   flushPendingHistoryRefreshIfIdle?: FlushPendingHistoryRefreshMock;
   refreshAgents?: RefreshAgentsMock;
   agentDefaultId?: string;
@@ -268,6 +269,7 @@ function createHarness(params?: {
     forgetLocalBtwRunId,
     hasPendingLocalBtwRuns: params?.hasPendingLocalBtwRuns,
     retirePendingLocalBtwResults,
+    isDynamicCommand: params?.isDynamicCommand,
     consumeCompletedRunForPendingSend: params?.consumeCompletedRunForPendingSend,
     isRunObserved: params?.isRunObserved,
     flushPendingHistoryRefreshIfIdle: params?.flushPendingHistoryRefreshIfIdle,
@@ -357,6 +359,17 @@ describe("tui command handlers", () => {
     expect(addSystem).toHaveBeenCalledWith("view cleared; session history is unchanged");
     expect(sendChat).not.toHaveBeenCalled();
     expect(resetSession).not.toHaveBeenCalled();
+  });
+
+  it("forwards a dynamic command that collides with the local /clear-view name", async () => {
+    const { handleCommand, clearAll, sendChat } = createHarness({
+      isDynamicCommand: (name) => name === "clear-view",
+    });
+
+    await handleCommand("/clear-view");
+
+    expect(clearAll).not.toHaveBeenCalled();
+    expectSendChatFields(sendChat, { message: "/clear-view" });
   });
 
   it.each(clearViewBusyStates)(
