@@ -1545,6 +1545,15 @@ openclaw-session-discussion {
   line-height: 1.45;
 }
 
+.sidebar-file-preview {
+  padding: 20px 18px 24px;
+  overflow: auto;
+}
+
+.sidebar-file-preview__content {
+  overflow-wrap: anywhere;
+}
+
 .sidebar-markdown-reader.sidebar-markdown :where(h1, h2) {
   font-family: var(--md-preview-serif);
   letter-spacing: -0.03em;
