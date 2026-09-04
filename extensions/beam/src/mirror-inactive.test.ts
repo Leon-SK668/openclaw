@@ -133,6 +133,7 @@ describe("Beam mirror inactive completion", () => {
       pluginId: "claude",
       id: "claude",
       label: "Claude",
+      processHomeFallbackAllowed: true,
       list: () => list(),
       read: async ({ threadId }) => ({
         hostId: "gateway:local",
