@@ -242,7 +242,30 @@ struct ExecApprovalPromptLayoutTests {
         #expect(ExecApprovalsPromptPresenter.sanitizedContextValue(" \n\t ") == nil)
     }
 
+    @Test func `panel shows trimmed session context`() throws {
+        let panel = ExecApprovalsPromptPresenter.buildPanel(
+            ExecApprovalPromptRequest(
+                command: "/bin/sh -lc pwd",
+                sessionKey: "  agent:main:telegram:dm:12345  "))
+            onDecision: { _ in })
+        defer { panel.close() }
+
+        let content = try #require(panel.contentView)
+        content.layoutSubtreeIfNeeded()
+        let textValues = self.textValues(in: content)
+        #expect(textValues.contains { $0.contains("Session:") })
+        #expect(textValues.contains { $0.contains("agent:main:telegram:dm:12345") })
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews.flatMap { [$0] + self.descendants(of: $0) }
+    }
+
+    private func textValues(in view: NSView) -> [String] {
+        var values = (view as? NSTextField).map { [$0.stringValue] } ?? []
+        for subview in view.subviews {
+            values.append(contentsOf: self.textValues(in: subview))
+        }
+        return values
     }
 }
