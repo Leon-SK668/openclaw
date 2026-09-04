@@ -148,8 +148,7 @@ async function channelsAddCommandImpl(
       resolveInitialWizardChannelTarget,
       runChannelsAddWizardFlow,
       selectChannelSetupAgentId,
-    } =
-      await import("./add-wizard.js");
+    } = await import("./add-wizard.js");
     const prompter = createClackPrompter();
     if (!isTerminalInteractive()) {
       runtime.error(

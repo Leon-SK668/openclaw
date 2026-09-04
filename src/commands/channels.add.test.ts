@@ -595,7 +595,7 @@ describe("channelsAddCommand", () => {
 
       expect(setupOptions().workspaceDir).toBe("/tmp/ops-workspace");
       expect(channelWizardMocks.prompter.select).toHaveBeenCalledWith(
-        expect.objectContaining({ initialValue: systemAgentId }),
+        expect.objectContaining({ initialValue: "ops" }),
       );
       expect(writtenConfig().bindings).toEqual([
         {
