@@ -284,7 +284,7 @@ export function renderSidebarFile(
       }
       ${markdownFile && controls
         ? html`
-            <div class="settings-segmented" role="group" aria-label=${content.name}>
+            <div class="settings-segmented sidebar-file-view__modes" role="group" aria-label=${content.name}>
               ${(["source", "preview"] as const).map((mode) => {
                 const active = controls.viewMode === mode;
                 return html`
