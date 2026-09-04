@@ -11,11 +11,12 @@ const suite = createControlUiE2eSuite({
 });
 
 const captureUiProof = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1";
-const proofDir = path.resolve(".artifacts/control-ui-e2e/control-ui-debug-active-runs");
 
 suite.define(() => {
   it("reads exact active run IDs back from the Debug overlay", async () => {
+    const proofDir = captureUiProof ? suite.artifactDir : "";
     if (captureUiProof) {
+      // suite.artifactDir is exclusive per retry/process, so fixed capture names stay isolated.
       await mkdir(path.join(proofDir, "video"), { recursive: true });
     }
     await suite.withPage(
