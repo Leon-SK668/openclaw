@@ -241,6 +241,27 @@ describe("web fetch runtime", () => {
     expect(runtimeWebFetch.selectedProviderKeySource).toBe("missing");
   });
 
+  it.each(["", "unknown-provider", "firecrawl"])(
+    "keeps explicit provider %j authoritative over valid runtime metadata",
+    (providerId) => {
+      resolveRuntimeWebFetchProvidersMock.mockReturnValue([createFirecrawlProvider()]);
+
+      const resolved = resolveWebFetchDefinition({
+        config: {},
+        providerId,
+        preferRuntimeProviders: true,
+        runtimeWebFetch: {
+          providerSource: "auto-detect",
+          selectedProvider: "firecrawl",
+          selectedProviderKeySource: "env",
+          diagnostics: [],
+        },
+      });
+
+      expect(resolved?.provider.id ?? null).toBe(providerId === "firecrawl" ? "firecrawl" : null);
+    },
+  );
+
   it("does not replace an unavailable configured runtime provider with auto-detect", () => {
     const provider = createFirecrawlProvider({
       getConfiguredCredentialValue: () => "firecrawl-key",

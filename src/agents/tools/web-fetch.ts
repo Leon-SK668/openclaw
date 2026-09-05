@@ -516,8 +516,6 @@ type WebFetchRuntimeParams = {
   ssrfPolicy?: SsrFPolicy;
   providerCacheKey?: string;
   providerSource?: string;
-  sandboxed: boolean;
-  preferRuntimeProviders: boolean;
   lookupFn?: LookupFn;
   signal?: AbortSignal;
   resolveProviderFallback: () => Promise<WebFetchProviderFallback>;
@@ -527,7 +525,6 @@ type WebFetchPayloadResult = {
   payload: Record<string, unknown>;
   cacheKey: string;
   cacheHit?: boolean;
-  providerId?: string;
 };
 
 function createWebFetchCacheKey(params: {
@@ -725,7 +722,6 @@ async function buildWebFetchPayload(params: {
 async function maybeFetchProviderWebFetchPayload(
   params: WebFetchRuntimeParams & {
     urlToFetch: string;
-    cacheKey: string;
     createCacheKeyForProvider: (
       providerCacheKey: string | undefined,
       responseKind?: "direct" | "provider-fallback",
@@ -742,16 +738,13 @@ async function maybeFetchProviderWebFetchPayload(
   // This prevents stale runtime metadata from aliasing another provider's result.
   const providerCacheKey = normalizeOptionalLowercaseString(providerFallback.provider.id);
   const cacheKey = params.createCacheKeyForProvider(providerCacheKey, "provider-fallback");
-  if (cacheKey !== params.cacheKey) {
-    const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
-    if (cached) {
-      return {
-        payload: { ...cached.value, cached: true },
-        cacheKey,
-        cacheHit: true,
-        providerId: providerCacheKey,
-      };
-    }
+  const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
+  if (cached) {
+    return {
+      payload: { ...cached.value, cached: true },
+      cacheKey,
+      cacheHit: true,
+    };
   }
   let rawPayload: unknown;
   try {
@@ -778,7 +771,6 @@ async function maybeFetchProviderWebFetchPayload(
   return {
     payload,
     cacheKey,
-    providerId: providerCacheKey,
   };
 }
 
@@ -1132,8 +1124,6 @@ export function createWebFetchTool(options?: {
           ...(runtimeWebFetch?.providerSource
             ? { providerSource: runtimeWebFetch.providerSource }
             : {}),
-          sandboxed: options?.sandboxed === true,
-          preferRuntimeProviders,
           lookupFn: options?.lookupFn,
           signal,
           resolveProviderFallback,
