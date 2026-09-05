@@ -256,8 +256,54 @@ struct ExecApprovalPromptLayoutTests {
         #expect(labels.contains { $0.contains("Session: agent:main:telegram:dm:12345") })
     }
 
+    @Test func `visible SwiftUI approval panels render populated and empty session context`() throws {
+        let cases: [(String, String?, String?)] = [
+            ("populated", "  agent:proof:direct:approval  ", "Session: agent:proof:direct:approval"),
+            ("empty", " \n\t ", nil),
+        ]
+        for (name, sessionKey, expectedLabel) in cases {
+            let panel = ExecApprovalsPromptPresenter.buildPanel(
+                ExecApprovalPromptRequest(
+                    command: "/usr/bin/printf proof",
+                    sessionKey: sessionKey),
+                onDecision: { _ in })
+            defer { panel.close() }
+
+            NSApp.activate(ignoringOtherApps: true)
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+            panel.displayIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            #expect(panel.isVisible)
+            #expect(panel.isKeyWindow)
+
+            let content = try #require(panel.contentView)
+            content.layoutSubtreeIfNeeded()
+            let labels = self.descendants(of: content).compactMap { $0.accessibilityLabel() }
+            if let expectedLabel {
+                #expect(labels.contains(expectedLabel))
+            } else {
+                #expect(!labels.contains { $0.contains("Session:") })
+            }
+            try self.writeProofImage(panel: panel, name: name)
+        }
+    }
+
+    private func writeProofImage(panel: NSPanel, name: String) throws {
+        guard let outputDirectory = ProcessInfo.processInfo.environment["OPENCLAW_MACOS_PROOF_DIR"]
+        else { return }
+        let content = try #require(panel.contentView)
+        let bounds = content.bounds
+        let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: bounds))
+        content.cacheDisplay(in: bounds, to: bitmap)
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: outputDirectory, isDirectory: true),
+            withIntermediateDirectories: true)
+        try png.write(to: URL(fileURLWithPath: outputDirectory).appendingPathComponent("approval-\(name).png"))
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews.flatMap { [$0] + self.descendants(of: $0) }
     }
-
 }

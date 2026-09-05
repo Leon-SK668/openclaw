@@ -1,0 +1,71 @@
+name: PR 132503 SwiftUI approval-session proof
+
+on:
+  push:
+    branches:
+      - proof/pr132503-swiftui-20260905
+
+permissions:
+  contents: read
+
+jobs:
+  macos-swiftui-proof:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      ORIGINAL_PR_SHA: 5edf8e53a9759ad5ea5f378ee93ade889b15732f
+      PROOF_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout proof branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PROOF_SHA }}
+          fetch-depth: 2
+
+      - name: Verify proof and unchanged production blobs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PROOF_SHA"
+          git merge-base --is-ancestor "$ORIGINAL_PR_SHA" HEAD
+          test -z "$(git diff --name-only "$ORIGINAL_PR_SHA" -- \
+            apps/macos/Sources apps/shared/OpenClawKit/Sources apps/swabble/Sources)"
+
+      - name: Prepare Apple Mermaid assets
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          node scripts/prepare-apple-mermaid.mjs
+
+      - name: Install Swift tools
+        run: |
+          brew update
+          brew install xcodegen swiftlint
+          brew upgrade swiftformat || brew install swiftformat
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Swift lint and format
+        run: |
+          set -euo pipefail
+          swiftlint lint --config config/swiftlint.yml
+          swiftformat --lint apps/macos/Sources --config config/swiftformat \
+            --exclude '**/OpenClawProtocol,**/HostEnvSecurityPolicy.generated.swift'
+          swiftformat --lint apps/macos/Tests/OpenClawIPCTests/ExecApprovalPromptLayoutTests.swift \
+            --config config/swiftformat
+
+      - name: Capture populated and empty SwiftUI approval panels
+        env:
+          OPENCLAW_MACOS_PROOF_DIR: ${{ runner.temp }}/openclaw-132503-proof
+        run: swift test --package-path apps/macos --filter ExecApprovalPromptLayoutTests
+
+      - name: Upload panel captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-132503-swiftui-approval-panel-${{ github.sha }}
+          path: ${{ runner.temp }}/openclaw-132503-proof
+          if-no-files-found: error
