@@ -762,7 +762,9 @@ describe("channelsAddCommand", () => {
         sourceConfig: config,
         config,
       });
-      channelWizardMocks.prompter.select.mockResolvedValue("helper");
+      channelWizardMocks.prompter.select
+        .mockResolvedValueOnce({ agentId: "helper" })
+        .mockResolvedValueOnce("helper");
       channelWizardMocks.setupChannels.mockImplementationOnce(async (...args: unknown[]) => {
         const options = requireRecord(args[3], "setup options");
         const onSelection = options.onSelection as ((selection: string[]) => void) | undefined;
@@ -788,8 +790,8 @@ describe("channelsAddCommand", () => {
       expect(channelWizardMocks.prompter.select.mock.calls[0]?.[0]).toEqual({
         message: "Set up channels for agent",
         options: [
-          { value: "main", label: "main" },
-          { value: "helper", label: "helper" },
+          { value: { agentId: "main" }, label: "main" },
+          { value: { agentId: "helper" }, label: "helper" },
         ],
       });
       expect(setupOptions().workspaceDir).toBe("/tmp/openclaw-helper-workspace");
@@ -832,7 +834,7 @@ describe("channelsAddCommand", () => {
       throw new Error("Expected agent selection step");
     }
     try {
-      await session.answer(selection.step.id, "missing");
+      await session.answer(selection.step.id, { agentId: "missing" });
       expect(await session.next()).toMatchObject({
         done: true,
         status: "error",
