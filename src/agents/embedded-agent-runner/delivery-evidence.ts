@@ -124,6 +124,19 @@ export function hasAcceptedSessionSpawnEvidence(value: unknown): boolean {
     : false;
 }
 
+export function hasContinuationSessionSpawnEvidence(value: unknown): boolean {
+  return Array.isArray(value)
+    ? value.some((entry) => {
+        const spawn = asOptionalRecord(entry);
+        return (
+          hasNonEmptyString(spawn?.runId) &&
+          hasNonEmptyString(spawn?.childSessionKey) &&
+          (spawn?.expectsCompletionMessage === true || spawn?.inlineDelivery === true)
+        );
+      })
+    : false;
+}
+
 function collectStringValues(value: unknown, output: Set<string>) {
   if (typeof value === "string" && value.trim()) {
     output.add(value.trim());

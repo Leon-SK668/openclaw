@@ -1408,7 +1408,7 @@ async function buildResponsesPayload(
         return buildAssistantEvents(QA_REQUESTER_SETTLE_PREMATURE_FINAL_MARKER);
       }
       if (
-        /If additional action is required, continue the task/i.test(prompt) &&
+        /If additional action is required, continue any remaining in-scope work/i.test(prompt) &&
         scenarioState.requesterSettleSequentialWave === 1 &&
         canCallSessionsSpawn
       ) {

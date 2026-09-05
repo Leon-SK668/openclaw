@@ -5221,7 +5221,50 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       response: {
         result: {
           payloads: [],
-          acceptedSessionSpawns: [{ runId: "run-next", childSessionKey: "agent:main:next" }],
+          acceptedSessionSpawns: [
+            {
+              runId: "run-next",
+              childSessionKey: "agent:main:next",
+              expectsCompletionMessage: true,
+            },
+          ],
+        },
+      },
+      requireVisibleReply: false,
+      requireContinuationProgress: true,
+      expected: deliveredRequesterFinal,
+    },
+    {
+      name: "does not treat a fire-and-forget spawn as requester continuation",
+      response: {
+        result: {
+          payloads: [],
+          acceptedSessionSpawns: [
+            {
+              runId: "run-background",
+              childSessionKey: "agent:main:background",
+              expectsCompletionMessage: false,
+            },
+          ],
+        },
+      },
+      requireVisibleReply: false,
+      requireContinuationProgress: true,
+      expected: missingRequesterFinal,
+    },
+    {
+      name: "accepts inline ACP delivery as requester continuation",
+      response: {
+        result: {
+          payloads: [],
+          acceptedSessionSpawns: [
+            {
+              runId: "run-inline",
+              childSessionKey: "agent:main:acp:inline",
+              expectsCompletionMessage: false,
+              inlineDelivery: true,
+            },
+          ],
         },
       },
       requireVisibleReply: false,

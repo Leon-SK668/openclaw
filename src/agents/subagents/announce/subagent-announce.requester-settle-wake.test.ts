@@ -193,7 +193,9 @@ function expectContinuationFirstWake(call: Record<string, unknown>): void {
   expect(call.requireContinuationProgress).toBe(true);
   const message = String(call.triggerMessage);
   expect(message).toContain("deciding whether the original task is done");
-  expect(message).toContain("If additional action is required, continue the task");
+  expect(message).toContain(
+    "If additional action is required, continue any remaining in-scope work",
+  );
   expect(message).not.toContain("send your consolidated final answer to the user now");
   expect(message).toContain("NO_REPLY");
 }

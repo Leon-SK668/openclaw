@@ -23,7 +23,7 @@ import { normalizeAgentRunTerminalDeliverySnapshot } from "../../agent-run-termi
 import {
   getAgentCommandDeliveryFailure,
   getGatewayAgentResult,
-  hasAcceptedSessionSpawnEvidence,
+  hasContinuationSessionSpawnEvidence,
   hasCommittedOutboundDeliveryEvidence,
   getAutomaticDeliveryEvidence,
 } from "../../embedded-agent-runner/delivery-evidence.js";
@@ -653,7 +653,7 @@ export async function sendSubagentAnnounceDirectly(params: {
       hasFinalMessagingToolDelivery || (shouldDeliverAgentFinal && automaticFinalDelivered);
     const acceptedContinuationSpawn = Boolean(
       directAnnounceResult &&
-      (hasAcceptedSessionSpawnEvidence(directAnnounceResult.acceptedSessionSpawns) ||
+      (hasContinuationSessionSpawnEvidence(directAnnounceResult.acceptedSessionSpawns) ||
         directAnnounceResult.runtimeContinuationStarted === true),
     );
     const deliveredContinuationFinal =
