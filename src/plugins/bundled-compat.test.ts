@@ -130,4 +130,28 @@ describe("withBundledPluginEnablementCompat", () => {
       },
     });
   });
+
+  it("preserves empty model policy arrays through repeated alias normalization", () => {
+    const config = {
+      plugins: {
+        entries: {
+          "GOOGLE-GEMINI-CLI": {
+            subagent: { allowedModels: [] },
+            llm: { allowedModels: [], allowedCompletionModels: [] },
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const first = withBundledPluginEnablementCompat({ config, pluginIds: ["google"] });
+    const second = withBundledPluginEnablementCompat({
+      config: first,
+      pluginIds: ["GOOGLE-GEMINI-CLI"],
+    });
+
+    const entry = second?.plugins?.entries?.google;
+    expect(entry?.subagent?.allowedModels).toEqual([]);
+    expect(entry?.llm?.allowedModels).toEqual([]);
+    expect(entry?.llm?.allowedCompletionModels).toEqual([]);
+  });
 });

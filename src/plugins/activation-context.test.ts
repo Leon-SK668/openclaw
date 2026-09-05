@@ -89,6 +89,30 @@ describe("withActivatedPluginIds", () => {
     });
   });
 
+  it("preserves empty model policy arrays through repeated alias normalization", () => {
+    const config = {
+      plugins: {
+        entries: {
+          "GOOGLE-GEMINI-CLI": {
+            subagent: { allowedModels: [] },
+            llm: { allowedModels: [], allowedCompletionModels: [] },
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const first = withActivatedPluginIds({ config, pluginIds: ["google"] });
+    const second = withActivatedPluginIds({
+      config: first,
+      pluginIds: ["GOOGLE-GEMINI-CLI"],
+    });
+
+    const entry = second?.plugins?.entries?.google;
+    expect(entry?.subagent?.allowedModels).toEqual([]);
+    expect(entry?.llm?.allowedModels).toEqual([]);
+    expect(entry?.llm?.allowedCompletionModels).toEqual([]);
+  });
+
   it("keeps omitted plugin ids outside restrictive allowlists", () => {
     expect(
       withActivatedPluginIds({
