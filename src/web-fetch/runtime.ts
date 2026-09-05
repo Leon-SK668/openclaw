@@ -253,11 +253,9 @@ export function resolveWebFetchDefinition(
   const configuredProviderId = resolveConfiguredWebFetchProviderId({ fetch, providers });
   const explicitProviderId = options?.providerId ?? configuredProviderId;
   const runtimeProviderId = runtimeWebFetch?.selectedProvider;
-  let provider = explicitProviderId
-    ? providers.find((entry) => entry.id === explicitProviderId)
-    : runtimeProviderId
-      ? providers.find((entry) => entry.id === runtimeProviderId)
-      : undefined;
+  // Even an empty explicit override is authoritative; do not execute a different provider.
+  const selectedProviderId = explicitProviderId ?? runtimeProviderId;
+  let provider = providers.find((entry) => entry.id === selectedProviderId);
   let didFallbackFromUnavailableRuntimeProvider = false;
   if (!provider && explicitProviderId === undefined) {
     const runtimeProviderIsConfigured = runtimeWebFetch?.providerSource === "configured";
