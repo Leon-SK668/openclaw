@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import type { deliverSubagentAnnouncement } from "./subagent-announce-delivery.js";
-import type { SubagentAnnounceDeliveryDeps } from "./subagent-announce-delivery.runtime.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import {
   makeSettledChild,
@@ -781,17 +780,22 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
         getRuntimeConfig: () => cfg,
         getRequesterSessionActivity: () => ({ isActive: false }),
         loadRequesterSessionEntry: (canonicalKey) => ({ cfg, canonicalKey, entry: undefined }),
-        dispatchGatewayMethodInProcess: vi.fn<
-          SubagentAnnounceDeliveryDeps["dispatchGatewayMethodInProcess"]
-        >(async (_method, params) => {
-          keys.push(params?.idempotencyKey);
+        dispatchGatewayMethodInProcess: async <T>(
+          _method: string,
+          params: Record<string, unknown>,
+        ): Promise<T> => {
+          keys.push(params.idempotencyKey);
           if (phase === "disconnected") {
             throw new Error("connect ECONNRESET");
           }
-          return phase === "pending"
-            ? { status: "accepted" }
-            : { status: "ok", result: { payloads: [{ text: "Requester work completed." }] } };
-        }),
+          // The fixture models the concrete gateway responses; the generic dispatch contract
+          // leaves the response type to its caller, so this boundary cast is intentionally narrow.
+          return (
+            phase === "pending"
+              ? { status: "accepted" }
+              : { status: "ok", result: { payloads: [{ text: "Requester work completed." }] } }
+          ) as T;
+        },
       });
       deliverSpy.mockImplementation(async (params) => {
         if (phase === "disconnected" && failureKind === "exception") {
