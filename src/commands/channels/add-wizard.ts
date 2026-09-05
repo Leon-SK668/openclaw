@@ -28,6 +28,8 @@ type InitialWizardChannelTarget =
   | { kind: "resolved"; channel: ChannelChoice }
   | { kind: "unresolved"; message: string };
 
+type ChannelSetupAgentChoice = { agentId: string };
+
 function unresolvedInitialWizardChannelTarget(channel: string): InitialWizardChannelTarget {
   return { kind: "unresolved", message: formatUnknownChannelMessage({ channel }) };
 }
@@ -44,11 +46,11 @@ export async function selectChannelSetupAgentId(
       throw error;
     }
   }
-  const selectedAgentId = await prompter.select({
+  const selectedAgent = await prompter.select<ChannelSetupAgentChoice>({
     message: "Set up channels for agent",
-    options: listAgentIds(cfg).map((agentId) => ({ value: agentId, label: agentId })),
+    options: listAgentIds(cfg).map((agentId) => ({ value: { agentId }, label: agentId })),
   });
-  return resolveConfiguredAgentId(cfg, selectedAgentId);
+  return resolveConfiguredAgentId(cfg, selectedAgent.agentId);
 }
 
 /** Resolve omitted, matched, and unmatched channel targets without collapsing caller intent. */
