@@ -48,6 +48,19 @@ async function createPage(context: ApplicationContext): Promise<TestSessionsPage
   return page;
 }
 
+type TestPreferencesPage = TestSessionsPage &
+  Pick<SessionsPagePreferences, "searchQuery"> & {
+    persistPreferences: (changes: Partial<SessionsPagePreferences>) => void;
+  };
+
+async function createPreferencesPage(): Promise<TestPreferencesPage> {
+  const gateway = createGateway({} as GatewayBrowserClient);
+  return (await createRenderedPage(
+    createContext(gateway.gateway, createSessions()),
+    sessionsResult([], 0),
+  )) as TestPreferencesPage;
+}
+
 async function createDeletionPage(rows: GatewaySessionRow[], agentId = "main") {
   let serverRows = rows;
   const deleteRequest = vi.fn(
@@ -98,62 +111,35 @@ afterEach(() => {
 
 describe("sessions page lifecycle", () => {
   it("merges ordered preference updates from two page owners", async () => {
-    const first = await createRenderedPage(
-      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
-    );
-    const second = await createRenderedPage(
-      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
-    );
-    const persist = (page: TestSessionsPage, changes: Partial<SessionsPagePreferences>) =>
-      (
-        page as unknown as {
-          persistPreferences: (value: Partial<SessionsPagePreferences>) => void;
-        }
-      ).persistPreferences(changes);
-
-    persist(first, { activeMinutes: "5" });
-    persist(second, { groupBy: "person" });
+    const first = await createPreferencesPage();
+    const second = await createPreferencesPage();
+    first.persistPreferences({ activeMinutes: "5" });
+    second.persistPreferences({ groupBy: "person" });
 
     expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
   });
 
   it("does not replay a failed old field on a later write", async () => {
-    const first = await createRenderedPage(
-      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
-    );
-    const second = await createRenderedPage(
-      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
-    );
-    const persist = (page: TestSessionsPage, changes: Partial<SessionsPagePreferences>) =>
-      (
-        page as unknown as {
-          persistPreferences: (value: Partial<SessionsPagePreferences>) => void;
-        }
-      ).persistPreferences(changes);
-
+    const first = await createPreferencesPage();
+    const second = await createPreferencesPage();
     const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
       throw new Error("storage unavailable");
     });
-    persist(first, { groupBy: "agent" });
+    first.persistPreferences({ groupBy: "agent" });
     setItem.mockRestore();
-    persist(second, { groupBy: "person" });
-    persist(first, { activeMinutes: "5" });
+    second.persistPreferences({ groupBy: "person" });
+    first.persistPreferences({ activeMinutes: "5" });
 
     expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
   });
 
   it("keeps a failed preference write through a route update", async () => {
-    const page = await createRenderedPage(
-      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
-    );
-    const persist = (
-      page as unknown as { persistPreferences: (value: Record<string, unknown>) => void }
-    ).persistPreferences;
+    const page = await createPreferencesPage();
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("storage unavailable");
     });
     page.searchQuery = "keep me";
-    persist.call(page, { searchQuery: "keep me" });
+    page.persistPreferences({ searchQuery: "keep me" });
 
     page.routeData = { expandedSessionKey: null, statusFilter: "archived" };
     await page.updateComplete;
@@ -162,15 +148,9 @@ describe("sessions page lifecycle", () => {
   });
 
   it("restores preferences after leaving a direct-session route", async () => {
-    const page = await createRenderedPage(
-      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
-    );
+    const page = await createPreferencesPage();
     page.searchQuery = "before deep link";
-    (
-      page as unknown as {
-        persistPreferences: (value: Partial<SessionsPagePreferences>) => void;
-      }
-    ).persistPreferences({ searchQuery: "before deep link" });
+    page.persistPreferences({ searchQuery: "before deep link" });
     page.routeData = {
       expandedSessionKey: "agent:main:direct",
       statusFilter: "active",
