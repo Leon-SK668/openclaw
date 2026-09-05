@@ -487,9 +487,17 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
         resolveGatewayContext,
       });
     } catch (error) {
-      // A transport exception can arrive after gateway admission. Replay the
-      // same persisted idempotency key; only a known no-turn result may rotate it.
-      const lastError = error instanceof Error ? error.message : String(error);
+      delivery = {
+        delivered: false,
+        path: "direct",
+        disposition: "retryable",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    // Direct delivery normalizes RPC failures to retryable results. Both forms
+    // can follow admission, so only a known no-turn result may rotate the key.
+    if (delivery.disposition === "retryable") {
+      const lastError = delivery.error ?? "requester settle transport failed";
       const replayCount = (state.replayCount ?? 0) + 1;
       const retryDelayMs = REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS[replayCount - 1];
       if (

@@ -520,7 +520,7 @@ export async function sendSubagentAnnounceDirectly(params: {
       hasMessagingToolDeliveryToSource(directAnnounceResult, deliveryTarget),
     );
     const requiresAutomaticFinalReceipt =
-      shouldDeliverAgentFinal && (params.expectsCompletionMessage || params.requireVisibleReply);
+      shouldDeliverAgentFinal && (params.expectsCompletionMessage || requireVisibleTurnOutcome);
     const automaticEvidence = getAutomaticDeliveryEvidence(directAnnounceResult ?? {});
     const directDeliveryFailure =
       (shouldDeliverAgentFinal || requiresMessageToolDelivery) && directAnnounceResult
@@ -651,24 +651,9 @@ export async function sendSubagentAnnounceDirectly(params: {
     }
     const requesterVisibleFinalDelivered =
       hasFinalMessagingToolDelivery || (shouldDeliverAgentFinal && automaticFinalDelivered);
-    const continuationProgressDelivered =
-      requesterVisibleFinalDelivered ||
-      (!shouldDeliverAgentFinal &&
-        !requiresMessageToolDelivery &&
-        hasVisibleNonSilentGatewayPayload) ||
-      directAnnounceResult?.runtimeContinuationStarted === true ||
-      hasContinuationSessionSpawnEvidence(directAnnounceResult?.acceptedSessionSpawns);
-    if (params.requireContinuationProgress && !continuationProgressDelivered) {
-      return {
-        delivered: false,
-        path: "direct",
-        reason: "visible_reply_missing",
-        error: "continuation turn did not start another subagent or deliver a visible final",
-      };
-    }
     const hasVisibleCompletionReply =
       requesterVisibleFinalDelivered ||
-      (!shouldDeliverAgentFinal && !params.requireVisibleReply && hasMessagingToolDelivery) ||
+      (!shouldDeliverAgentFinal && !requireVisibleTurnOutcome && hasMessagingToolDelivery) ||
       // Nested requesters and internal sessions observe the final in their transcript.
       // Unresolved external origins still require delivery evidence.
       (!requiresMessageToolDelivery &&
@@ -680,6 +665,20 @@ export async function sendSubagentAnnounceDirectly(params: {
               ? normalizeMessageChannel(origin.channel) === INTERNAL_MESSAGE_CHANNEL
               : !origin?.to,
           )));
+    // Continuations share final-delivery routing and suppression checks. Only
+    // an accepted successor that owns completion can replace the visible final.
+    const continuationProgressDelivered =
+      hasVisibleCompletionReply ||
+      directAnnounceResult?.runtimeContinuationStarted === true ||
+      hasContinuationSessionSpawnEvidence(directAnnounceResult?.acceptedSessionSpawns);
+    if (params.requireContinuationProgress && !continuationProgressDelivered) {
+      return {
+        delivered: false,
+        path: "direct",
+        reason: "visible_reply_missing",
+        error: "continuation turn did not start another subagent or deliver a visible final",
+      };
+    }
     const silentCompletionOk = hasIntentionalSilentCompletionReply && !isSubagentCompletion;
     if (
       !hasVisibleCompletionReply &&

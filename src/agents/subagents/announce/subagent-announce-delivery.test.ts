@@ -5446,12 +5446,26 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
   ];
 
   it.each(
-    requesterSettleCases.flatMap((testCase) =>
-      (testCase.routes ?? [externalRequesterSettleRoute]).map((route) => ({
-        testCase,
-        route,
-      })),
-    ),
+    requesterSettleCases
+      .flatMap((testCase) =>
+        testCase.requireVisibleReply
+          ? [
+              testCase,
+              {
+                ...testCase,
+                name: `continuation: ${testCase.name}`,
+                requireVisibleReply: false,
+                requireContinuationProgress: true,
+              },
+            ]
+          : [testCase],
+      )
+      .flatMap((testCase) =>
+        (testCase.routes ?? [externalRequesterSettleRoute]).map((route) => ({
+          testCase,
+          route,
+        })),
+      ),
   )("$route.name: $testCase.name", async ({ testCase, route }) => {
     const { response, requireVisibleReply, requireContinuationProgress, expected } = testCase;
     const callGateway = createGatewayMock(response);

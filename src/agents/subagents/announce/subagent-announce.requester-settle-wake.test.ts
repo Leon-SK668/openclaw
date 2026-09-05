@@ -4,6 +4,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
+import type { deliverSubagentAnnouncement } from "./subagent-announce-delivery.js";
+import type { SubagentAnnounceDeliveryDeps } from "./subagent-announce-delivery.runtime.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import {
   makeSettledChild,
@@ -14,7 +16,9 @@ import {
 } from "./subagent-announce.requester-settle-wake.test-support.js";
 
 const deliverSpy = vi.fn(
-  async (_params: Record<string, unknown>): Promise<SubagentAnnounceDeliveryResult> => ({
+  async (
+    _params: Parameters<typeof deliverSubagentAnnouncement>[0],
+  ): Promise<SubagentAnnounceDeliveryResult> => ({
     delivered: true,
     path: "direct",
   }),
@@ -58,7 +62,8 @@ vi.mock("./subagent-announce.runtime.js", () => ({
 }));
 
 vi.mock("./subagent-announce-delivery.js", () => ({
-  deliverSubagentAnnouncement: (params: Record<string, unknown>) => deliverSpy(params),
+  deliverSubagentAnnouncement: (params: Parameters<typeof deliverSubagentAnnouncement>[0]) =>
+    deliverSpy(params),
   loadRequesterSessionEntry: (sessionKey: string) => ({
     entry: sessionStore[sessionKey],
     canonicalKey: sessionKey,
@@ -755,81 +760,83 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
     }
   });
 
-  it("does not charge pending polls to the ambiguous transport replay budget", async () => {
-    const firstChild = makeSettledChild({ runId: "run-a" });
-    const secondChild = makeSettledChild({ runId: "run-b" });
-    const children = [firstChild, secondChild];
-    const pending = {
-      delivered: false,
-      path: "direct" as const,
-      disposition: "agent_run_pending" as const,
-    };
-    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue(children);
-    deliverSpy
-      .mockResolvedValueOnce(pending)
-      .mockResolvedValueOnce(pending)
-      .mockRejectedValueOnce(new Error("connection lost after admission"));
-    const wake = () =>
-      maybeWakeRequesterAfterAllChildrenSettled(wakeParams({ settledEntry: secondChild }));
-
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    try {
-      for (let poll = 0; poll < 2; poll += 1) {
-        expect(await wake()).toBe(false);
+  it.each(
+    [0, 2].flatMap((pendingPolls) =>
+      ["exception", "RPC result"].map((failureKind) => ({ pendingPolls, failureKind })),
+    ),
+  )(
+    "keeps the admitted key after $pendingPolls polls and $failureKind",
+    async ({ failureKind, pendingPolls }) => {
+      const actual = await vi.importActual<typeof import("./subagent-announce-delivery.js")>(
+        "./subagent-announce-delivery.js",
+      );
+      const { setSubagentAnnounceDeliveryDepsForTest } =
+        await import("./subagent-announce-delivery.runtime.js");
+      const child = makeYieldedChild();
+      registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([child]);
+      const keys: unknown[] = [];
+      let phase: "pending" | "disconnected" | "completed" = "pending";
+      const cfg = { session: { mainKey: "main", scope: "per-sender" as const } };
+      setSubagentAnnounceDeliveryDepsForTest({
+        getRuntimeConfig: () => cfg,
+        getRequesterSessionActivity: () => ({ isActive: false }),
+        loadRequesterSessionEntry: (canonicalKey) => ({ cfg, canonicalKey, entry: undefined }),
+        dispatchGatewayMethodInProcess: vi.fn<
+          SubagentAnnounceDeliveryDeps["dispatchGatewayMethodInProcess"]
+        >(async (_method, params) => {
+          keys.push(params?.idempotencyKey);
+          if (phase === "disconnected") {
+            throw new Error("connect ECONNRESET");
+          }
+          return phase === "pending"
+            ? { status: "accepted" }
+            : { status: "ok", result: { payloads: [{ text: "Requester work completed." }] } };
+        }),
+      });
+      deliverSpy.mockImplementation(async (params) => {
+        if (phase === "disconnected" && failureKind === "exception") {
+          throw new Error("connect ECONNRESET");
+        }
+        return await actual.deliverSubagentAnnouncement(params);
+      });
+      const wake = () =>
+        maybeWakeRequesterAfterAllChildrenSettled(wakeParams({ settledEntry: child }));
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      try {
+        for (let poll = 0; poll < pendingPolls; poll += 1) {
+          expect(await wake()).toBe(false);
+          await expect(deliverSpy.mock.results.at(-1)?.value).resolves.toMatchObject({
+            disposition: "agent_run_pending",
+          });
+          await vi.advanceTimersByTimeAsync(30_000);
+        }
+        phase = "disconnected";
+        const failedPoll = wake();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(await failedPoll).toBe(false);
+        if (failureKind === "RPC result") {
+          await expect(deliverSpy.mock.results.at(-1)?.value).resolves.toMatchObject({
+            disposition: "retryable",
+          });
+        }
+        expect(child.requesterSettleWake).toMatchObject({
+          status: "dispatching",
+          attemptCount: 1,
+          replayCount: 1,
+          lastError: "connect ECONNRESET",
+        });
         await vi.advanceTimersByTimeAsync(30_000);
+        phase = "completed";
+        expect(await wake()).toBe(true);
+        expect(new Set(keys)).toEqual(new Set([requesterSettleKey("run-b:yield-1")]));
+        expect(completeBatchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        setSubagentAnnounceDeliveryDepsForTest();
+        vi.useRealTimers();
       }
-      expect(await wake()).toBe(false);
-      expect(firstChild.requesterSettleWake).toMatchObject({
-        status: "dispatching",
-        attemptCount: 1,
-        replayCount: 1,
-        nextAttemptAt: 90_000,
-        lastError: "connection lost after admission",
-      });
-
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(await wake()).toBe(true);
-      const keys = deliverSpy.mock.calls.map(([arg]) => arg.directIdempotencyKey);
-      expect(new Set(keys)).toEqual(new Set([requesterSettleKey("run-a,run-b")]));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("replays an ambiguous transport failure with the same idempotency key", async () => {
-    const firstChild = makeSettledChild({ runId: "run-a" });
-    const secondChild = makeSettledChild({ runId: "run-b" });
-    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([firstChild, secondChild]);
-    deliverSpy.mockRejectedValueOnce(new Error("connection lost after admission"));
-
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    try {
-      expect(
-        await maybeWakeRequesterAfterAllChildrenSettled(wakeParams({ settledEntry: secondChild })),
-      ).toBe(false);
-      expect(firstChild.requesterSettleWake).toMatchObject({
-        status: "dispatching",
-        attemptCount: 1,
-        replayCount: 1,
-        nextAttemptAt: 30_000,
-        lastError: "connection lost after admission",
-      });
-
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(
-        await maybeWakeRequesterAfterAllChildrenSettled(wakeParams({ settledEntry: secondChild })),
-      ).toBe(true);
-      expect(deliverSpy).toHaveBeenCalledTimes(2);
-      expect(deliverSpy.mock.calls.map(([arg]) => arg.directIdempotencyKey)).toEqual([
-        requesterSettleKey("run-a,run-b"),
-        requesterSettleKey("run-a,run-b"),
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+    },
+  );
 
   it("defers a retry when the requester spawned another active descendant", async () => {
     const firstChild = makeSettledChild({ runId: "run-a" });
@@ -894,21 +901,14 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
       makeSettledChild({ runId: "run-a" }),
       makeSettledChild({ runId: "run-b" }),
     ]);
-    deliverSpy.mockResolvedValueOnce({
-      delivered: false,
-      path: "direct",
-      disposition: "ambiguous",
-    });
+    const failure = { delivered: false, path: "direct", disposition: "ambiguous" } as const;
+    deliverSpy.mockResolvedValueOnce(failure);
 
     const woke = await maybeWakeRequesterAfterAllChildrenSettled(wakeParams());
 
     expect(woke).toBe(false);
     expect(deliverSpy).toHaveBeenCalledTimes(1);
-    expect(completeBatchSpy).toHaveBeenLastCalledWith(["run-a", "run-b"], undefined, {
-      delivered: false,
-      path: "direct",
-      disposition: "ambiguous",
-    });
+    expect(completeBatchSpy).toHaveBeenLastCalledWith(["run-a", "run-b"], undefined, failure);
   });
 
   it("does not consume retry budget when aborted before dispatch", async () => {
