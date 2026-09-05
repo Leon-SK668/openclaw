@@ -127,15 +127,18 @@ final class ChatComposerUITextView: UITextView {
         _ keyCode: UIKeyboardHIDUsage,
         modifierFlags: UIKeyModifierFlags) -> Bool
     {
+        let commandModifiers: UIKeyModifierFlags = [.shift, .control, .alternate, .command]
+        let activeModifiers = modifierFlags.intersection(commandModifiers)
         if keyCode == .keyboardReturnOrEnter,
-           modifierFlags.isEmpty || modifierFlags == [.command]
+           activeModifiers.isEmpty || activeModifiers == .command
         {
+            // Return confirms provisional IME text before it can submit a draft.
+            guard self.markedTextRange == nil else { return false }
             self.onSend?()
             return true
         }
 
-        let commandModifiers: UIKeyModifierFlags = [.shift, .control, .alternate, .command]
-        guard modifierFlags.isDisjoint(with: commandModifiers) else { return false }
+        guard activeModifiers.isEmpty else { return false }
         switch keyCode {
         case .keyboardUpArrow:
             return self.onHistoryUp?(self.caretOnFirstLine) == true

@@ -4948,6 +4948,7 @@ jobs:
             -only-testing:OpenClawTests/NotificationServingPreferenceTests \
             -only-testing:OpenClawTests/RootTabsSourceGuardTests \
             -only-testing:OpenClawTests/TraceHeadingVisualProofTests \
+            -only-testing:OpenClawTests/ChatComposerTextViewIOSTests \
             test
           xcodebuild \
             -project apps/ios/OpenClaw.xcodeproj \
@@ -4957,6 +4958,9 @@ jobs:
             -resultBundlePath apps/ios/build/LifecycleTestResults/OpenClawWatchDeliveryUITests.xcresult \
             -parallel-testing-enabled NO \
             -only-testing:OpenClawUITests/OpenClawSnapshotUITests/testWatchMessageDeliveryIsReachableFromSettings \
+            -only-testing:OpenClawUITests/OpenClawSnapshotUITests/testChatComposerReturnInsertsNewlineWithoutSending \
+            -only-testing:OpenClawUITests/OpenClawSnapshotUITests/testChatComposerHardwareReturnSendsAndShiftReturnKeepsDraft \
+            -only-testing:OpenClawUITests/OpenClawSnapshotUITests/testChatComposerHardwareReturnPreservesDraftDuringActiveRun \
             test
 
       - name: Run focused Apple Watch operation simulator tests
