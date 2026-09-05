@@ -21,6 +21,8 @@ import type {
   SessionDeleteOutcome,
   SessionDeleteTarget,
 } from "../../lib/sessions/session-capability.ts";
+import { loadSessionsPagePreferences } from "./page-state.ts";
+import type { SessionsPagePreferences } from "./page-state.ts";
 import {
   createContext,
   createGateway,
@@ -89,11 +91,99 @@ async function createDeletionPage(rows: GatewaySessionRow[], agentId = "main") {
 
 afterEach(() => {
   document.body.replaceChildren();
+  localStorage.clear();
   vi.mocked(showConfirmDialog).mockReset();
   vi.restoreAllMocks();
 });
 
 describe("sessions page lifecycle", () => {
+  it("merges ordered preference updates from two page owners", async () => {
+    const first = await createRenderedPage(
+      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
+    );
+    const second = await createRenderedPage(
+      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
+    );
+    const persist = (page: TestSessionsPage, changes: Partial<SessionsPagePreferences>) =>
+      (
+        page as unknown as {
+          persistPreferences: (value: Partial<SessionsPagePreferences>) => void;
+        }
+      ).persistPreferences(changes);
+
+    persist(first, { activeMinutes: "5" });
+    persist(second, { groupBy: "person" });
+
+    expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
+  });
+
+  it("does not replay a failed old field on a later write", async () => {
+    const first = await createRenderedPage(
+      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
+    );
+    const second = await createRenderedPage(
+      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
+    );
+    const persist = (page: TestSessionsPage, changes: Partial<SessionsPagePreferences>) =>
+      (
+        page as unknown as {
+          persistPreferences: (value: Partial<SessionsPagePreferences>) => void;
+        }
+      ).persistPreferences(changes);
+
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new Error("storage unavailable");
+    });
+    persist(first, { groupBy: "agent" });
+    setItem.mockRestore();
+    persist(second, { groupBy: "person" });
+    persist(first, { activeMinutes: "5" });
+
+    expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
+  });
+
+  it("keeps a failed preference write through a route update", async () => {
+    const page = await createRenderedPage(
+      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
+    );
+    const persist = (
+      page as unknown as { persistPreferences: (value: Record<string, unknown>) => void }
+    ).persistPreferences;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    page.searchQuery = "keep me";
+    persist.call(page, { searchQuery: "keep me" });
+
+    page.routeData = { expandedSessionKey: null, statusFilter: "archived" };
+    await page.updateComplete;
+
+    expect(page.searchQuery).toBe("keep me");
+  });
+
+  it("restores preferences after leaving a direct-session route", async () => {
+    const page = await createRenderedPage(
+      createContext(createGateway({} as GatewayBrowserClient).gateway, createSessions()),
+    );
+    page.searchQuery = "before deep link";
+    (
+      page as unknown as {
+        persistPreferences: (value: Partial<SessionsPagePreferences>) => void;
+      }
+    ).persistPreferences({ searchQuery: "before deep link" });
+    page.routeData = {
+      expandedSessionKey: "agent:main:direct",
+      statusFilter: "active",
+    };
+    await page.updateComplete;
+    expect(page.searchQuery).toBe("");
+
+    page.routeData = { expandedSessionKey: null, statusFilter: "active" };
+    await page.updateComplete;
+
+    expect(page.searchQuery).toBe("before deep link");
+  });
+
   it("switches between Active and Archived with the route parameter", async () => {
     const { gateway } = createGateway({} as GatewayBrowserClient);
     const context = createContext(gateway, createSessions());

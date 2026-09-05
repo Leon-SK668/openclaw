@@ -82,7 +82,7 @@ import {
   type SessionsSortDirection,
 } from "./page-state.ts";
 import { sessionsPageListQuery, type SessionsRouteData } from "./route.ts";
-import { renderSessions, type SessionsProps, type TranscriptSearchState } from "./view.ts";
+import { renderSessions, type SessionsProps } from "./view.ts";
 
 const SESSIONS_DOCS_URL = "https://docs.openclaw.ai/concepts/session";
 const SESSION_SEARCH_DEBOUNCE_MS = 200;
@@ -116,7 +116,7 @@ class SessionsPage extends OpenClawLightDomElement {
   @property({ attribute: false }) routeData?: SessionsRouteData;
 
   private readonly initialPreferences = loadSessionsPagePreferences();
-  private persistedPreferences = this.initialPreferences;
+  private preferenceSnapshot = this.initialPreferences;
   @state() private result: SessionsListResult | null = null;
   @state() private loading = false;
   @state() private error: string | null = null;
@@ -128,7 +128,6 @@ class SessionsPage extends OpenClawLightDomElement {
   @state() private searchQuery = this.initialPreferences.searchQuery;
   @state() private transcriptSearchQuery = "";
   @state() private submittedTranscriptSearchQuery = "";
-  @state() private transcriptSearch: TranscriptSearchState = { status: "idle" };
   @state() private sortColumn: SessionsSortColumn = this.initialPreferences.sortColumn;
   @state() private sortDir: SessionsSortDirection = this.initialPreferences.sortDir;
   @state() private groupBy: SessionsGroupBy = this.initialPreferences.groupBy;
@@ -400,6 +399,7 @@ class SessionsPage extends OpenClawLightDomElement {
     if (!data || !context) {
       return;
     }
+    const leavingDeepLink = this.appliedRouteData?.expandedSessionKey && !data.expandedSessionKey;
     if (data !== this.appliedRouteData) {
       this.appliedRouteData = data;
       this.routeDataEnabled = true;
@@ -417,7 +417,9 @@ class SessionsPage extends OpenClawLightDomElement {
       this.page = 0;
       this.selectedKeys = new Set();
     } else {
-      this.applyStoredPreferences();
+      if (leavingDeepLink) {
+        this.restorePreferenceSnapshot();
+      }
       // An explicit route status owns this visit without overwriting the saved default.
       this.statusFilter = data.statusFilter;
     }
@@ -970,23 +972,23 @@ class SessionsPage extends OpenClawLightDomElement {
     this.persistPreferences({ groupBy: mode });
   }
 
-  private applyStoredPreferences() {
-    const preferences = loadSessionsPagePreferences();
-    this.persistedPreferences = preferences;
-    this.activeMinutes = preferences.activeMinutes;
-    this.limit = preferences.limit;
-    this.includeGlobal = preferences.includeGlobal;
-    this.includeUnknown = preferences.includeUnknown;
-    this.searchQuery = preferences.searchQuery;
-    this.sortColumn = preferences.sortColumn;
-    this.sortDir = preferences.sortDir;
-    this.groupBy = preferences.groupBy;
-    this.pageSize = preferences.pageSize;
+  private persistPreferences(changes: Partial<SessionsPagePreferences>) {
+    this.preferenceSnapshot = { ...this.preferenceSnapshot, ...changes };
+    saveSessionsPagePreferences(changes);
   }
 
-  private persistPreferences(changes: Partial<SessionsPagePreferences>) {
-    this.persistedPreferences = { ...this.persistedPreferences, ...changes };
-    saveSessionsPagePreferences(this.persistedPreferences);
+  private restorePreferenceSnapshot() {
+    // Deep-link filters are temporary; restore the in-memory choices without
+    // writing a stale whole-record snapshot over another page's changes.
+    this.activeMinutes = this.preferenceSnapshot.activeMinutes;
+    this.limit = this.preferenceSnapshot.limit;
+    this.includeGlobal = this.preferenceSnapshot.includeGlobal;
+    this.includeUnknown = this.preferenceSnapshot.includeUnknown;
+    this.searchQuery = this.preferenceSnapshot.searchQuery;
+    this.sortColumn = this.preferenceSnapshot.sortColumn;
+    this.sortDir = this.preferenceSnapshot.sortDir;
+    this.groupBy = this.preferenceSnapshot.groupBy;
+    this.pageSize = this.preferenceSnapshot.pageSize;
   }
 
   private async rememberCustomGroup(
