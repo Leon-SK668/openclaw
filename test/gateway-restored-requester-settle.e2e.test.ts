@@ -1,11 +1,20 @@
 // E2E: the shipped Gateway process bounds requester wakes restored from SQLite.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeSubagentSessionEntry } from "../src/agents/subagents/registry/subagent-registry.persistence.test-support.js";
-import { saveSubagentRegistryToSqlite } from "../src/agents/subagents/registry/subagent-registry.store.sqlite.js";
+import {
+  loadSubagentRegistryFromSqlite,
+  saveSubagentRegistryToSqlite,
+} from "../src/agents/subagents/registry/subagent-registry.store.sqlite.js";
 import type { SubagentRunRecord } from "../src/agents/subagents/registry/subagent-registry.types.js";
+import {
+  listSessionEntriesCore,
+  loadTranscriptEvents,
+} from "../src/config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
+import { connectGatewayClient, disconnectGatewayClient } from "../src/gateway/test-helpers.e2e.js";
 import type { Deferred } from "../src/shared/deferred.js";
 import { closeOpenClawStateDatabaseForTest } from "../src/state/openclaw-state-db.js";
 import { writeOpenAiResponsesSse } from "./helpers/openai-responses-sse.js";
@@ -134,6 +143,162 @@ describe("Gateway restored requester settlement", () => {
       expect(modelServer.peakRestored(), instance.logs()).toBe(2);
       modelServer.releaseAll();
       await expect(probe).resolves.toMatchObject({ code: 0 });
+    },
+  );
+
+  it(
+    "replays one admitted batch after restart and suppresses duplicate restored rows",
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const modelServer = await startHeldModelServer();
+      modelServers.push(modelServer);
+      const instance = await createOpenClawTestInstance({
+        name: "gateway-restored-requester-settle-dedup",
+        config: createTestConfig(modelServer.url),
+        env: {
+          OPENCLAW_SKIP_PROVIDERS: undefined,
+          OPENCLAW_TEST_MINIMAL_GATEWAY: undefined,
+        },
+      });
+      instances.push(instance);
+
+      const requesterSessionKey = "agent:main:gateway-restored-dedup-requester";
+      const batchRunIds = ["run-gateway-restored-dedup-a", "run-gateway-restored-dedup-b"];
+      instance.state.applyEnv();
+      try {
+        const endedAt = Date.now();
+        const restoredRuns = batchRunIds.map((runId, index): SubagentRunRecord => ({
+          runId,
+          childSessionKey: `agent:main:subagent:${runId}`,
+          requesterSessionKey,
+          requesterDisplayKey: "gateway-restored-dedup-requester",
+          task: "resume one admitted requester wake after a Gateway restart",
+          cleanup: "keep",
+          createdAt: endedAt - 1_000 + index,
+          endedReason: "subagent-complete",
+          execution: {
+            status: "terminal",
+            startedAt: endedAt - 500,
+            endedAt,
+            outcome: { status: "ok" },
+          },
+          expectsCompletionMessage: true,
+          completion: { required: true, resultText: `result ${index}`, capturedAt: endedAt },
+          delivery: { status: "delivered", deliveredAt: endedAt },
+          cleanupHandled: true,
+          cleanupCompletedAt: endedAt,
+          requesterSettleWake: {
+            status: "dispatching",
+            attemptCount: 1,
+            batchRunIds,
+            requesterYieldBatch: true,
+            afterRequesterYield: true,
+            rearmGeneration: 1,
+          },
+        }));
+        saveSubagentRegistryToSqlite(new Map(restoredRuns.map((entry) => [entry.runId, entry])));
+        await writeSubagentSessionEntry({
+          stateDir: instance.stateDir,
+          agentId: "main",
+          sessionKey: requesterSessionKey,
+          sessionId: "gateway-restored-dedup-requester",
+          defaultSessionId: "gateway-restored-dedup-requester",
+        });
+        for (const runId of batchRunIds) {
+          await writeSubagentSessionEntry({
+            stateDir: instance.stateDir,
+            agentId: "main",
+            sessionKey: `agent:main:subagent:${runId}`,
+            sessionId: runId,
+            defaultSessionId: runId,
+          });
+        }
+      } finally {
+        closeOpenClawStateDatabaseForTest();
+      }
+
+      await instance.startGateway();
+      instance.state.applyEnv();
+      await vi.waitFor(
+        () => expect(modelServer.countRequestsContaining(RESTORED_WAKE_MARKER)).toBe(1),
+        { interval: 20, timeout: 30_000 },
+      );
+      modelServer.releaseAll();
+
+      await vi.waitFor(
+        () => {
+          const registry = loadSubagentRegistryFromSqlite();
+          expect(
+            batchRunIds.every((runId) => {
+              const entry = registry.get(runId);
+              expect(entry, instance.logs()).toBeDefined();
+              return entry?.requesterSettleWake === undefined;
+            }),
+            instance.logs(),
+          ).toBe(true);
+        },
+        { interval: 20, timeout: 30_000 },
+      );
+
+      const storePath = path.join(instance.state.sessionsDir("main"), "sessions.json");
+      const sessionEntry = listSessionEntriesCore({ agentId: "main", storePath }).find(
+        (entry) => entry.sessionKey === requesterSessionKey,
+      );
+      expect(sessionEntry, instance.logs()).toMatchObject({
+        entry: { sessionId: "gateway-restored-dedup-requester" },
+      });
+      const transcript = await loadTranscriptEvents({
+        agentId: "main",
+        sessionKey: requesterSessionKey,
+        sessionId: "gateway-restored-dedup-requester",
+        storePath,
+      });
+      expect(
+        transcript.filter((event) => JSON.stringify(event).includes("restored requester response")),
+        instance.logs(),
+      ).toHaveLength(1);
+
+      await instance.stopGateway();
+      await instance.startGateway();
+      const client = await connectGatewayClient({
+        url: instance.url,
+        token: instance.gatewayToken,
+        role: "operator",
+        scopes: ["operator.read"],
+      });
+      await client.request("health", {});
+      // Keep the restarted Gateway alive across the asynchronous recovery window;
+      // health RPCs prove the control plane remains live while late replay would show up.
+      for (let index = 0; index < 20; index += 1) {
+        expect(modelServer.countRequestsContaining(RESTORED_WAKE_MARKER), instance.logs()).toBe(1);
+        await client.request("health", {});
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      await disconnectGatewayClient(client);
+      expect(
+        batchRunIds.every((runId) => {
+          const entry = loadSubagentRegistryFromSqlite().get(runId);
+          expect(entry, instance.logs()).toBeDefined();
+          return entry?.requesterSettleWake === undefined;
+        }),
+        instance.logs(),
+      ).toBe(true);
+      const recoveredTranscript = await loadTranscriptEvents({
+        agentId: "main",
+        sessionKey: requesterSessionKey,
+        sessionId: "gateway-restored-dedup-requester",
+        storePath,
+      });
+      expect(
+        recoveredTranscript.filter((event) =>
+          JSON.stringify(event).includes("restored requester response"),
+        ),
+        instance.logs(),
+      ).toHaveLength(1);
+
+      await instance.stopGateway();
+      closeOpenClawStateDatabaseForTest();
+      await instance.state.restoreEnv();
     },
   );
 });
