@@ -110,6 +110,19 @@ final class ChatComposerUITextView: UITextView {
     var onHistoryUp: ((Bool) -> Bool)?
     var onHistoryDown: (() -> Bool)?
 
+    override var keyCommands: [UIKeyCommand]? {
+        let inheritedCommands = super.keyCommands ?? []
+        guard self.markedTextRange == nil else { return inheritedCommands }
+        // Priority keeps hardware Return from being consumed as text input; omitting these
+        // commands during IME composition lets UIKit confirm marked text normally.
+        return inheritedCommands + [
+            self.makeSendKeyCommand(modifierFlags: []),
+            self.makeSendKeyCommand(modifierFlags: .command),
+            self.makeSendKeyCommand(modifierFlags: .numericPad),
+            self.makeSendKeyCommand(modifierFlags: [.command, .numericPad]),
+        ]
+    }
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var unhandledPresses = presses
         for press in presses {
@@ -129,15 +142,6 @@ final class ChatComposerUITextView: UITextView {
     {
         let commandModifiers: UIKeyModifierFlags = [.shift, .control, .alternate, .command]
         let activeModifiers = modifierFlags.intersection(commandModifiers)
-        if keyCode == .keyboardReturnOrEnter,
-           activeModifiers.isEmpty || activeModifiers == .command
-        {
-            // Return confirms provisional IME text before it can submit a draft.
-            guard self.markedTextRange == nil else { return false }
-            self.onSend?()
-            return true
-        }
-
         guard activeModifiers.isEmpty else { return false }
         switch keyCode {
         case .keyboardUpArrow:
@@ -147,6 +151,28 @@ final class ChatComposerUITextView: UITextView {
         default:
             return false
         }
+    }
+
+    @objc
+    func handleSendKeyCommand(_: UIKeyCommand) {
+        guard self.markedTextRange == nil else { return }
+        self.onSend?()
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(self.handleSendKeyCommand(_:)) {
+            return self.markedTextRange == nil
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    private func makeSendKeyCommand(modifierFlags: UIKeyModifierFlags) -> UIKeyCommand {
+        let command = UIKeyCommand(
+            input: "\r",
+            modifierFlags: modifierFlags,
+            action: #selector(self.handleSendKeyCommand(_:)))
+        command.wantsPriorityOverSystemBehavior = true
+        return command
     }
 
     private var caretOnFirstLine: Bool {

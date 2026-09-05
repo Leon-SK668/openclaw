@@ -62,38 +62,58 @@ struct ChatComposerTextViewIOSTests {
         #expect(textView.handleHardwareKey(.keyboardUpArrow, modifierFlags: .alphaShift))
     }
 
-    @Test func physicalReturnKeysSendOnlyForBareAndCommandModifiers() {
+    @Test func registeredReturnCommandsSendOnlyForBareAndCommandModifiers() throws {
         let textView = ChatComposerTextViewIOSFactory.makeConfiguredTextView()
         var sendCalls = 0
         textView.onSend = { sendCalls += 1 }
 
-        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: []))
-        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: [.command]))
-        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .alphaShift))
-        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: [.command, .alphaShift]))
-        #expect(sendCalls == 4)
+        let sendAction = #selector(ChatComposerUITextView.handleSendKeyCommand(_:))
+        let commands = try #require(textView.keyCommands)
+        let sendCommands = commands.filter { $0.action == sendAction }
+        #expect(sendCommands.count == 4)
+        #expect(sendCommands.compactMap(\.input) == ["\r", "\r", "\r", "\r"])
+        #expect(
+            sendCommands.map(\.modifierFlags) == [
+                [],
+                .command,
+                .numericPad,
+                [.command, .numericPad],
+            ])
+        #expect(sendCommands.allSatisfy(\.wantsPriorityOverSystemBehavior))
 
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .shift))
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .control))
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .alternate))
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: [.command, .shift]))
+        for command in sendCommands {
+            textView.handleSendKeyCommand(command)
+        }
         #expect(sendCalls == 4)
     }
 
-    @Test func physicalReturnPreservesMarkedTextUntilCompositionCompletes() {
+    @Test func physicalReturnPreservesMarkedTextUntilCompositionCompletes() throws {
         let textView = ChatComposerTextViewIOSFactory.makeConfiguredTextView()
         var sendCalls = 0
         textView.onSend = { sendCalls += 1 }
         textView.setMarkedText("draft", selectedRange: NSRange(location: 5, length: 0))
 
         #expect(textView.markedTextRange != nil)
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: []))
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .command))
+        let sendAction = #selector(ChatComposerUITextView.handleSendKeyCommand(_:))
+        #expect(textView.keyCommands?.contains { $0.action == sendAction } == false)
+        #expect(
+            !textView.canPerformAction(
+                sendAction,
+                withSender: nil))
+        textView.handleSendKeyCommand(
+            UIKeyCommand(
+                input: "\r",
+                modifierFlags: [],
+                action: #selector(ChatComposerUITextView.handleSendKeyCommand(_:))))
         #expect(sendCalls == 0)
         #expect(textView.text == "draft")
 
         textView.unmarkText()
-        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: []))
+        let commands = try #require(textView.keyCommands)
+        let sendCommand = try #require(commands.first { $0.action == sendAction })
+        #expect(commands.filter { $0.action == sendAction }.count == 4)
+        #expect(textView.canPerformAction(sendAction, withSender: nil))
+        textView.handleSendKeyCommand(sendCommand)
         #expect(sendCalls == 1)
     }
 }
