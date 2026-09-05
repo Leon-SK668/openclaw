@@ -246,7 +246,7 @@ struct ExecApprovalPromptLayoutTests {
         let panel = ExecApprovalsPromptPresenter.buildPanel(
             ExecApprovalPromptRequest(
                 command: "/bin/sh -lc pwd",
-                sessionKey: "  agent:main:telegram:dm:12345  "))
+                sessionKey: "  agent:main:telegram:dm:12345  "),
             onDecision: { _ in })
         defer { panel.close() }
 
