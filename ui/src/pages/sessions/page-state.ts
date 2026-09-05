@@ -123,14 +123,18 @@ export function loadSessionsPagePreferences(): SessionsPagePreferences {
   }
 }
 
-export function saveSessionsPagePreferences(preferences: SessionsPagePreferences): void {
+export function saveSessionsPagePreferences(changes: Partial<SessionsPagePreferences>): void {
   try {
     const storage = getSafeLocalStorage();
-    storage?.setItem(
+    if (!storage) {
+      return;
+    }
+    const preferences = { ...loadSessionsPagePreferences(), ...changes };
+    storage.setItem(
       SESSIONS_PAGE_PREFERENCES_STORAGE_KEY,
       JSON.stringify({ version: 1, ...preferences }),
     );
-    storage?.removeItem(LEGACY_GROUP_BY_STORAGE_KEY);
+    storage.removeItem(LEGACY_GROUP_BY_STORAGE_KEY);
   } catch {
     // Storage may be unavailable or full; current in-memory preferences still apply.
   }
