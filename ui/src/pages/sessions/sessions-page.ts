@@ -715,10 +715,9 @@ class SessionsPage extends OpenClawLightDomElement {
     // until its current list subscription publishes.
     this.loading = true;
     this.error = null;
-    context.navigate(
-      "sessions",
-      statusFilter === "active" ? undefined : { search: `?status=${statusFilter}` },
-    );
+    // Every status is explicit so a failed preference write cannot let the
+    // route loader restore a stale persisted default for this navigation.
+    context.navigate("sessions", { search: `?status=${statusFilter}` });
   }
 
   private async deleteSelected() {

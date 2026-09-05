@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import type { RouteLoaderOptions } from "@openclaw/uirouter";
 import { nothing } from "lit";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { PreservedSessionWorktree } from "../../../../packages/gateway-protocol/src/index.js";
@@ -23,6 +24,7 @@ import type {
 } from "../../lib/sessions/session-capability.ts";
 import { loadSessionsPagePreferences } from "./page-state.ts";
 import type { SessionsPagePreferences } from "./page-state.ts";
+import { page as sessionsRoutePage, type SessionsRouteData } from "./route.ts";
 import {
   createContext,
   createGateway,
@@ -122,20 +124,27 @@ describe("sessions page lifecycle", () => {
   it("does not replay a failed old field on a later write", async () => {
     const first = await createPreferencesPage();
     const second = await createPreferencesPage();
-    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+    const storage = localStorage;
+    const storedBeforeFailure = storage.getItem("openclaw:sessions:preferences:v1");
+    const setItem = vi.spyOn(storage, "setItem").mockImplementationOnce(() => {
       throw new Error("storage unavailable");
     });
     first.persistPreferences({ groupBy: "agent" });
-    setItem.mockRestore();
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(storage.getItem("openclaw:sessions:preferences:v1")).toBe(storedBeforeFailure);
     second.persistPreferences({ groupBy: "person" });
     first.persistPreferences({ activeMinutes: "5" });
 
+    expect(setItem).toHaveBeenCalledTimes(3);
     expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
   });
 
   it("keeps a failed preference write through a route update", async () => {
     const page = await createPreferencesPage();
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    const storage = localStorage;
+    page.persistPreferences({ searchQuery: "stored value" });
+    const storedBeforeFailure = storage.getItem("openclaw:sessions:preferences:v1");
+    const setItem = vi.spyOn(storage, "setItem").mockImplementation(() => {
       throw new Error("storage unavailable");
     });
     page.searchQuery = "keep me";
@@ -144,6 +153,8 @@ describe("sessions page lifecycle", () => {
     page.routeData = { expandedSessionKey: null, statusFilter: "archived" };
     await page.updateComplete;
 
+    expect(setItem).toHaveBeenCalled();
+    expect(storage.getItem("openclaw:sessions:preferences:v1")).toBe(storedBeforeFailure);
     expect(page.searchQuery).toBe("keep me");
   });
 
@@ -199,6 +210,62 @@ describe("sessions page lifecycle", () => {
       )?.checked,
     ).toBe(true);
   });
+
+  it.each(["archived", "all"] as const)(
+    "keeps an Active navigation explicit when saving a %s preference fails",
+    async (storedStatusFilter) => {
+      const storage = localStorage;
+      storage.setItem(
+        "openclaw:sessions:preferences:v1",
+        JSON.stringify({ version: 1, statusFilter: storedStatusFilter }),
+      );
+      const { gateway } = createGateway({} as GatewayBrowserClient);
+      const context = createContext(gateway, createSessions());
+      Object.assign(context.runtimeConfig, { ensureLoaded: vi.fn(async () => undefined) });
+      const page = await createRenderedPage(context, sessionsResult([], 0), storedStatusFilter);
+      const setItem = vi.spyOn(storage, "setItem").mockImplementation(() => {
+        throw new Error("storage unavailable");
+      });
+      const active = [
+        ...page.querySelectorAll<HTMLElement & { checked: boolean }>("wa-radio"),
+      ].find((radio) => radio.textContent?.trim() === "Active");
+      const group = active?.closest<HTMLElement & { value: string }>("wa-radio-group");
+      expect(group).toBeDefined();
+      group!.value = "active";
+      group!.dispatchEvent(new Event("change", { bubbles: true }));
+      await page.updateComplete;
+
+      expect(setItem).toHaveBeenCalled();
+      expect(setItem).toHaveBeenCalledTimes(1);
+      expect(loadSessionsPagePreferences().statusFilter).toBe(storedStatusFilter);
+      expect(context.navigate).toHaveBeenCalledWith("sessions", { search: "?status=active" });
+
+      const navigation = vi.mocked(context.navigate).mock.calls.at(-1);
+      const routeData = await sessionsRoutePage.loader?.(context, {
+        signal: new AbortController().signal,
+        shouldRun: () => true,
+        revalidating: false,
+        location: {
+          pathname: "/sessions",
+          search: navigation?.[1]?.search ?? "",
+          hash: "",
+        },
+        deps: "",
+        cause: "navigation",
+      } satisfies RouteLoaderOptions);
+      if (
+        !routeData ||
+        typeof routeData !== "object" ||
+        !("expandedSessionKey" in routeData) ||
+        !("statusFilter" in routeData)
+      ) {
+        throw new Error("sessions route loader did not return route data");
+      }
+      page.routeData = routeData as SessionsRouteData;
+      await page.updateComplete;
+      expect(page.statusFilter).toBe("active");
+    },
+  );
 
   it("offers undo after archiving from the Sessions page", async () => {
     const key = "agent:main:pinned";
