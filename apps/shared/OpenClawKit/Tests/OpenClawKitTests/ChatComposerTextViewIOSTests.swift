@@ -79,9 +79,8 @@ struct ChatComposerTextViewIOSTests {
                 .numericPad,
                 [.command, .numericPad],
             ])
-        #expect(sendCommands.allSatisfy(\.wantsPriorityOverSystemBehavior))
-
         for command in sendCommands {
+            #expect(command.wantsPriorityOverSystemBehavior)
             textView.handleSendKeyCommand(command)
         }
         #expect(sendCalls == 4)
