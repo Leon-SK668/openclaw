@@ -1,0 +1,66 @@
+name: Leon 133086 channel status proof
+
+on:
+  push:
+    branches:
+      - leon/proof-133086-channel-status
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact PR head to prove
+        required: true
+        default: 9ace37e7d207cfd2641eb581cae3d073096cf8c1
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  OPENCLAW_BUILD_PRIVATE_QA: "1"
+  OPENCLAW_ENABLE_PRIVATE_QA_CLI: "1"
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Preserve proof runner
+        run: cp scripts/proof-133086-channel-restarts.mts "$RUNNER_TEMP/proof.mts"
+
+      - name: Checkout exact PR head
+        env:
+          TARGET_SHA: ${{ inputs.expected_sha || '9ace37e7d207cfd2641eb581cae3d073096cf8c1' }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 origin "$TARGET_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          cp "$RUNNER_TEMP/proof.mts" scripts/proof-133086-channel-restarts.mts
+
+      - name: Setup exact-head Node and pnpm
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          install-deps: "true"
+          cache-mode: "off"
+
+      - name: Build private QA runtime
+        run: pnpm build qaRuntime
+
+      - name: Run real Gateway restart/status proof
+        run: node --import tsx scripts/proof-133086-channel-restarts.mts | tee proof-133086.log
+
+      - name: Upload proof receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: proof-133086-channel-status-${{ inputs.expected_sha || '9ace37e7d207cfd2641eb581cae3d073096cf8c1' }}
+          path: proof-133086.log
+          if-no-files-found: ignore
