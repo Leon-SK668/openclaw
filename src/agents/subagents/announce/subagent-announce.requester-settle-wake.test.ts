@@ -197,7 +197,7 @@ function expectContinuationFirstWake(call: Record<string, unknown>): void {
     "If additional action is required, continue any remaining in-scope work",
   );
   expect(message).not.toContain("send your consolidated final answer to the user now");
-  expect(message).toContain("NO_REPLY");
+  expect(message).not.toContain("NO_REPLY");
 }
 
 describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
