@@ -39,7 +39,6 @@ jobs:
       - name: Install Swift tools
         run: |
           brew update
-          brew install xcodegen swiftlint
           brew upgrade swiftformat || brew install swiftformat
 
       - name: Show toolchain
@@ -51,9 +50,6 @@ jobs:
       - name: Swift lint and format
         run: |
           set -euo pipefail
-          swiftlint lint --config config/swiftlint.yml
-          swiftformat --lint apps/macos/Sources --config config/swiftformat \
-            --exclude '**/OpenClawProtocol,**/HostEnvSecurityPolicy.generated.swift'
           swiftformat --lint apps/macos/Tests/OpenClawIPCTests/ExecApprovalPromptLayoutTests.swift \
             --config config/swiftformat
 

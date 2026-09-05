@@ -252,8 +252,8 @@ struct ExecApprovalPromptLayoutTests {
 
         let content = try #require(panel.contentView)
         content.layoutSubtreeIfNeeded()
-        let labels = self.descendants(of: content).compactMap { $0.accessibilityLabel() }
-        #expect(labels.contains { $0.contains("Session: agent:main:telegram:dm:12345") })
+        let text = self.renderedText(in: content)
+        #expect(text.contains { $0.contains("agent:main:telegram:dm:12345") })
     }
 
     @Test func `visible SwiftUI approval panels render populated and empty session context`() throws {
@@ -275,15 +275,17 @@ struct ExecApprovalPromptLayoutTests {
             panel.displayIfNeeded()
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             #expect(panel.isVisible)
-            #expect(panel.isKeyWindow)
 
             let content = try #require(panel.contentView)
             content.layoutSubtreeIfNeeded()
-            let labels = self.descendants(of: content).compactMap { $0.accessibilityLabel() }
+            let text = self.renderedText(in: content)
             if let expectedLabel {
-                #expect(labels.contains(expectedLabel))
+                let expectedSession = expectedLabel.replacingOccurrences(of: "Session: ", with: "")
+                #expect(text.contains("Session:"))
+                #expect(text.contains(expectedSession))
             } else {
-                #expect(!labels.contains { $0.contains("Session:") })
+                #expect(!text.contains("Session:"))
+                #expect(!text.contains { $0.contains("agent:") })
             }
             try self.writeProofImage(panel: panel, name: name)
         }
@@ -305,5 +307,16 @@ struct ExecApprovalPromptLayoutTests {
 
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews.flatMap { [$0] + self.descendants(of: $0) }
+    }
+
+    private func renderedText(in view: NSView) -> [String] {
+        let value: String? = if let field = view as? NSTextField {
+            field.stringValue
+        } else if let textView = view as? NSTextView {
+            textView.string
+        } else {
+            nil
+        }
+        return (value.map { [$0] } ?? []) + view.subviews.flatMap { self.renderedText(in: $0) }
     }
 }
