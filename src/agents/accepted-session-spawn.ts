@@ -44,14 +44,3 @@ export function hasCompletionMessageSessionSpawn(
 ): boolean {
   return acceptedSessionSpawns?.some((spawn) => spawn.expectsCompletionMessage === true) === true;
 }
-
-/** Return true when an accepted child owns completion or direct channel delivery. */
-export function hasContinuationSessionSpawn(
-  acceptedSessionSpawns?: readonly AcceptedSessionSpawn[],
-): boolean {
-  return (
-    acceptedSessionSpawns?.some(
-      (spawn) => spawn.expectsCompletionMessage === true || spawn.inlineDelivery === true,
-    ) === true
-  );
-}

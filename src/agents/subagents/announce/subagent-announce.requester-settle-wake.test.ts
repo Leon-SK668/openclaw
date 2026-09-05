@@ -5,6 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
+import {
+  makeSettledChild,
+  makeYieldedChild,
+  expectContinuationFirstWake,
+  requesterSettleKey,
+  REQUESTER,
+} from "./subagent-announce.requester-settle-wake.test-support.js";
 
 const deliverSpy = vi.fn(
   async (_params: Record<string, unknown>): Promise<SubagentAnnounceDeliveryResult> => ({
@@ -73,57 +80,6 @@ import {
   type RequesterSettleWakeBatchState,
 } from "./subagent-announce.requester-settle-wake.js";
 
-const REQUESTER = "agent:main:main";
-const requesterSettleKey = (suffix: string) =>
-  `announce:requester-settle:main:${REQUESTER}:${suffix}`;
-
-type SettledChildOverrides = Omit<Partial<SubagentRunRecord>, "execution"> & {
-  startedAt?: number;
-  endedAt?: number;
-  outcome?: SubagentRunRecord["execution"]["outcome"];
-  execution?: SubagentRunRecord["execution"];
-};
-
-function makeSettledChild(overrides: SettledChildOverrides): SubagentRunRecord {
-  const runId = overrides.runId ?? "run-child";
-  const { startedAt = 2_000, endedAt = 3_000, outcome, execution, ...recordOverrides } = overrides;
-  return {
-    runId,
-    childSessionKey: overrides.childSessionKey ?? `agent:main:subagent:${runId}`,
-    requesterSessionKey: REQUESTER,
-    requesterDisplayKey: "main",
-    task: "investigate",
-    cleanup: "keep",
-    createdAt: 1_000,
-    execution: execution ?? { status: "terminal", startedAt, endedAt, outcome },
-    expectsCompletionMessage: true,
-    delivery: { status: "delivered" },
-    requesterSettleWake: { status: "pending", attemptCount: 0 },
-    ...recordOverrides,
-  };
-}
-
-function makeYieldedChild(
-  params: {
-    execution?: SubagentRunRecord["execution"];
-    afterRequesterYield?: boolean;
-  } = {},
-): SubagentRunRecord {
-  return makeSettledChild({
-    runId: "run-b",
-    ...(params.execution ? { execution: params.execution } : {}),
-    delivery: { status: "delivered" },
-    requesterSettleWake: {
-      status: "pending",
-      attemptCount: 0,
-      batchRunIds: ["run-b"],
-      requesterYieldBatch: true,
-      ...(params.afterRequesterYield ? { afterRequesterYield: true } : {}),
-      rearmGeneration: 1,
-    },
-  });
-}
-
 const transitionBatchSpy = vi.fn();
 const completeBatchSpy = vi.fn();
 
@@ -186,18 +142,6 @@ function deliveredCallArg(): Record<string, unknown> {
     throw new Error("expected deliverSubagentAnnouncement call");
   }
   return call;
-}
-
-function expectContinuationFirstWake(call: Record<string, unknown>): void {
-  expect(call.requireVisibleReply).toBeUndefined();
-  expect(call.requireContinuationProgress).toBe(true);
-  const message = String(call.triggerMessage);
-  expect(message).toContain("deciding whether the original task is done");
-  expect(message).toContain(
-    "If additional action is required, continue any remaining in-scope work",
-  );
-  expect(message).not.toContain("send your consolidated final answer to the user now");
-  expect(message).not.toContain("NO_REPLY");
 }
 
 describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
@@ -264,7 +208,7 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
       }),
     );
     registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue(children);
-    const deliveryGate = createDeferred<{ delivered: boolean; path: string }>();
+    const deliveryGate = createDeferred<SubagentAnnounceDeliveryResult>();
     deliverSpy.mockReturnValueOnce(deliveryGate.promise);
 
     const wakeA = maybeWakeRequesterAfterAllChildrenSettled(

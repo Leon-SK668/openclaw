@@ -651,21 +651,14 @@ export async function sendSubagentAnnounceDirectly(params: {
     }
     const requesterVisibleFinalDelivered =
       hasFinalMessagingToolDelivery || (shouldDeliverAgentFinal && automaticFinalDelivered);
-    const acceptedContinuationSpawn = Boolean(
-      directAnnounceResult &&
-      (hasContinuationSessionSpawnEvidence(directAnnounceResult.acceptedSessionSpawns) ||
-        directAnnounceResult.runtimeContinuationStarted === true),
-    );
-    const deliveredContinuationFinal =
+    const continuationProgressDelivered =
       requesterVisibleFinalDelivered ||
       (!shouldDeliverAgentFinal &&
         !requiresMessageToolDelivery &&
-        hasVisibleNonSilentGatewayPayload);
-    if (
-      params.requireContinuationProgress &&
-      !deliveredContinuationFinal &&
-      !acceptedContinuationSpawn
-    ) {
+        hasVisibleNonSilentGatewayPayload) ||
+      directAnnounceResult?.runtimeContinuationStarted === true ||
+      hasContinuationSessionSpawnEvidence(directAnnounceResult?.acceptedSessionSpawns);
+    if (params.requireContinuationProgress && !continuationProgressDelivered) {
       return {
         delivered: false,
         path: "direct",
@@ -687,16 +680,13 @@ export async function sendSubagentAnnounceDirectly(params: {
               ? normalizeMessageChannel(origin.channel) === INTERNAL_MESSAGE_CHANNEL
               : !origin?.to,
           )));
-    const acceptsIntentionalSilentCompletion =
-      hasIntentionalSilentCompletionReply && !isSubagentCompletion;
+    const silentCompletionOk = hasIntentionalSilentCompletionReply && !isSubagentCompletion;
     if (
       !hasVisibleCompletionReply &&
       (params.requireVisibleReply ||
         (params.expectsCompletionMessage &&
           (shouldDeliverAgentFinal ||
-            (!requiresMessageToolDelivery &&
-              !hasCompletionSideEffect &&
-              !acceptsIntentionalSilentCompletion))))
+            (!requiresMessageToolDelivery && !hasCompletionSideEffect && !silentCompletionOk))))
     ) {
       return {
         delivered: false,
