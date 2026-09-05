@@ -60,7 +60,22 @@ struct ChatComposerTextViewIOSTests {
         #expect(downCalls == 1)
         #expect(!textView.handleHardwareKey(.keyboardUpArrow, modifierFlags: .shift))
         #expect(textView.handleHardwareKey(.keyboardUpArrow, modifierFlags: .alphaShift))
-        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: []))
+    }
+
+    @Test func physicalReturnKeysSendOnlyForBareAndCommandModifiers() {
+        let textView = ChatComposerTextViewIOSFactory.makeConfiguredTextView()
+        var sendCalls = 0
+        textView.onSend = { sendCalls += 1 }
+
+        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: []))
+        #expect(textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: [.command]))
+        #expect(sendCalls == 2)
+
+        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .shift))
+        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .control))
+        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: .alternate))
+        #expect(!textView.handleHardwareKey(.keyboardReturnOrEnter, modifierFlags: [.command, .shift]))
+        #expect(sendCalls == 2)
     }
 }
 #endif

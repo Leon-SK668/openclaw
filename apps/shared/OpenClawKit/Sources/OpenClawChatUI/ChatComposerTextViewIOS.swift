@@ -10,6 +10,7 @@ struct ChatComposerTextViewIOS: UIViewRepresentable {
     var minHeight: CGFloat
     var maxHeight: CGFloat
     var onFocusChange: (Bool) -> Void
+    var onSend: () -> Void
     var onHistoryUp: (Bool) -> Bool
     var onHistoryDown: () -> Bool
 
@@ -21,6 +22,7 @@ struct ChatComposerTextViewIOS: UIViewRepresentable {
         let textView = ChatComposerTextViewIOSFactory.makeConfiguredTextView()
         textView.delegate = context.coordinator
         textView.text = self.text
+        textView.onSend = self.onSend
         self.configureHistoryHandlers(textView)
         return textView
     }
@@ -29,6 +31,7 @@ struct ChatComposerTextViewIOS: UIViewRepresentable {
         context.coordinator.parent = self
         textView.isEditable = self.isEnabled
         textView.isSelectable = self.isEnabled
+        textView.onSend = self.onSend
         self.configureHistoryHandlers(textView)
 
         // UIKit owns user-initiated focus. A false focus request is not a blur request;
@@ -103,6 +106,7 @@ struct ChatComposerTextViewIOS: UIViewRepresentable {
 
 @MainActor
 final class ChatComposerUITextView: UITextView {
+    var onSend: (() -> Void)?
     var onHistoryUp: ((Bool) -> Bool)?
     var onHistoryDown: (() -> Bool)?
 
@@ -123,6 +127,13 @@ final class ChatComposerUITextView: UITextView {
         _ keyCode: UIKeyboardHIDUsage,
         modifierFlags: UIKeyModifierFlags) -> Bool
     {
+        if keyCode == .keyboardReturnOrEnter,
+           modifierFlags.isEmpty || modifierFlags == [.command]
+        {
+            self.onSend?()
+            return true
+        }
+
         let commandModifiers: UIKeyModifierFlags = [.shift, .control, .alternate, .command]
         guard modifierFlags.isDisjoint(with: commandModifiers) else { return false }
         switch keyCode {

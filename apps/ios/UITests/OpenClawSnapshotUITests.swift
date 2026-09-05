@@ -703,22 +703,36 @@ final class OpenClawSnapshotUITests: XCTestCase {
         XCTAssertTrue(self.app?.keyboards.firstMatch.waitForNonExistence(timeout: 3) == true)
     }
 
-    func testChatComposerReturnInsertsNewlineWithoutSending() throws {
+    func testChatComposerHardwareReturnSendsAndShiftReturnKeepsDraft() throws {
         self.launchApp(for: ScreenshotTarget(
             initialTab: "chat",
             initialDestination: "chat",
-            name: "chat-composer-return"))
+            name: "chat-composer-hardware-return"))
 
         let app = try XCTUnwrap(self.app)
         let input = self.chatMessageInput(in: app)
         XCTAssertTrue(input.waitForExistence(timeout: 8))
         input.tap()
-        input.typeText("first line\nsecond line")
 
-        XCTAssertEqual(input.value as? String, "first line\nsecond line")
+        input.typeText("first message")
+        input.typeKey(.return, modifierFlags: [])
+        let firstMessageSent = expectation(
+            for: NSPredicate(format: "value == %@", ""),
+            evaluatedWith: input)
+        wait(for: [firstMessageSent], timeout: 3)
+
+        input.typeText("second message")
+        input.typeKey(.return, modifierFlags: [.command])
+        let secondMessageSent = expectation(
+            for: NSPredicate(format: "value == %@", ""),
+            evaluatedWith: input)
+        wait(for: [secondMessageSent], timeout: 3)
+
+        input.typeText("draft")
+        input.typeKey(.return, modifierFlags: [.shift])
+        XCTAssertEqual(input.value as? String, "draft\n")
         XCTAssertTrue(app.buttons["chat-send-message"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.staticTexts["first line\nsecond line"].exists)
-        self.attachScreenshot(named: "chat-composer-return")
+        self.attachScreenshot(named: "chat-composer-hardware-return")
     }
 
     func testVoiceNoteDraftKeepsStopAvailableDuringActiveResponse() throws {
