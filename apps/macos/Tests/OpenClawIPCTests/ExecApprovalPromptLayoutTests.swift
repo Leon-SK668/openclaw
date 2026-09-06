@@ -240,10 +240,14 @@ struct ExecApprovalPromptLayoutTests {
         #expect(
             ExecApprovalsPromptPresenter.sanitizedContextValue(spoofed) ==
                 "safe\\u{202E}txt\\u{A}next")
+        #expect(
+            ExecApprovalsPromptPresenter.sanitizedContextValue(
+                "  agent:main:telegram:dm:12345  ") ==
+                "agent:main:telegram:dm:12345")
         #expect(ExecApprovalsPromptPresenter.sanitizedContextValue(" \n\t ") == nil)
     }
 
-    @Test func `rendered panel shows trimmed session and omits blank session`() throws {
+    @Test func `visible panel OCR shows session and omits blank session`() throws {
         let cases: [(String, String?, String?)] = [
             ("populated", "  agent:main:telegram:dm:12345  ", "agent:main:telegram:dm:12345"),
             ("blank", " \n\t ", nil),
@@ -259,14 +263,19 @@ struct ExecApprovalPromptLayoutTests {
             panel.makeKeyAndOrderFront(nil)
             panel.displayIfNeeded()
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            #expect(panel.isVisible)
 
             let content = try #require(panel.contentView)
             content.layoutSubtreeIfNeeded()
             content.displayIfNeeded()
+            // The artifact is the panel's rendered content view, not a desktop/window screenshot.
             let image = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds)?.cgImage)
             try self.writeProofImage(image: image, name: name)
             let text = try self.recognizedText(in: image)
-            print("Rendered approval panel OCR [\(name)]: \(text)")
+            print("Approval content-view OCR [\(name)]: \(text)")
+
+            // The stable action label is a same-image OCR control before checking session text.
+            #expect(text.contains("Allow Once"))
 
             if let expectedSession {
                 #expect(text.contains("Session"))
@@ -306,7 +315,7 @@ struct ExecApprovalPromptLayoutTests {
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true)
-        try png.write(to: directory.appendingPathComponent("approval-\(name).png"))
+        try png.write(to: directory.appendingPathComponent("approval-content-view-\(name).png"))
     }
 
 }

@@ -42,12 +42,12 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Capture and OCR populated and empty SwiftUI approval panels
+      - name: Capture and OCR populated and empty approval content views
         env:
           OPENCLAW_MACOS_PROOF_DIR: ${{ runner.temp }}/openclaw-132503-proof
         run: swift test --package-path apps/macos --filter ExecApprovalPromptLayoutTests
 
-      - name: Upload panel captures
+      - name: Upload approval content-view captures
         if: always()
         uses: actions/upload-artifact@v4
         with:
