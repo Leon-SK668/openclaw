@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import Vision
 @testable import OpenClaw
 
 @Suite(.serialized)
@@ -242,22 +243,70 @@ struct ExecApprovalPromptLayoutTests {
         #expect(ExecApprovalsPromptPresenter.sanitizedContextValue(" \n\t ") == nil)
     }
 
-    @Test func `panel shows trimmed session context`() throws {
-        let panel = ExecApprovalsPromptPresenter.buildPanel(
-            ExecApprovalPromptRequest(
-                command: "/bin/sh -lc pwd",
-                sessionKey: "  agent:main:telegram:dm:12345  "),
-            onDecision: { _ in })
-        defer { panel.close() }
+    @Test func `rendered panel shows trimmed session and omits blank session`() throws {
+        let cases: [(String, String?, String?)] = [
+            ("populated", "  agent:main:telegram:dm:12345  ", "agent:main:telegram:dm:12345"),
+            ("blank", " \n\t ", nil),
+        ]
+        for (name, sessionKey, expectedSession) in cases {
+            let panel = ExecApprovalsPromptPresenter.buildPanel(
+                ExecApprovalPromptRequest(
+                    command: "/bin/sh -lc pwd",
+                    sessionKey: sessionKey),
+                onDecision: { _ in })
+            NSApp.activate(ignoringOtherApps: true)
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+            panel.displayIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
-        let content = try #require(panel.contentView)
-        content.layoutSubtreeIfNeeded()
-        let labels = self.descendants(of: content).compactMap { $0.accessibilityLabel() }
-        #expect(labels.contains { $0.contains("Session: agent:main:telegram:dm:12345") })
+            let content = try #require(panel.contentView)
+            content.layoutSubtreeIfNeeded()
+            content.displayIfNeeded()
+            let image = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds)?.cgImage)
+            try self.writeProofImage(image: image, name: name)
+            let text = try self.recognizedText(in: image)
+            print("Rendered approval panel OCR [\(name)]: \(text)")
+
+            if let expectedSession {
+                #expect(text.contains("Session"))
+                #expect(text.contains(expectedSession))
+            } else {
+                #expect(!text.contains("Session"))
+                #expect(!text.contains("agent:"))
+            }
+            panel.close()
+        }
     }
 
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews.flatMap { [$0] + self.descendants(of: $0) }
+    }
+
+    private func recognizedText(in image: CGImage) throws -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let observations = request.results ?? []
+        return observations
+            .compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private func writeProofImage(image: CGImage, name: String) throws {
+        guard let outputDirectory = ProcessInfo.processInfo.environment["OPENCLAW_MACOS_PROOF_DIR"]
+        else { return }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        let directory = URL(fileURLWithPath: outputDirectory, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true)
+        try png.write(to: directory.appendingPathComponent("approval-\(name).png"))
     }
 
 }

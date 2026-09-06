@@ -1,0 +1,56 @@
+name: PR 132503 SwiftUI approval-session proof (September 6)
+
+on:
+  push:
+    branches:
+      - proof/leon-pr132503-swiftui-20260906
+
+permissions:
+  contents: read
+
+jobs:
+  macos-swiftui-proof:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      ORIGINAL_PR_SHA: 5edf8e53a9759ad5ea5f378ee93ade889b15732f
+      PROOF_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout proof branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PROOF_SHA }}
+          fetch-depth: 0
+
+      - name: Verify proof and unchanged production blobs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PROOF_SHA"
+          git merge-base --is-ancestor "$ORIGINAL_PR_SHA" HEAD
+          test -z "$(git diff --name-only "$ORIGINAL_PR_SHA" -- \
+            apps/macos/Sources apps/shared/OpenClawKit/Sources apps/swabble/Sources)"
+
+      - name: Prepare Apple Mermaid assets
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          node scripts/prepare-apple-mermaid.mjs
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Capture and OCR populated and empty SwiftUI approval panels
+        env:
+          OPENCLAW_MACOS_PROOF_DIR: ${{ runner.temp }}/openclaw-132503-proof
+        run: swift test --package-path apps/macos --filter ExecApprovalPromptLayoutTests
+
+      - name: Upload panel captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-132503-swiftui-approval-panel-${{ github.sha }}
+          path: ${{ runner.temp }}/openclaw-132503-proof
+          if-no-files-found: error
