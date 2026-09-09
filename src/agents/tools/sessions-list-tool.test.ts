@@ -365,6 +365,7 @@ describe("sessions-list-tool", () => {
     };
     const projected = buildGatewaySessionRow({
       cfg: VALID_CONFIG,
+      agentId: "main",
       storePath: "/tmp/sessions.json",
       store: { [key]: entry },
       key,
