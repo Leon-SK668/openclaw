@@ -128,7 +128,8 @@ it("runs the Gateway cleanup owner across invalid and staged markers", async () 
   );
 });
 
-it.runIf(process.platform !== "win32")(
+// Root bypasses mode bits, so chmod cannot model an unreadable marker there.
+it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
   "warns when a legacy retained marker cannot be read",
   async () => {
     await withOpenClawTestState(
