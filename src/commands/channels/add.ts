@@ -143,11 +143,8 @@ async function channelsAddCommandImpl(
 
   const useWizard = shouldUseWizard(params);
   if (useWizard) {
-    const {
-      resolveInitialWizardChannelTarget,
-      runChannelsAddWizardFlow,
-      selectChannelSetupAgentId,
-    } = await import("./add-wizard.js");
+    const { resolveInitialWizardChannelTarget, runChannelsAddWizardFlow, selectChannelSetupOwner } =
+      await import("./add-wizard.js");
     const prompter = createClackPrompter();
     if (!isTerminalInteractive()) {
       runtime.error(
@@ -156,11 +153,11 @@ async function channelsAddCommandImpl(
       runtime.exit(1);
       return;
     }
-    const agentId =
-      opts.agent === undefined
-        ? await selectChannelSetupAgentId(cfg, prompter)
-        : resolveChannelSetupOwner(cfg, opts.agent).agentId;
-    const workspaceDir = resolveChannelSetupOwner(cfg, agentId).workspaceDir;
+    const { agentId, workspaceDir } = await selectChannelSetupOwner(
+      writeSnapshot,
+      prompter,
+      opts.agent,
+    );
     const target = await resolveInitialWizardChannelTarget(opts.channel, cfg, workspaceDir);
     if (target.kind === "unresolved") {
       runtime.error(target.message);
@@ -172,7 +169,7 @@ async function channelsAddCommandImpl(
       agentId,
       runtime,
       prompter,
-      ...(workspaceDir ? { workspaceDir } : {}),
+      workspaceDir,
       ...(target.kind === "resolved" ? { initialChannel: target.channel } : {}),
       ...(params?.beforePersistentEffect
         ? { beforePersistentEffect: params.beforePersistentEffect }

@@ -59,6 +59,12 @@ const terminalMocks = vi.hoisted(() => ({
   isTerminalInteractive: vi.fn(() => true),
 }));
 
+const policyMocks = vi.hoisted(() => ({
+  readCurrentConfigForPolicyCheck: vi.fn<() => OpenClawConfig>(() => ({})),
+}));
+
+vi.mock("../config/io.runtime.js", () => policyMocks);
+
 const channelWizardMocks = vi.hoisted(() => {
   const prompter = {
     intro: vi.fn(async () => undefined),
@@ -476,6 +482,7 @@ describe("channelsAddCommand", () => {
   });
 
   beforeEach(async () => {
+    policyMocks.readCurrentConfigForPolicyCheck.mockReset().mockReturnValue({});
     resetPluginRuntimeStateForTest();
     configFiles.clear();
     configMocks.readConfigFileSnapshot.mockClear();
@@ -851,7 +858,8 @@ describe("channelsAddCommand", () => {
       });
       channelWizardMocks.prompter.select
         .mockResolvedValueOnce({ agentId: "helper" })
-        .mockResolvedValueOnce("helper");
+        .mockResolvedValueOnce("main");
+      policyMocks.readCurrentConfigForPolicyCheck.mockReturnValue(config);
       channelWizardMocks.setupChannels.mockImplementationOnce(async (...args: unknown[]) => {
         const options = requireRecord(args[3], "setup options");
         const onSelection = options.onSelection as ((selection: string[]) => void) | undefined;
@@ -885,7 +893,7 @@ describe("channelsAddCommand", () => {
       expect(writtenConfig()).toMatchObject({
         bindings: [
           {
-            agentId: "helper",
+            agentId: "main",
             match: { channel: "lifecycle-chat", accountId: "ops" },
           },
         ],
@@ -893,7 +901,14 @@ describe("channelsAddCommand", () => {
     },
   );
 
-  it("rejects an unconfigured agent returned by the hosted wizard", async () => {
+  it.each([
+    { answer: { agentId: "missing" }, error: 'Unknown agent id "missing"' },
+    { answer: { agentId: "" }, error: 'Unknown agent id ""' },
+    { answer: { agentId: "   " }, error: 'Unknown agent id "   "' },
+    { answer: null, error: "Invalid channel setup owner selection" },
+    { answer: {}, error: "Invalid channel setup owner selection" },
+    { answer: { agentId: 17 }, error: "Invalid channel setup owner selection" },
+  ])("rejects invalid hosted owner $answer before setup", async ({ answer, error }) => {
     const config: OpenClawConfig = {
       agents: {
         ownership: "explicit",
@@ -909,6 +924,7 @@ describe("channelsAddCommand", () => {
       sourceConfig: config,
       config,
     });
+    policyMocks.readCurrentConfigForPolicyCheck.mockReturnValue(config);
     const session = new WizardSession(async (prompter) => {
       await runChannelsSetupWizard({ channel: "lifecycle-chat" }, runtime, prompter);
     });
@@ -921,11 +937,51 @@ describe("channelsAddCommand", () => {
       throw new Error("Expected agent selection step");
     }
     try {
-      await session.answer(selection.step.id, { agentId: "missing" });
+      await session.answer(selection.step.id, answer);
       expect(await session.next()).toMatchObject({
         done: true,
         status: "error",
-        error: expect.stringContaining('Unknown agent id "missing"'),
+        error: expect.stringContaining(error),
+      });
+      expect(channelWizardMocks.setupChannels).not.toHaveBeenCalled();
+      expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
+    } finally {
+      session.cancel();
+      await session.whenSettled();
+    }
+  });
+
+  it("rejects an owner removed while the hosted selection is pending", async () => {
+    const config: OpenClawConfig = {
+      agents: {
+        ownership: "explicit",
+        entries: {
+          main: { workspace: "/tmp/openclaw-main-workspace" },
+          helper: { workspace: "/tmp/openclaw-helper-workspace" },
+        },
+      },
+    };
+    configMocks.readConfigFileSnapshot.mockResolvedValue(createTestConfigSnapshot(config));
+    policyMocks.readCurrentConfigForPolicyCheck.mockReturnValue(config);
+    const session = new WizardSession(async (prompter) => {
+      await runChannelsSetupWizard({ channel: "lifecycle-chat" }, runtime, prompter);
+    });
+    try {
+      const selection = await session.next();
+      if (selection.done || !selection.step) {
+        throw new Error("Expected owner selection step");
+      }
+      policyMocks.readCurrentConfigForPolicyCheck.mockReturnValue({
+        agents: {
+          ownership: "explicit",
+          entries: { main: { workspace: "/tmp/openclaw-main-workspace" } },
+        },
+      });
+      await session.answer(selection.step.id, { agentId: "helper" });
+      expect(await session.next()).toMatchObject({
+        done: true,
+        status: "error",
+        error: expect.stringContaining('Unknown agent id "helper"'),
       });
       expect(channelWizardMocks.setupChannels).not.toHaveBeenCalled();
       expect(configMocks.writeConfigFile).not.toHaveBeenCalled();

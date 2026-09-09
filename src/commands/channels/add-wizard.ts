@@ -1,18 +1,19 @@
 // Guided channel-setup wizard flow shared by `openclaw channels add` (clack
 // prompter) and the gateway `wizard.start {flow:"channels"}` RPC (session
 // prompter driving the Control UI / native clients).
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
   AgentSelectionRequiredError,
   listAgentIds,
   resolveConfiguredAgentId,
-  resolveAgentOperationAgentId,
   tryResolveAgentOperationAgentId,
 } from "../../agents/agent-scope-config.js";
 import { getLoadedChannelPlugin } from "../../channels/plugins/index.js";
 import type { ChannelSetupPlugin } from "../../channels/plugins/setup-wizard-types.js";
 import { formatUnknownChannelMessage } from "../../cli/error-format.js";
 import { readConfigFileSnapshotForWrite, type OpenClawConfig } from "../../config/config.js";
+import { readCurrentConfigForPolicyCheck } from "../../config/io.runtime.js";
 import { commitConfigWithPendingPluginInstalls } from "../../plugins/install-record-commit.js";
 import { refreshPluginRegistryAfterConfigMutation } from "../../plugins/registry-refresh.js";
 import { DEFAULT_ACCOUNT_ID } from "../../routing/session-key.js";
@@ -35,22 +36,34 @@ function unresolvedInitialWizardChannelTarget(channel: string): InitialWizardCha
 }
 
 /** Select a setup owner before workspace-scoped channel discovery. */
-export async function selectChannelSetupAgentId(
-  cfg: OpenClawConfig,
+export async function selectChannelSetupOwner(
+  writeSnapshot: Awaited<ReturnType<typeof readConfigFileSnapshotForWrite>>,
   prompter: WizardPrompter,
-): Promise<string> {
+  requestedAgentId?: string,
+): Promise<ReturnType<typeof resolveChannelSetupOwner>> {
+  const cfg = writeSnapshot.snapshot.sourceConfig;
   try {
-    return resolveAgentOperationAgentId(cfg);
+    return resolveChannelSetupOwner(cfg, requestedAgentId);
   } catch (error) {
     if (!(error instanceof AgentSelectionRequiredError)) {
       throw error;
     }
   }
-  const selectedAgent = await prompter.select<ChannelSetupAgentChoice>({
+  const selectedAgent: unknown = await prompter.select<ChannelSetupAgentChoice>({
     message: "Set up channels for agent",
     options: listAgentIds(cfg).map((agentId) => ({ value: { agentId }, label: agentId })),
   });
-  return resolveConfiguredAgentId(cfg, selectedAgent.agentId);
+  if (!isRecord(selectedAgent) || typeof selectedAgent.agentId !== "string") {
+    throw new Error("Invalid channel setup owner selection");
+  }
+  writeSnapshot.writeOptions.assertConfigPathForWrite?.();
+  // The roster can change while the prompt waits; retain the original snapshot for the commit fence.
+  const currentConfig = readCurrentConfigForPolicyCheck({
+    configPath: writeSnapshot.snapshot.path,
+    env: process.env,
+  });
+  const agentId = resolveConfiguredAgentId(currentConfig, selectedAgent.agentId);
+  return resolveChannelSetupOwner(currentConfig, agentId);
 }
 
 /** Resolve omitted, matched, and unmatched channel targets without collapsing caller intent. */
@@ -313,8 +326,7 @@ export async function runChannelsSetupWizard(
     );
   }
   const cfg = snapshot.sourceConfig;
-  const agentId = await selectChannelSetupAgentId(cfg, prompter);
-  const workspaceDir = resolveChannelSetupOwner(cfg, agentId).workspaceDir;
+  const { agentId, workspaceDir } = await selectChannelSetupOwner(writeSnapshot, prompter);
   const target = await resolveInitialWizardChannelTarget(opts.channel, cfg, workspaceDir);
   if (target.kind === "unresolved") {
     throw new Error(target.message);
