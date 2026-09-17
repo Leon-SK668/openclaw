@@ -249,6 +249,7 @@ struct ExecApprovalPromptLayoutTests {
     }
 
     @Test func `panel shows trimmed session context`() async throws {
+        _ = AppKitTestSupport.application
         let panel = ExecApprovalsPromptPresenter.buildPanel(
             ExecApprovalPromptRequest(
                 command: "/bin/sh -lc pwd",
