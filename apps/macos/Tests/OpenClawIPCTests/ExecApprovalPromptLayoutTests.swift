@@ -247,6 +247,22 @@ struct ExecApprovalPromptLayoutTests {
         #expect(ExecApprovalsPromptPresenter.sanitizedContextValue(" \n\t ") == nil)
     }
 
+    // Keep the current PR's native-subview assertion unchanged beside the rendered-panel oracle.
+    // This verifies whether the assertion itself can observe the current SwiftUI Session row.
+    @Test func `panel shows trimmed session context`() throws {
+        let panel = ExecApprovalsPromptPresenter.buildPanel(
+            ExecApprovalPromptRequest(
+                command: "/bin/sh -lc pwd",
+                sessionKey: "  agent:main:telegram:dm:12345  "),
+            onDecision: { _ in })
+        defer { panel.close() }
+
+        let content = try #require(panel.contentView)
+        content.layoutSubtreeIfNeeded()
+        let labels = self.descendants(of: content).compactMap { $0.accessibilityLabel() }
+        #expect(labels.contains { $0.contains("Session: agent:main:telegram:dm:12345") })
+    }
+
     @Test func `visible panel OCR shows session and omits blank session`() throws {
         let cases: [(String, String?, String?)] = [
             ("populated", "  agent:main:telegram:dm:12345  ", "agent:main:telegram:dm:12345"),
