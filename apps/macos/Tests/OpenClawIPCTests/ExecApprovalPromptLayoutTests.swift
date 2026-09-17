@@ -258,6 +258,7 @@ struct ExecApprovalPromptLayoutTests {
                     command: "/bin/sh -lc pwd",
                     sessionKey: sessionKey),
                 onDecision: { _ in })
+            defer { panel.close() }
             NSApp.activate(ignoringOtherApps: true)
             panel.center()
             panel.makeKeyAndOrderFront(nil)
@@ -269,7 +270,9 @@ struct ExecApprovalPromptLayoutTests {
             content.layoutSubtreeIfNeeded()
             content.displayIfNeeded()
             // The artifact is the panel's rendered content view, not a desktop/window screenshot.
-            let image = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds)?.cgImage)
+            let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            let image = try #require(bitmap.cgImage)
             try self.writeProofImage(image: image, name: name)
             let text = try self.recognizedText(in: image)
             print("Approval content-view OCR [\(name)]: \(text)")
@@ -284,7 +287,6 @@ struct ExecApprovalPromptLayoutTests {
                 #expect(!text.contains("Session"))
                 #expect(!text.contains("agent:"))
             }
-            panel.close()
         }
     }
 
@@ -307,11 +309,12 @@ struct ExecApprovalPromptLayoutTests {
     }
 
     private func writeProofImage(image: CGImage, name: String) throws {
-        guard let outputDirectory = ProcessInfo.processInfo.environment["OPENCLAW_MACOS_PROOF_DIR"]
-        else { return }
         let bitmap = NSBitmapImageRep(cgImage: image)
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
-        let directory = URL(fileURLWithPath: outputDirectory, isDirectory: true)
+        // The isolated native runner deliberately does not inherit proof-specific environment.
+        let directory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("pr132503-proof-output", isDirectory: true)
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true)

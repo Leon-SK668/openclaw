@@ -21,6 +21,7 @@ jobs:
         with:
           ref: ${{ env.PROOF_SHA }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify proof and unchanged production blobs
         run: |
@@ -43,14 +44,17 @@ jobs:
           swift --version
 
       - name: Capture and OCR populated and empty approval content views
-        env:
-          OPENCLAW_MACOS_PROOF_DIR: ${{ runner.temp }}/openclaw-132503-proof
-        run: swift test --package-path apps/macos --filter ExecApprovalPromptLayoutTests
+        run: |
+          set -euo pipefail
+          swift build --package-path apps/macos --build-system native --enable-code-coverage --build-tests
+          node scripts/test-macos-native.mts default \
+            --package-path apps/macos --build-system native --enable-code-coverage \
+            --skip-build --filter ExecApprovalPromptLayoutTests
 
       - name: Upload approval content-view captures
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pr-132503-swiftui-approval-panel-${{ github.sha }}
-          path: ${{ runner.temp }}/openclaw-132503-proof
+          path: apps/macos/Tests/OpenClawIPCTests/pr132503-proof-output/approval-content-view-*.png
           if-no-files-found: error
