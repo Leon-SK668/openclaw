@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Testing
 import Vision
 @testable import OpenClaw
@@ -247,20 +248,29 @@ struct ExecApprovalPromptLayoutTests {
         #expect(ExecApprovalsPromptPresenter.sanitizedContextValue(" \n\t ") == nil)
     }
 
-    // Keep the current PR's native-subview assertion unchanged beside the rendered-panel oracle.
-    // This verifies whether the assertion itself can observe the current SwiftUI Session row.
-    @Test func `panel shows trimmed session context`() throws {
+    @Test func `panel shows trimmed session context`() async throws {
         let panel = ExecApprovalsPromptPresenter.buildPanel(
             ExecApprovalPromptRequest(
                 command: "/bin/sh -lc pwd",
                 sessionKey: "  agent:main:telegram:dm:12345  "),
             onDecision: { _ in })
         defer { panel.close() }
-
+        panel.makeKeyAndOrderFront(nil)
         let content = try #require(panel.contentView)
         content.layoutSubtreeIfNeeded()
-        let labels = self.descendants(of: content).compactMap { $0.accessibilityLabel() }
+        let labels = try await self.accessibilityLabels(in: panel)
         #expect(labels.contains { $0.contains("Session: agent:main:telegram:dm:12345") })
+        #expect(labels.contains { $0.contains("Allow Once") })
+
+        let blankPanel = ExecApprovalsPromptPresenter.buildPanel(
+            ExecApprovalPromptRequest(command: "/bin/sh -lc pwd", sessionKey: " \n\t "),
+            onDecision: { _ in })
+        defer { blankPanel.close() }
+        blankPanel.makeKeyAndOrderFront(nil)
+        let blankLabels = try await self.accessibilityLabels(in: blankPanel)
+        #expect(blankLabels.contains { $0.contains("Allow Once") })
+        #expect(!blankLabels.contains { $0.contains("Session:") || $0.contains("agent:") })
+        print("Approval AX proof: populated Session present; blank Session absent; both action controls present")
     }
 
     @Test func `visible panel OCR shows session and omits blank session`() throws {
@@ -308,6 +318,29 @@ struct ExecApprovalPromptLayoutTests {
 
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews.flatMap { [$0] + self.descendants(of: $0) }
+    }
+
+    private func accessibilityLabels(in root: AnyObject) async throws -> [String] {
+        // SwiftUI creates virtual accessibility children after a client request;
+        // those children are not part of NSView.subviews.
+        let result = await Task.detached {
+            let application = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+            var windows: CFTypeRef?
+            return AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windows)
+        }.value
+        try #require(result == .success)
+        var labels: [String] = []
+        var visited = Set<ObjectIdentifier>()
+        func visit(_ element: AnyObject) {
+            guard visited.insert(ObjectIdentifier(element)).inserted else { return }
+            labels.append(contentsOf: [element.accessibilityLabel?(), element.accessibilityTitle?()]
+                .compactMap(\.self))
+            for child in element.accessibilityChildren?() ?? [] {
+                visit(child as AnyObject)
+            }
+        }
+        visit(root)
+        return labels
     }
 
     private func recognizedText(in image: CGImage) throws -> String {
