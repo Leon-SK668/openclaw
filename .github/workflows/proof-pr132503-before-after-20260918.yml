@@ -1,0 +1,297 @@
+name: PR 132503 native before-after screenshots
+
+on:
+  push:
+    branches:
+      - proof/leon-pr132503-before-after-20260918
+    paths:
+      - .github/workflows/proof-pr132503-before-after-20260918.yml
+      - tasks/pr132503-before-after/ExecApprovalScreenshotProofTests.swift
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # Actual parent of 4f974bab6bbe77da631d70bbf60ae8c62a407c48.
+  BEFORE_SHA: c4052ca628ac0e1026b82c10d7d80a5ebd8aaff9
+  AFTER_SHA: a49725c176da7f6f4d90a5703d09ac2224b8c630
+  SESSION_DISPLAY_COMMIT: 4f974bab6bbe77da631d70bbf60ae8c62a407c48
+  FIXTURE_REL: tasks/pr132503-before-after/ExecApprovalScreenshotProofTests.swift
+  FIXED_COMMAND: /bin/sh -lc pwd
+  FIXED_SESSION_RAW: "  agent:main:telegram:dm:12345  "
+  FIXED_SESSION: agent:main:telegram:dm:12345
+  NATIVE_RUNNER_SHA256: 58f79c0d94e6890cb1e1f5e10380b021a8149b7e3b67cc1df3ecf38d5b56d05f
+  APPLE_ASSET_SCRIPT_SHA256: 0e914c41fec9dce2dfcffcf774a0c6f121b43044176e930c15b7cc7033f7384b
+  MACOS_PACKAGE_SHA256: 5969d819e1ad2080441d5e0a6237b4a5f05c46f6450c846bc8b5dbc9a38068de
+  JOB_DISPLAY_NAME: macos-before-after-proof
+
+jobs:
+  macos-before-after-proof:
+    name: macos-before-after-proof
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout evidence definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify evidence definition and toolchain
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -f "$FIXTURE_REL"
+          rm -rf "$RUNNER_TEMP/pr132503-before-after"
+          mkdir -p "$RUNNER_TEMP/pr132503-before-after"
+          corepack enable
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Checkout before product source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.BEFORE_SHA }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      - name: Capture before content view
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/source"
+          test "$(git rev-parse HEAD)" = "$BEFORE_SHA"
+          test "$(shasum -a 256 scripts/test-macos-native.mts | awk '{print $1}')" = "$NATIVE_RUNNER_SHA256"
+          test "$(shasum -a 256 scripts/prepare-apple-mermaid.mjs | awk '{print $1}')" = "$APPLE_ASSET_SCRIPT_SHA256"
+          test "$(shasum -a 256 apps/macos/Package.swift | awk '{print $1}')" = "$MACOS_PACKAGE_SHA256"
+          fixture_sha="$(shasum -a 256 "$GITHUB_WORKSPACE/$FIXTURE_REL" | awk '{print $1}')"
+          install -m 0644 "$GITHUB_WORKSPACE/$FIXTURE_REL" \
+            apps/macos/Tests/OpenClawIPCTests/ExecApprovalScreenshotProofTests.swift
+          test "$(shasum -a 256 apps/macos/Tests/OpenClawIPCTests/ExecApprovalScreenshotProofTests.swift | awk '{print $1}')" = "$fixture_sha"
+          pnpm install --frozen-lockfile
+          node scripts/prepare-apple-mermaid.mjs
+          git diff --exit-code
+          swift build --package-path apps/macos --build-system native --enable-code-coverage --build-tests
+          node scripts/test-macos-native.mts default \
+            --package-path apps/macos --build-system native --enable-code-coverage \
+            --skip-build --filter ExecApprovalScreenshotProofTests
+          git diff --exit-code
+          capture_dir="apps/macos/Tests/OpenClawIPCTests/pr132503-before-after-output"
+          test -s "$capture_dir/approval-content-view.png"
+          test -s "$capture_dir/approval-content-view-observation.json"
+          cp "$capture_dir/approval-content-view.png" \
+            "$RUNNER_TEMP/pr132503-before-after/before-$BEFORE_SHA.png"
+          cp "$capture_dir/approval-content-view-observation.json" \
+            "$RUNNER_TEMP/pr132503-before-after/before-observation.json"
+          rm -rf "$capture_dir"
+          rm -f apps/macos/Tests/OpenClawIPCTests/ExecApprovalScreenshotProofTests.swift
+
+      - name: Checkout after product source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.AFTER_SHA }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      - name: Capture after content view
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/source"
+          test "$(git rev-parse HEAD)" = "$AFTER_SHA"
+          test "$(shasum -a 256 scripts/test-macos-native.mts | awk '{print $1}')" = "$NATIVE_RUNNER_SHA256"
+          test "$(shasum -a 256 scripts/prepare-apple-mermaid.mjs | awk '{print $1}')" = "$APPLE_ASSET_SCRIPT_SHA256"
+          test "$(shasum -a 256 apps/macos/Package.swift | awk '{print $1}')" = "$MACOS_PACKAGE_SHA256"
+          fixture_sha="$(shasum -a 256 "$GITHUB_WORKSPACE/$FIXTURE_REL" | awk '{print $1}')"
+          install -m 0644 "$GITHUB_WORKSPACE/$FIXTURE_REL" \
+            apps/macos/Tests/OpenClawIPCTests/ExecApprovalScreenshotProofTests.swift
+          test "$(shasum -a 256 apps/macos/Tests/OpenClawIPCTests/ExecApprovalScreenshotProofTests.swift | awk '{print $1}')" = "$fixture_sha"
+          pnpm install --frozen-lockfile
+          node scripts/prepare-apple-mermaid.mjs
+          git diff --exit-code
+          swift build --package-path apps/macos --build-system native --enable-code-coverage --build-tests
+          node scripts/test-macos-native.mts default \
+            --package-path apps/macos --build-system native --enable-code-coverage \
+            --skip-build --filter ExecApprovalScreenshotProofTests
+          git diff --exit-code
+          capture_dir="apps/macos/Tests/OpenClawIPCTests/pr132503-before-after-output"
+          test -s "$capture_dir/approval-content-view.png"
+          test -s "$capture_dir/approval-content-view-observation.json"
+          cp "$capture_dir/approval-content-view.png" \
+            "$RUNNER_TEMP/pr132503-before-after/after-$AFTER_SHA.png"
+          cp "$capture_dir/approval-content-view-observation.json" \
+            "$RUNNER_TEMP/pr132503-before-after/after-observation.json"
+          rm -rf "$capture_dir"
+          rm -f apps/macos/Tests/OpenClawIPCTests/ExecApprovalScreenshotProofTests.swift
+
+      - name: Validate pair and write manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/pr132503-before-after"
+          before_png="$evidence_dir/before-$BEFORE_SHA.png"
+          after_png="$evidence_dir/after-$AFTER_SHA.png"
+          before_observation="$evidence_dir/before-observation.json"
+          after_observation="$evidence_dir/after-observation.json"
+          fixture_sha="$(shasum -a 256 "$FIXTURE_REL" | awk '{print $1}')"
+
+          jq -e \
+            --arg captureKind "rendered native panel content view, not a desktop or full-window screenshot" \
+            --arg command "$FIXED_COMMAND" \
+            --arg rawSession "$FIXED_SESSION_RAW" \
+            --arg expectedSession "$FIXED_SESSION" \
+            '.captureKind == $captureKind and
+             .command == $command and
+             .rawSession == $rawSession and
+             .expectedSession == $expectedSession and
+             .hasAllowOnce == true and
+             .hasSessionLabel == false and
+             .hasExpectedSession == false' \
+            "$before_observation" >/dev/null
+          jq -e \
+            --arg captureKind "rendered native panel content view, not a desktop or full-window screenshot" \
+            --arg command "$FIXED_COMMAND" \
+            --arg rawSession "$FIXED_SESSION_RAW" \
+            --arg expectedSession "$FIXED_SESSION" \
+            '.captureKind == $captureKind and
+             .command == $command and
+             .rawSession == $rawSession and
+             .expectedSession == $expectedSession and
+             .hasAllowOnce == true and
+             .hasSessionLabel == true and
+             .hasExpectedSession == true' \
+            "$after_observation" >/dev/null
+
+          before_hash="$(shasum -a 256 "$before_png" | awk '{print $1}')"
+          after_hash="$(shasum -a 256 "$after_png" | awk '{print $1}')"
+          before_size="$(wc -c < "$before_png" | tr -d '[:space:]')"
+          after_size="$(wc -c < "$after_png" | tr -d '[:space:]')"
+          test "$before_size" -gt 0
+          test "$after_size" -gt 0
+          before_width="$(sips -g pixelWidth "$before_png" | awk '/pixelWidth:/ {print $2}')"
+          before_height="$(sips -g pixelHeight "$before_png" | awk '/pixelHeight:/ {print $2}')"
+          after_width="$(sips -g pixelWidth "$after_png" | awk '/pixelWidth:/ {print $2}')"
+          after_height="$(sips -g pixelHeight "$after_png" | awk '/pixelHeight:/ {print $2}')"
+          test "$before_width" = "$(jq -r .pixelWidth "$before_observation")"
+          test "$before_height" = "$(jq -r .pixelHeight "$before_observation")"
+          test "$after_width" = "$(jq -r .pixelWidth "$after_observation")"
+          test "$after_height" = "$(jq -r .pixelHeight "$after_observation")"
+
+          jobs_json="$RUNNER_TEMP/pr132503-run-jobs.json"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            >"$jobs_json"
+          job_id="$(jq -er --arg name "$JOB_DISPLAY_NAME" \
+            '[.jobs[] | select(.name == $name) | .id][0]' "$jobs_json")"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          job_url="$run_url/job/$job_id"
+
+          jq -n \
+            --arg beforeSha "$BEFORE_SHA" \
+            --arg afterSha "$AFTER_SHA" \
+            --arg sessionDisplayCommit "$SESSION_DISPLAY_COMMIT" \
+            --arg command "$FIXED_COMMAND" \
+            --arg rawSession "$FIXED_SESSION_RAW" \
+            --arg expectedSession "$FIXED_SESSION" \
+            --arg fixturePath "$FIXTURE_REL" \
+            --arg fixtureSha256 "$fixture_sha" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflowSha "$GITHUB_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg jobLogicalId "$GITHUB_JOB" \
+            --arg jobId "$job_id" \
+            --arg jobName "$JOB_DISPLAY_NAME" \
+            --arg runUrl "$run_url" \
+            --arg jobUrl "$job_url" \
+            --arg beforeFilename "$(basename "$before_png")" \
+            --arg afterFilename "$(basename "$after_png")" \
+            --arg beforeHash "$before_hash" \
+            --arg afterHash "$after_hash" \
+            --argjson beforeSize "$before_size" \
+            --argjson afterSize "$after_size" \
+            --argjson beforeWidth "$before_width" \
+            --argjson beforeHeight "$before_height" \
+            --argjson afterWidth "$after_width" \
+            --argjson afterHeight "$after_height" \
+            --slurpfile beforeObservation "$before_observation" \
+            --slurpfile afterObservation "$after_observation" \
+            '{
+              schemaVersion: 1,
+              captureKind: "rendered native panel content view, not a desktop or full-window screenshot",
+              comparisonInvariant: "The product SHA is the only intentional difference; command, raw session, fixture bytes, build path, runner, and capture code are identical.",
+              source: {
+                beforeSha: $beforeSha,
+                afterSha: $afterSha,
+                sessionDisplayCommit: $sessionDisplayCommit
+              },
+              fixedInput: {
+                command: $command,
+                rawSession: $rawSession,
+                expectedTrimmedSession: $expectedSession
+              },
+              fixture: {
+                path: $fixturePath,
+                sha256: $fixtureSha256
+              },
+              github: {
+                repository: $repository,
+                workflowSha: $workflowSha,
+                runId: $runId,
+                runAttempt: $runAttempt,
+                jobLogicalId: $jobLogicalId,
+                jobId: $jobId,
+                jobName: $jobName,
+                runUrl: $runUrl,
+                jobUrl: $jobUrl
+              },
+              captures: {
+                before: {
+                  filename: $beforeFilename,
+                  productSha: $beforeSha,
+                  pngSha256: $beforeHash,
+                  fileSizeBytes: $beforeSize,
+                  pixelWidth: $beforeWidth,
+                  pixelHeight: $beforeHeight,
+                  observation: $beforeObservation[0]
+                },
+                after: {
+                  filename: $afterFilename,
+                  productSha: $afterSha,
+                  pngSha256: $afterHash,
+                  fileSizeBytes: $afterSize,
+                  pixelWidth: $afterWidth,
+                  pixelHeight: $afterHeight,
+                  observation: $afterObservation[0]
+                }
+              }
+            }' >"$evidence_dir/manifest.json"
+
+          rm -f "$before_observation" "$after_observation" "$jobs_json"
+          test -s "$before_png"
+          test -s "$after_png"
+          test -s "$evidence_dir/manifest.json"
+          test ! -e "$evidence_dir/before-observation.json"
+          test ! -e "$evidence_dir/after-observation.json"
+
+      - name: Upload before-after evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-132503-before-after-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pr132503-before-after/before-c4052ca628ac0e1026b82c10d7d80a5ebd8aaff9.png
+            ${{ runner.temp }}/pr132503-before-after/after-a49725c176da7f6f4d90a5703d09ac2224b8c630.png
+            ${{ runner.temp }}/pr132503-before-after/manifest.json
+          if-no-files-found: error
+          compression-level: 6
+          overwrite: false
+          include-hidden-files: false
