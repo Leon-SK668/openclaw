@@ -210,6 +210,11 @@ export function classifyFailoverClassificationFromHttpStatus(
     return toReasonClassification(classify402Message(message));
   }
   if (status === 429) {
+    // The prepared provider owns ambiguous quota semantics; generic billing
+    // wording must not replace a more specific structured classification.
+    if (opts?.preserveProviderSignalClassification && messageClassification) {
+      return messageClassification;
+    }
     if (messageReason === "billing" && !isAmbiguousGeneric429BalanceMessage(message ?? "")) {
       return toReasonClassification("billing");
     }
