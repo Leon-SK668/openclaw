@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AssistantMessage, Context, Model } from "@openclaw/ai";
 import { streamOpenAICompletions } from "@openclaw/ai/internal/openai";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { readPersistedAuthProfileStateRaw } from "../../src/agents/auth-profiles/sqlite.js";
 import { loadAuthProfileStoreWithoutExternalProfiles } from "../../src/agents/auth-profiles/store-runtime.js";
 import { isProfileInCooldown } from "../../src/agents/auth-profiles/usage-state.js";
@@ -39,29 +39,24 @@ const model = {
   maxTokens: 2_048,
 } satisfies Model<"openai-completions">;
 
-let qwenProviders: ProviderPlugin[];
+const registeredProviders = new Map<string, ProviderPlugin[]>();
 
 beforeAll(async () => {
-  const { default: qwenPlugin } = await loadBundledPluginFacade<{
-    default: Parameters<typeof registerProviderPlugin>[0]["plugin"];
-  }>({
-    pluginId: "qwen",
-    artifactBasename: "index.js",
-  });
-  qwenProviders = (
-    await registerProviderPlugin({
-      plugin: qwenPlugin,
-      id: "qwen",
-      name: "Qwen Provider",
-    })
-  ).providers;
+  for (const pluginId of ["qwen", "openrouter"]) {
+    const { default: plugin } = await loadBundledPluginFacade<{
+      default: Parameters<typeof registerProviderPlugin>[0]["plugin"];
+    }>({ pluginId, artifactBasename: "index.js" });
+    const { providers } = await registerProviderPlugin({ plugin, id: pluginId, name: pluginId });
+    registeredProviders.set(pluginId, providers);
+  }
 });
 
 type ErrorFixture = {
   status: number;
-  code: string;
+  code: string | number;
   type?: string;
   message: string;
+  metadata?: { raw: string };
 };
 
 type ProfileUsageReadback = {
@@ -72,10 +67,10 @@ type ProfileUsageReadback = {
   disabledReason?: string;
 };
 
-function prepareProviderOwner(providerId: string): ProviderPlugin {
-  const provider = requireRegisteredProvider(qwenProviders, providerId);
+function prepareProviderOwner(providerId: string, pluginId = "qwen"): ProviderPlugin {
+  const provider = requireRegisteredProvider(registeredProviders.get(pluginId) ?? [], providerId);
   const registry = createEmptyPluginRegistry();
-  registry.providers.push({ pluginId: "qwen", provider, source: "test" });
+  registry.providers.push({ pluginId, provider, source: "test" });
   const config = {};
   const metadataSnapshot = createPluginMetadataSnapshot({
     config,
@@ -110,6 +105,7 @@ async function runTransportError(params: {
           code: params.fixture.code,
           type: params.fixture.type ?? params.fixture.code,
           message: params.fixture.message,
+          ...(params.fixture.metadata ? { metadata: params.fixture.metadata } : {}),
         },
       }),
     );
@@ -136,9 +132,12 @@ async function runTransportError(params: {
       stopReason: "error",
       provider: params.provider,
       model: MODEL_ID,
-      errorCode: params.fixture.code,
+      errorCode: String(params.fixture.code),
     });
     expect(assistant.errorMessage).toContain(params.fixture.message);
+    if (params.fixture.metadata) {
+      expect(assistant.errorMessage).toContain(params.fixture.metadata.raw);
+    }
     return assistant;
   } finally {
     await new Promise<void>((resolve, reject) => {
@@ -157,6 +156,7 @@ async function runThroughFailureRecovery(params: {
   usage: ProfileUsageReadback | undefined;
   affectedModelBlocked: boolean;
   otherModelBlocked: boolean;
+  suspensionReasons: string[];
 }> {
   const assistant = await runTransportError(params);
   return await withOpenClawTestState(
@@ -207,6 +207,7 @@ async function runThroughFailureRecovery(params: {
         assistant,
       });
       let failureReason: unknown;
+      const suspensionReasons: string[] = [];
       try {
         await handleEmbeddedAssistantFailure({
           runParams: runParams as never,
@@ -233,7 +234,9 @@ async function runThroughFailureRecovery(params: {
           overloadProfileRotations: 0,
           previousRetryFailoverReason: null,
           traceAttempts: [],
-          suspendForFailure: vi.fn(),
+          suspendForFailure: ({ reason }) => {
+            suspensionReasons.push(reason);
+          },
           suspensionSessionId: sessionId,
           agentDir: state.agentDir(),
           isProbeSession: false,
@@ -257,6 +260,7 @@ async function runThroughFailureRecovery(params: {
         usage: persisted?.usageStats?.[profileId],
         affectedModelBlocked: isProfileInCooldown(freshStore, profileId, undefined, MODEL_ID),
         otherModelBlocked: isProfileInCooldown(freshStore, profileId, undefined, "qwen3.8-flash"),
+        suspensionReasons,
       };
       console.info(
         "DASHSCOPE_PROFILE_PROOF",
@@ -298,7 +302,62 @@ function expectBillingState(result: Awaited<ReturnType<typeof runThroughFailureR
   expect.soft(result.otherModelBlocked).toBe(true);
 }
 
+function expectOpenRouterState(
+  result: Awaited<ReturnType<typeof runThroughFailureRecovery>>,
+  reason: "rate_limit" | "billing",
+): void {
+  expect.soft(result.reason).toBe(reason);
+  expect.soft(result.failureReason).toBe(reason);
+  expect
+    .soft(result.suspensionReasons)
+    .toEqual([reason === "rate_limit" ? "quota_exhausted" : "manual"]);
+  // OpenRouter manages credential cooldowns; preserve the existing writer/reader bypass.
+  expect.soft(result.usage).toBeUndefined();
+  expect.soft(result.affectedModelBlocked).toBe(false);
+  expect.soft(result.otherModelBlocked).toBe(false);
+}
+
 describe("Qwen DashScope 429 profile classification", () => {
+  it("keeps registered OpenRouter wrapper errors in the rate-limit lane", async () => {
+    const providerOwner = prepareProviderOwner("openrouter", "openrouter");
+    expect(
+      providerOwner.classifyFailoverReason?.({
+        provider: "openrouter",
+        status: 429,
+        errorMessage: "Provider returned error",
+      }),
+    ).toBe("timeout");
+    const result = await runThroughFailureRecovery({
+      provider: "openrouter",
+      providerOwner,
+      fixture: { status: 429, code: 429, message: "Provider returned error" },
+    });
+    expectOpenRouterState(result, "rate_limit");
+  });
+
+  it("keeps registered OpenRouter upstream billing inside metadata.raw in the billing lane", async () => {
+    const result = await runThroughFailureRecovery({
+      provider: "openrouter",
+      providerOwner: prepareProviderOwner("openrouter", "openrouter"),
+      fixture: {
+        status: 429,
+        code: 429,
+        message: "Provider returned error",
+        metadata: { raw: '{"error":{"code":"insufficient_quota","type":"insufficient_quota"}}' },
+      },
+    });
+    expectOpenRouterState(result, "billing");
+  });
+
+  it("preserves the registered OpenRouter explicit key-budget billing decision", async () => {
+    const result = await runThroughFailureRecovery({
+      provider: "openrouter",
+      providerOwner: prepareProviderOwner("openrouter", "openrouter"),
+      fixture: { status: 429, code: 429, message: "API key budget limit exceeded" },
+    });
+    expectOpenRouterState(result, "billing");
+  });
+
   it.each([
     {
       provider: QWEN_TOKEN_PLAN_PROVIDER_ID,

@@ -44,4 +44,27 @@ describe("prepared provider HTTP 429 precedence", () => {
       ).toEqual({ kind: "reason", reason: "rate_limit" });
     }
   });
+
+  it.each(["timeout", "overloaded", "auth", "format", "context_overflow"] as const)(
+    "does not promote the provider's %s fallback above HTTP 429 semantics",
+    (reason) => {
+      const providerPlugin = { id: "prepared-owner", classifyFailoverReason: () => reason };
+      expect(
+        classifyFailoverSignal(
+          { provider: "custom-route", status: 429, message: "Provider returned error" },
+          { providerPlugin },
+        ),
+      ).toEqual({ kind: "reason", reason: "rate_limit" });
+      expect(
+        classifyFailoverSignal(
+          {
+            provider: "custom-route",
+            status: 429,
+            message: 'Provider returned error\n{"error":{"code":"insufficient_quota"}}',
+          },
+          { providerPlugin },
+        ),
+      ).toEqual({ kind: "reason", reason: "billing" });
+    },
+  );
 });
