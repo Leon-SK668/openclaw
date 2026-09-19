@@ -1,0 +1,27 @@
+{
+  "sourceRun": "https://github.com/Leon-SK668/openclaw/actions/runs/35279333377",
+  "artifactId": 10522017717,
+  "proofHead": "bf19072f232509e808f2887613c51fd42fabe379",
+  "prHead": "a49725c176da7f6f4d90a5703d09ac2224b8c630",
+  "unchangedProductionBlobs": [
+    {
+      "path": "apps/macos/Sources/OpenClaw/ExecApprovalPanelView.swift",
+      "blob": "e4be882004ec141a11563b63488498ab65041a85"
+    },
+    {
+      "path": "apps/macos/Sources/OpenClaw/ExecApprovalsPromptPresenter.swift",
+      "blob": "476098b6d3ad0e6116c7a0431beeef88deaeb273"
+    }
+  ],
+  "images": [
+    {
+      "name": "approval-content-view-blank.png",
+      "sha256": "97a9726dde134a1e8ec0d164be57c880967fd943fd995f18288e7455c154bc0c"
+    },
+    {
+      "name": "approval-content-view-populated.png",
+      "sha256": "eda8f0345bbf6aa910ff9410ba061c4dff00800577b8925ee85621c3e0b1003e"
+    }
+  ],
+  "scope": "Unmodified historical native content-view renders, not source before/after or window screenshots"
+}

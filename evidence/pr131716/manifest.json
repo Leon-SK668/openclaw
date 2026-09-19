@@ -1,0 +1,124 @@
+{
+  "scope": "Historical Chromium screenshot crops only; sidebar removed, no UI redraw or new runtime claim",
+  "captures": [
+    {
+      "name": "initial-v1",
+      "url": "https://github.com/user-attachments/assets/8f675cca-5728-45f2-b7d2-f3fff91468da",
+      "sha256": "88a43a8c9b6552da1c39f066901ce5509d56496aba51dff8d6f90424ab946e34",
+      "bytes": 119210,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "7dee0fb0767baac64b7eff4904b6afe99756eab41f69c008e0e4c3af86a9a4cc"
+    },
+    {
+      "name": "revisit-search",
+      "url": "https://github.com/user-attachments/assets/79cefc10-690e-40c2-8631-d938e91d0cd2",
+      "sha256": "fd16334338911d4029a85d8238efda364589a760b0191a785706f0304af15852",
+      "bytes": 119193,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "5f6d8bae59c2d558e3f4f336cd7369735c6abc63c2d9e0184c950073c1032776"
+    },
+    {
+      "name": "legacy-group",
+      "url": "https://github.com/user-attachments/assets/2999b7b0-cfb3-4415-80f6-d67c66159474",
+      "sha256": "9943d7664a726441ac7bdcbf37d29b5b4107051a316e34be620e58449503d0da",
+      "bytes": 120225,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "cc0b1ba7577cd9a6683c44191e11eb6b883584ce7a8e913d2ba91074e4d611aa"
+    },
+    {
+      "name": "archived-before",
+      "url": "https://github.com/user-attachments/assets/5e5461af-2ab7-4ea9-ac7c-ea212583bb38",
+      "sha256": "d3211f2594b7758dc1c5bc30851fb087c49924f8c54ced761417d27add613182",
+      "bytes": 108537,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "de3578d696b60988808933927f5f002fd361b7c1da1d036539c0b35e8f5a7443"
+    },
+    {
+      "name": "archived-to-active",
+      "url": "https://github.com/user-attachments/assets/d0b25429-6f4a-41f4-82b9-0c86c9bf5e2c",
+      "sha256": "c7c1480becba9ac24e7a496fb8821fc0c8545872748d9a1ac6558687c7ba2a3f",
+      "bytes": 118418,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "943975cdd4c1c8c500bcdb55eea6c292ab99b145f883cda8581660d27429ee0c"
+    },
+    {
+      "name": "all-before",
+      "url": "https://github.com/user-attachments/assets/ab9977e3-df65-42f4-bf7b-1524fd956ba0",
+      "sha256": "3cfc982d5329e5cd5a3db8c065c29c5fa66120932219b163b976a8bd36ba9c1b",
+      "bytes": 119111,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "021880890296811907d7c0d0ba8ec766e519b99674aaec1f64d610c1793befa1"
+    },
+    {
+      "name": "all-to-active",
+      "url": "https://github.com/user-attachments/assets/693778b9-e7d0-40b8-ae04-2d43038c2257",
+      "sha256": "f8284a467ce96752b09e84333cf0cc5e08def2bbd4c27c96d496e20523bf6a16",
+      "bytes": 118421,
+      "crop": [
+        258,
+        0,
+        1280,
+        900
+      ],
+      "outputSize": [
+        1022,
+        900
+      ],
+      "outputSha256": "7ce3fd71932a2f96db7cf879ebfad503a612b959dea1ab8d6f741200e8a70ef8"
+    }
+  ]
+}
