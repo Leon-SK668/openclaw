@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { SpeechProviderConfig, SpeechSynthesisRequest } from "openclaw/plugin-sdk/speech-core";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type SpeechSynthesisTarget = SpeechSynthesisRequest["target"];
 
@@ -154,6 +154,7 @@ async function synthesize(params: {
 function parseAudioPayload(result: { audioBuffer: Buffer }) {
   const jsonStart = result.audioBuffer.indexOf("{");
   return JSON.parse(result.audioBuffer.subarray(jsonStart).toString("utf8")) as {
+    args: string[];
     stdin?: string;
     textArg?: string;
   };
@@ -175,21 +176,6 @@ function expectArgsContainSequence(args: string[], sequence: string[]) {
 }
 
 describe("buildCliSpeechProvider", () => {
-  beforeAll(async () => {
-    // Prepare the real lazy process/worker runtime before timing its callers.
-    // A cold compiled-worker generation can take minutes; the timeout and
-    // cleanup cases below must still keep their original execution deadlines.
-    const fixture = createCliFixture();
-    try {
-      const result = await synthesize({
-        providerConfig: baseProviderConfig(fixture.script, { stdin: true, outputFormat: "wav" }),
-      });
-      expect(parseAudioPayload(result).stdin).toBe("hello world");
-    } finally {
-      rmSync(fixture.dir, { recursive: true, force: true });
-    }
-  }, 360_000);
-
   beforeEach(() => {
     runFfmpegMock.mockImplementation(async (args) => {
       const outputPath = args.at(-1);
@@ -347,6 +333,54 @@ describe("buildCliSpeechProvider", () => {
       const audioPayload = parseAudioPayload(result);
       expect(audioPayload.stdin).toBe("");
       expect(audioPayload.textArg).toBe("spoken words");
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "consecutive single- and double-quoted empty arguments",
+      command: "--voice \"\"  ''",
+      args: [],
+      expected: ["--voice", "", ""],
+    },
+    {
+      name: "quoted whitespace",
+      command: '--voice " \t "',
+      args: [],
+      expected: ["--voice", " \t "],
+    },
+    {
+      name: "adjacent quoted and unquoted fragments",
+      command: "--voice a''b\"\"",
+      args: [],
+      expected: ["--voice", "ab"],
+    },
+    {
+      name: "an explicit array empty argument",
+      command: "",
+      args: ["--voice", ""],
+      expected: ["--voice", ""],
+    },
+  ])("preserves $name through the speech process", async ({ command, args, expected }) => {
+    const fixture = createCliFixture();
+    try {
+      const result = await synthesize({
+        providerConfig: {
+          command: `"${process.execPath}" "${fixture.script}" ${command}`,
+          args: [...args, "--text", "{{Text}}"],
+          outputFormat: "wav",
+        },
+        text: "spoken words",
+      });
+
+      expect(result.outputFormat).toBe("wav");
+      expect(parseAudioPayload(result)).toEqual({
+        args: [...expected, "--text", "spoken words"],
+        stdin: "",
+        textArg: "spoken words",
+      });
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
     }
