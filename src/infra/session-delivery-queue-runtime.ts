@@ -29,6 +29,7 @@ let runtime:
   | (SessionDeliveryRuntime & {
       runningEntries: Map<string, Promise<void>>;
       pendingSchedules: Set<Promise<void>>;
+      observerLifetime: AbortController;
     })
   | undefined;
 let runtimeGeneration = 0;
@@ -153,6 +154,7 @@ async function runScheduledSessionDelivery(id: string, generation: number): Prom
 
 /** Register callbacks; stop fences scheduling and joins admitted reads and drains. */
 export function startSessionDeliveryRuntime(params: SessionDeliveryRuntime): () => Promise<void> {
+  runtime?.observerLifetime.abort();
   runtimeGeneration += 1;
   const generation = runtimeGeneration;
   clearScheduledEntries();
@@ -160,10 +162,12 @@ export function startSessionDeliveryRuntime(params: SessionDeliveryRuntime): () 
     ...params,
     runningEntries: new Map<string, Promise<void>>(),
     pendingSchedules: new Set<Promise<void>>(),
+    observerLifetime: new AbortController(),
   };
   runtime = activeRuntime;
   let stopPromise: Promise<void> | undefined;
   return () => {
+    activeRuntime.observerLifetime.abort();
     if (runtimeGeneration === generation) {
       runtimeGeneration += 1;
       runtime = undefined;
@@ -177,6 +181,29 @@ export function startSessionDeliveryRuntime(params: SessionDeliveryRuntime): () 
     ]).then(() => {});
     return stopPromise;
   };
+}
+
+/** Detached producers need a live owner to deliver and observe their queued completion. */
+export function hasSessionDeliveryRuntime(): boolean {
+  return runtime !== undefined && !runtime.observerLifetime.signal.aborted;
+}
+
+/** Join local observations before shutdown without cancelling the durable delivery itself. */
+export async function observeSessionDeliveryRuntime<T>(
+  observe: (signal: AbortSignal | undefined) => Promise<T>,
+): Promise<T> {
+  const activeRuntime = runtime;
+  if (!activeRuntime) {
+    return await observe(undefined);
+  }
+  const settled = createDeferredCore();
+  activeRuntime.pendingSchedules.add(settled.promise);
+  try {
+    return await observe(activeRuntime.observerLifetime.signal);
+  } finally {
+    activeRuntime.pendingSchedules.delete(settled.promise);
+    settled.resolve();
+  }
 }
 
 /** Schedule one durable entry when a gateway runtime is available. */

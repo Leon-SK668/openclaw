@@ -8,6 +8,8 @@ import { withTestDir } from "../test-helpers/temp-dir.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { drainPendingSessionDelivery } from "./session-delivery-queue-recovery.js";
 import {
+  hasSessionDeliveryRuntime,
+  observeSessionDeliveryRuntime,
   schedulePendingSessionDeliveries,
   scheduleSessionDelivery,
   startSessionDeliveryRuntime,
@@ -70,6 +72,43 @@ afterEach(() => {
 });
 
 describe("session delivery queue runtime", () => {
+  it("cancels retired observers and joins their outstanding reads without retiring the replacement", async () => {
+    expect(hasSessionDeliveryRuntime()).toBe(false);
+    await withRuntime(async (startRuntime) => {
+      const gate = createDeferredCore();
+      const stopOld = startRuntime({ deliver: async () => {}, log: logger });
+      expect(hasSessionDeliveryRuntime()).toBe(true);
+      let oldSignal: AbortSignal | undefined;
+      const observed = observeSessionDeliveryRuntime(async (signal) => {
+        oldSignal = signal;
+        await gate.promise;
+      });
+      const stopNew = startRuntime({ deliver: async () => {}, log: logger });
+      try {
+        expect(oldSignal?.aborted).toBe(true);
+        let stopped = false;
+        const stopping = stopOld().then(() => {
+          stopped = true;
+        });
+        await Promise.resolve();
+        expect(stopped).toBe(false);
+        await observeSessionDeliveryRuntime(async (signal) => {
+          expect(signal?.aborted).toBe(false);
+        });
+        gate.resolve();
+        await observed;
+        await stopping;
+        expect(stopped).toBe(true);
+        expect(hasSessionDeliveryRuntime()).toBe(true);
+      } finally {
+        gate.resolve();
+        await observed;
+        await Promise.all([stopOld(), stopNew()]);
+      }
+    });
+    expect(hasSessionDeliveryRuntime()).toBe(false);
+  });
+
   it("drains a newly scheduled durable entry", async () => {
     vi.useFakeTimers();
     await withRuntime(async (startRuntime, queueContext) => {
