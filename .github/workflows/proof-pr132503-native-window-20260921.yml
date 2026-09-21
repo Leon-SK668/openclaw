@@ -1,0 +1,144 @@
+name: PR 132503 running native window proof
+
+on:
+  push:
+    branches:
+      - proof/leon-pr132503-native-window-20260921
+    paths:
+      - .github/workflows/proof-pr132503-native-window-20260921.yml
+      - tasks/pr132503-native-window/**
+
+permissions:
+  contents: read
+
+env:
+  BEFORE_SHA: c4052ca628ac0e1026b82c10d7d80a5ebd8aaff9
+  AFTER_SHA: a49725c176da7f6f4d90a5703d09ac2224b8c630
+  FIXTURE_REL: tasks/pr132503-native-window/ExecApprovalWindowScreenshotProofTests.swift
+  NATIVE_RUNNER_SHA256: 58f79c0d94e6890cb1e1f5e10380b021a8149b7e3b67cc1df3ecf38d5b56d05f
+  APPLE_ASSET_SCRIPT_SHA256: 0e914c41fec9dce2dfcffcf774a0c6f121b43044176e930c15b7cc7033f7384b
+  MACOS_PACKAGE_SHA256: 5969d819e1ad2080441d5e0a6237b4a5f05c46f6450c846bc8b5dbc9a38068de
+
+jobs:
+  native-window-proof:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout evidence definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare isolated evidence directory
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          evidence_dir="$(mktemp -d "$RUNNER_TEMP/pr132503-native-window.XXXXXX")"
+          echo "EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
+          corepack enable
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Checkout exact before source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.BEFORE_SHA }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build and capture both running native windows
+        run: |
+          set -euo pipefail
+          fixture_sha="$(shasum -a 256 "$FIXTURE_REL" | awk '{print $1}')"
+          cd "$GITHUB_WORKSPACE/source"
+          for revision in before after; do
+            if [ "$revision" = before ]; then
+              expected_sha="$BEFORE_SHA"
+            else
+              expected_sha="$AFTER_SHA"
+              # The first native test has exited. Preserve build caches, not old
+              # source or screenshot output; Swift rebuilds the changed sources.
+              git fetch --depth=1 origin "$expected_sha"
+              git checkout --detach "$expected_sha"
+            fi
+            test "$(git rev-parse HEAD)" = "$expected_sha"
+            test "$(shasum -a 256 scripts/test-macos-native.mts | awk '{print $1}')" = "$NATIVE_RUNNER_SHA256"
+            test "$(shasum -a 256 scripts/prepare-apple-mermaid.mjs | awk '{print $1}')" = "$APPLE_ASSET_SCRIPT_SHA256"
+            test "$(shasum -a 256 apps/macos/Package.swift | awk '{print $1}')" = "$MACOS_PACKAGE_SHA256"
+            fixture_target=apps/macos/Tests/OpenClawIPCTests/ExecApprovalWindowScreenshotProofTests.swift
+            install -m 0644 "$GITHUB_WORKSPACE/$FIXTURE_REL" "$fixture_target"
+            test "$(shasum -a 256 "$fixture_target" | awk '{print $1}')" = "$fixture_sha"
+            pnpm install --frozen-lockfile
+            node scripts/prepare-apple-mermaid.mjs
+            git diff --exit-code
+            swift build --package-path apps/macos --build-system native --enable-code-coverage --build-tests
+            node scripts/test-macos-native.mts default \
+              --package-path apps/macos --build-system native --enable-code-coverage \
+              --skip-build --filter ExecApprovalWindowScreenshotProofTests
+            git diff --exit-code
+            capture_dir=apps/macos/Tests/OpenClawIPCTests/pr132503-native-window-output
+            test -s "$capture_dir/approval-window.png"
+            test -s "$capture_dir/observation.json"
+            mv "$capture_dir/approval-window.png" "$EVIDENCE_DIR/$revision-$expected_sha.png"
+            mv "$capture_dir/observation.json" "$EVIDENCE_DIR/$revision-observation.json"
+            printf '%s\n' "$expected_sha" > "$EVIDENCE_DIR/$revision-source.txt"
+          done
+          # Run layout checks separately so other panels cannot occlude the capture.
+          node scripts/test-macos-native.mts default \
+            --package-path apps/macos --build-system native --enable-code-coverage \
+            --skip-build --filter ExecApprovalPromptLayoutTests
+
+      - name: Validate identities and record original capture hashes
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, struct
+          root = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          fixture = pathlib.Path(os.environ['FIXTURE_REL'])
+          captures = {}
+          for label, env_key, session_present in [('before', 'BEFORE_SHA', False), ('after', 'AFTER_SHA', True)]:
+              sha = os.environ[env_key]
+              assert root.joinpath(label + '-source.txt').read_text().strip() == sha
+              observed = json.loads(root.joinpath(label + '-observation.json').read_text())
+              assert observed['captureKind'] == 'macOS screencapture of the visible native approval window'
+              assert observed['command'] == '/bin/sh -lc pwd'
+              assert observed['rawSession'] == '  agent:main:telegram:dm:12345  '
+              assert observed['windowVisible'] and observed['windowOnScreen'] and observed['windowOwnedByTestProcess']
+              assert observed['captureExitCode'] == 0 and observed['accessibilityHasAllowOnce']
+              assert observed['accessibilityHasSessionLabel'] is session_present
+              assert observed['accessibilityHasExpectedSession'] is session_present
+              filename = label + '-' + sha + '.png'
+              data = root.joinpath(filename).read_bytes()
+              assert data[:8] == b'\x89PNG\r\n\x1a\n'
+              width, height = struct.unpack('>II', data[16:24])
+              assert (width, height) == (observed['pixelWidth'], observed['pixelHeight'])
+              captures[label] = dict(filename=filename, productSha=sha, pngSha256=hashlib.sha256(data).hexdigest(),
+                                     fileSizeBytes=len(data), pixelWidth=width, pixelHeight=height, observation=observed)
+          manifest = dict(schemaVersion=1,
+                          captureKind='macOS screencapture of the visible native approval window',
+                          source=dict(beforeSha=os.environ['BEFORE_SHA'], afterSha=os.environ['AFTER_SHA']),
+                          fixture=dict(path=str(fixture), sha256=hashlib.sha256(fixture.read_bytes()).hexdigest()),
+                          github=dict(repository=os.environ['GITHUB_REPOSITORY'], workflowSha=os.environ['GITHUB_SHA'],
+                                      runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                                      runUrl=os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID']),
+                          captures=captures,
+                          scope='Identical synthetic request and capture fixture. Only the two product revisions differ. No product or permission edits; screenshots require independent visual inspection.')
+          root.joinpath('manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload original window screenshots and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-132503-native-windows-${{ github.run_id }}
+          path: |
+            ${{ env.EVIDENCE_DIR }}/before-*.png
+            ${{ env.EVIDENCE_DIR }}/after-*.png
+            ${{ env.EVIDENCE_DIR }}/manifest.json
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: false
