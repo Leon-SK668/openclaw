@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/config.js";
 import { startSessionDeliveryRuntime } from "../../infra/session-delivery-queue-runtime.js";
@@ -19,7 +18,10 @@ import {
 } from "../../tasks/task-runtime.test-helpers.js";
 import { withTestDir } from "../../test-helpers/temp-dir.js";
 import { withEnvAsync } from "../../test-utils/env.js";
-import { createMediaGenerationTaskStatusOwner } from "../media-generation-task-status-shared.js";
+import {
+  createMediaGenerationTaskStatusOwner,
+  MEDIA_GENERATION_QUEUED_COMPLETION_PROGRESS,
+} from "../media-generation-task-status-shared.js";
 import { resetRecentMediaGenerationDuplicateGuardsForTests } from "../media-generation-task-status-shared.test-support.js";
 import {
   createMediaGenerationTaskLifecycle,
@@ -125,7 +127,7 @@ it.each([
 
 // Exercise the real media waiter, SQLite queue, task registry, and command lane.
 // Only generation and the final delivery adapter are synthetic external boundaries.
-it("keeps queued media pending past 120 real seconds and follows its eventual delivery outcome", async () => {
+it("keeps queued media pending until delivery settles, including runtime shutdown", async () => {
   await withTestDir({ prefix: "openclaw-media-pending-queue-" }, async (tempDir) => {
     await withEnvAsync({ OPENCLAW_STATE_DIR: tempDir }, async () => {
       resetDetachedTaskLifecycleRuntimeForTests();
@@ -167,14 +169,36 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
       const endpoint = `http://127.0.0.1:${address.port}`;
       const failures: string[] = [];
       const queueErrors: string[] = [];
-      const stop = startSessionDeliveryRuntime({
+      const milestones = new Map<
+        string,
+        { started: Deferred; queued: Deferred; entered: Deferred }
+      >();
+      const prepareMilestones = (sessionKey: string) => {
+        const ready = {
+          started: createDeferredCore(),
+          queued: createDeferredCore(),
+          entered: createDeferredCore(),
+        };
+        milestones.set(sessionKey, ready);
+        return ready;
+      };
+      const awaitReadiness = async (ready: Promise<unknown>, work: Promise<void>[]) => {
+        await Promise.race([
+          ready,
+          ...work.map(async (pending) => {
+            await pending;
+            throw new Error("Media work settled before its held delivery became ready");
+          }),
+        ]);
+      };
+      const runtimeOptions: Parameters<typeof startSessionDeliveryRuntime>[0] = {
         queueContext,
         log: { info() {}, warn() {}, error: (message) => queueErrors.push(message) },
         deliver: async (entry) => {
           if (entry.kind !== "agentTurn") {
             throw new Error("Expected the generated-media agent-turn entry");
           }
-          await enqueueCommandInLane(`session:${entry.sessionKey}`, async () => {
+          const delivery = enqueueCommandInLane(`session:${entry.sessionKey}`, async () => {
             const media = await Promise.all(
               (entry.expectedMediaUrls ?? []).map(async (filename) => {
                 expect(filename).toBe(mediaPath);
@@ -190,9 +214,12 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
               throw new SessionDeliveryDeadLetteredError("synthetic recipient rejected delivery");
             }
           });
+          milestones.get(entry.sessionKey)?.entered.resolve();
+          await delivery;
         },
-      });
-      const lifecycle = createMediaGenerationTaskLifecycle({
+      };
+      let stop = startSessionDeliveryRuntime(runtimeOptions);
+      const mediaLifecycle = createMediaGenerationTaskLifecycle({
         toolName: "image_generate",
         taskKind: "image_generation",
         label: "Image generation",
@@ -203,6 +230,18 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
         announceType: "image generation task",
         completionLabel: "image",
       });
+      const lifecycle: typeof mediaLifecycle = {
+        ...mediaLifecycle,
+        recordTaskProgress(params) {
+          mediaLifecycle.recordTaskProgress(params);
+          if (
+            params.progressSummary === MEDIA_GENERATION_QUEUED_COMPLETION_PROGRESS &&
+            params.handle
+          ) {
+            milestones.get(params.handle.requesterSessionKey)?.queued.resolve();
+          }
+        },
+      };
       const status = createMediaGenerationTaskStatusOwner({
         taskKind: "image_generation",
         toolName: "image_generate",
@@ -217,6 +256,7 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
       try {
         for (const name of ["late-success", "late-failure", "generation-failure"]) {
           const sessionKey = `agent:main:media-proof:${name}`;
+          const ready = prepareMilestones(sessionKey);
           const gate = createDeferredCore();
           gates.push(gate);
           parents.push(
@@ -256,27 +296,33 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
                 },
               });
               expect(started.details).toMatchObject({ async: true, status: "started" });
+              ready.started.resolve();
               await gate.promise;
             }),
           );
         }
-        await expect
-          .poll(async () => (await loadPendingSessionDeliveries(queueContext)).length, {
-            timeout: 10_000,
-          })
-          .toBe(3);
+        await awaitReadiness(
+          Promise.all([...milestones.values()].map((ready) => ready.started.promise)),
+          parents,
+        );
+        await awaitReadiness(
+          Promise.all(
+            [...milestones.values()].flatMap((ready) => [
+              ready.queued.promise,
+              ready.entered.promise,
+            ]),
+          ),
+          [...parents, ...background],
+        );
+        expect(await loadPendingSessionDeliveries(queueContext)).toHaveLength(3);
         for (const { handle } of scenarios) {
-          await expect
-            .poll(() => getCommandLaneSnapshot(`session:${handle.requesterSessionKey}`), {
-              timeout: 10_000,
-            })
-            .toMatchObject({
-              activeCount: 1,
-              queuedCount: 1,
-            });
+          expect(getCommandLaneSnapshot(`session:${handle.requesterSessionKey}`)).toMatchObject({
+            activeCount: 1,
+            queuedCount: 1,
+          });
         }
-        // Real elapsed time crosses the shipped 120-second producer deadline.
-        await delay(122_000);
+        // The producer's fake-clock regressions cover the 120-second deadline.
+        // This composition proves real custody and final readback without a CI sleep.
         expect.soft(received).toEqual([]);
         expect.soft(failures).toEqual([]);
         for (const { name, handle } of scenarios) {
@@ -302,9 +348,8 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
         }
         await Promise.all(parents);
         await Promise.all(background);
-        await expect
-          .poll(async () => (await loadPendingSessionDeliveries(queueContext)).length)
-          .toBe(0);
+        await stop();
+        expect(await loadPendingSessionDeliveries(queueContext)).toHaveLength(0);
         expect(received).toHaveLength(3);
         for (const { name, handle } of scenarios) {
           const task = getTaskById(handle.taskId);
@@ -337,7 +382,9 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
           );
         }
         expect(queueErrors).toEqual([]);
+        stop = startSessionDeliveryRuntime(runtimeOptions);
         const shutdownSession = "agent:main:media-proof:runtime-stop";
+        const shutdownReady = prepareMilestones(shutdownSession);
         const shutdownGate = createDeferredCore();
         gates.push(shutdownGate);
         const shutdownHandle = lifecycle.createTaskRun({
@@ -348,34 +395,44 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
         if (!shutdownHandle) {
           throw new Error("Expected a task for the shutdown proof");
         }
-        parents.push(
-          enqueueCommandInLane(`session:${shutdownSession}`, async () => {
-            scheduleMediaGenerationTaskCompletion({
-              lifecycle,
-              handle: shutdownHandle,
-              scheduleBackgroundWork: (work) => background.push(work()),
-              progressSummary: "Generating image",
-              toolName: "Image generation",
-              onWakeFailure: (message) => failures.push(message),
-              run: async () => ({
-                provider: "fixture",
-                model: "local-image",
-                count: 1,
-                wakeResult: "ready",
-                attachments: [{ type: "image" as const, path: mediaPath }],
-              }),
-            });
-            await shutdownGate.promise;
-          }),
+        let shutdownBackground: Promise<void> | undefined;
+        const shutdownParent = enqueueCommandInLane(`session:${shutdownSession}`, async () => {
+          scheduleMediaGenerationTaskCompletion({
+            lifecycle,
+            handle: shutdownHandle,
+            scheduleBackgroundWork: (work) => {
+              shutdownBackground = work();
+              background.push(shutdownBackground);
+            },
+            progressSummary: "Generating image",
+            toolName: "Image generation",
+            onWakeFailure: (message) => failures.push(message),
+            run: async () => ({
+              provider: "fixture",
+              model: "local-image",
+              count: 1,
+              wakeResult: "ready",
+              attachments: [{ type: "image" as const, path: mediaPath }],
+            }),
+          });
+          shutdownReady.started.resolve();
+          await shutdownGate.promise;
+        });
+        parents.push(shutdownParent);
+        await awaitReadiness(shutdownReady.started.promise, [shutdownParent]);
+        if (!shutdownBackground) {
+          throw new Error("Expected scheduled shutdown media work");
+        }
+        await awaitReadiness(
+          Promise.all([shutdownReady.queued.promise, shutdownReady.entered.promise]),
+          [shutdownParent, shutdownBackground],
         );
-        await expect
-          .poll(() => getCommandLaneSnapshot(`session:${shutdownSession}`), {
-            timeout: 10_000,
-          })
-          .toMatchObject({ activeCount: 1, queuedCount: 1 });
+        expect(getCommandLaneSnapshot(`session:${shutdownSession}`)).toMatchObject({
+          activeCount: 1,
+          queuedCount: 1,
+        });
         const failuresBeforeStop = failures.length;
         const stopping = stop();
-        await Promise.all(background);
         expect(getTaskById(shutdownHandle.taskId)).toMatchObject({ status: "running" });
         expect(getTaskById(shutdownHandle.taskId)?.terminalOutcome).toBeUndefined();
         expect(failures).toHaveLength(failuresBeforeStop);
@@ -384,11 +441,17 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
         shutdownGate.resolve();
         await Promise.all(parents);
         await stopping;
+        await Promise.all(background);
         expect(received).toHaveLength(4);
         expect(await loadPendingSessionDeliveries(queueContext)).toHaveLength(0);
+        expect(getTaskById(shutdownHandle.taskId)).toMatchObject({
+          status: "succeeded",
+          terminalOutcome: "blocked",
+        });
+        expect(getTaskById(shutdownHandle.taskId)?.terminalSummary).toContain(mediaPath);
         console.log(
           "MEDIA_QUEUE_OBSERVER_STOP",
-          "observer joined; admitted delivery retained and settled once",
+          "observer joined; admitted delivery and task settled once",
         );
       } finally {
         for (const gate of gates) {
@@ -409,4 +472,4 @@ it("keeps queued media pending past 120 real seconds and follows its eventual de
       }
     });
   });
-}, 240_000);
+}, 30_000);

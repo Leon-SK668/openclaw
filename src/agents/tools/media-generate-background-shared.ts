@@ -10,7 +10,10 @@ import { runWithoutOwnedSessionTranscriptWrites } from "../../config/sessions/tr
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { clearAgentRunContext, registerAgentRunContext } from "../../infra/agent-run-registry.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import { observeSessionDeliveryRuntime } from "../../infra/session-delivery-queue-runtime.js";
+import {
+  observeSessionDeliveryRuntime,
+  type SessionDeliveryObservation,
+} from "../../infra/session-delivery-queue-runtime.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { parseCronRunScopeSuffix } from "../../sessions/session-key-utils.js";
 import {
@@ -156,6 +159,7 @@ type MediaGenerationTaskLifecycle = {
 function waitForMediaGenerationCompletionHandoffRetry(
   delayMs: number,
   signal?: AbortSignal,
+  keepAlive = false,
 ): Promise<void> {
   return new Promise((resolve) => {
     const finish = () => {
@@ -164,7 +168,9 @@ function waitForMediaGenerationCompletionHandoffRetry(
       resolve();
     };
     const timer = setTimeout(finish, delayMs);
-    timer.unref?.();
+    if (!keepAlive) {
+      timer.unref?.();
+    }
     signal?.addEventListener("abort", finish, { once: true });
     if (signal?.aborted) {
       finish();
@@ -175,16 +181,30 @@ function waitForMediaGenerationCompletionHandoffRetry(
 async function wakeMediaGenerationTaskCompletionWithRetry(params: {
   wake: () => Promise<MediaGenerationCompletionWakeOutcome>;
   beforeRetry?: (outcome: MediaGenerationCompletionWakeOutcome) => void;
-  runtimeSignal?: AbortSignal;
+  observation?: SessionDeliveryObservation;
 }): Promise<MediaGenerationCompletionWakeOutcome> {
-  const { runtimeSignal } = params;
+  const runtimeSignal = params.observation?.signal;
   let queueAccepted = false;
+  let progressStatus: MediaGenerationCompletionWakeOutcome["status"] | undefined;
+  let progressRecordedAt = 0;
   try {
     const deadline = Date.now() + MEDIA_GENERATION_COMPLETION_HANDOFF_TIMEOUT_MS;
     let outcome = await params.wake();
     let retryIndex = 0;
     while (outcome.status === "pending" || outcome.status === "session_queued") {
       queueAccepted ||= outcome.status === "session_queued";
+      const now = Date.now();
+      if (
+        outcome.status === "session_queued" &&
+        (progressStatus !== outcome.status ||
+          now - progressRecordedAt >= MEDIA_GENERATION_TASK_KEEPALIVE_INTERVAL_MS)
+      ) {
+        // Record custody even when the first admission overlaps shutdown. Receipt
+        // polling must not turn into a task-ledger write on every observation.
+        params.beforeRetry?.(outcome);
+        progressStatus = outcome.status;
+        progressRecordedAt = now;
+      }
       runtimeSignal?.throwIfAborted();
       if (outcome.status === "session_queued" && !runtimeSignal) {
         return outcome;
@@ -196,12 +216,16 @@ async function wakeMediaGenerationTaskCompletionWithRetry(params: {
       if (remainingMs <= 0) {
         throw new Error("cron continuation did not become ready before the handoff deadline");
       }
+      if (outcome.status === "pending") {
+        // Unconfirmed cron handoffs retain their existing per-attempt progress.
+        params.beforeRetry?.(outcome);
+        progressStatus = outcome.status;
+      }
       // Reuse the idempotent handoff to observe settlement without creating a new send.
       const delayMs =
         MEDIA_GENERATION_COMPLETION_HANDOFF_RETRY_DELAYS_MS[
           Math.min(retryIndex, MEDIA_GENERATION_COMPLETION_HANDOFF_RETRY_DELAYS_MS.length - 1)
         ] ?? 2_000;
-      params.beforeRetry?.(outcome);
       await waitForMediaGenerationCompletionHandoffRetry(
         Math.min(delayMs, remainingMs),
         runtimeSignal,
@@ -215,6 +239,24 @@ async function wakeMediaGenerationTaskCompletionWithRetry(params: {
     // Shutdown only leaves recoverable work after the queue confirmed custody.
     // An unaccepted handoff failure must still settle the original media task.
     if (runtimeSignal?.aborted && queueAccepted) {
+      let retryIndex = 0;
+      while (params.observation?.canReconcileAfterDrain()) {
+        try {
+          // The owner has joined its active deliveries. Read the existing
+          // idempotent outcome before releasing task terminalization.
+          return await params.wake();
+        } catch (readError) {
+          const delayMs = MEDIA_GENERATION_COMPLETION_HANDOFF_RETRY_DELAYS_MS[retryIndex++];
+          if (delayMs === undefined) {
+            // Preserve the existing unconfirmed-completion error contract instead
+            // of leaving a running task whose delivery may already have settled.
+            throw readError;
+          }
+          // Runtime retirement joins these bounded retries before disposing its
+          // database. Unlike a parked observer, this final read must keep Node alive.
+          await waitForMediaGenerationCompletionHandoffRetry(delayMs, undefined, true);
+        }
+      }
       return { status: "session_queued" };
     }
     throw error;
@@ -538,10 +580,10 @@ export function scheduleMediaGenerationTaskCompletion<
         run: params.run,
       });
     } catch (error) {
-      return await observeSessionDeliveryRuntime(async (runtimeSignal) => {
+      return await observeSessionDeliveryRuntime(async (observation) => {
         try {
           const wakeOutcome = await wakeMediaGenerationTaskCompletionWithRetry({
-            runtimeSignal,
+            observation,
             wake: async () =>
               await params.lifecycle.wakeTaskCompletion({
                 config: params.config,
@@ -582,12 +624,12 @@ export function scheduleMediaGenerationTaskCompletion<
       });
     }
 
-    return await observeSessionDeliveryRuntime(async (runtimeSignal) => {
+    return await observeSessionDeliveryRuntime(async (observation) => {
       recordCompletionDeliveryProgress();
       let terminalResult: RequiredCompletionTerminalResult | undefined;
       try {
         const wakeOutcome = await wakeMediaGenerationTaskCompletionWithRetry({
-          runtimeSignal,
+          observation,
           wake: async () =>
             await params.lifecycle.wakeTaskCompletion({
               config: params.config,
