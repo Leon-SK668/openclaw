@@ -204,8 +204,8 @@ export const ttsHandlers: GatewayRequestHandlers = {
       );
     });
   },
-  // Unlike tts.convert (gateway-local audioPath) this returns the clip inline,
-  // so remote clients (mobile apps) can play it without filesystem access.
+  // This always returns the clip inline; tts.convert keeps path-only responses
+  // unless the caller explicitly requests the negotiated inline transfer.
   "tts.speak": async ({ params, respond, context }) => {
     if (!assertValidParams(params, validateTtsSpeakParams, "tts.speak", respond)) {
       return;

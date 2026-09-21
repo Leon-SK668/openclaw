@@ -39,6 +39,7 @@ import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
+  runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 import { withEnvAsync } from "../test-utils/env.js";
@@ -48,7 +49,10 @@ import {
   getNodeSqliteKysely,
 } from "./kysely-sync.js";
 import {
-  buildRestartSuccessContinuation,
+  readRestartSentinelRowSync,
+  writeRestartSentinelRowIfRevisionSync,
+} from "./restart-sentinel-store.js";
+import {
   clearRestartSentinel,
   clearRestartSentinelIfRevision,
   finalizeUpdateRestartSentinelRunningVersion,
@@ -261,6 +265,52 @@ describe("restart sentinel", () => {
       await expect(readRestartSentinel()).resolves.toBeNull();
     });
   });
+
+  it.each(["missing", "current", "invalid"] as const)(
+    "publishes an absent-row fallback only when the sentinel remains missing (%s)",
+    async (state) => {
+      await withRestartSentinelStateDir(async () => {
+        const first = await writeRestartSentinel({ kind: "restart", status: "ok", ts: 1 });
+        if (state === "missing") {
+          await clearRestartSentinelIfRevision(first.revision);
+        } else if (state === "invalid") {
+          updateSentinelRow({ kind: "not-a-kind" });
+        }
+        const { db } = openOpenClawStateDatabase();
+        const stateDb = getNodeSqliteKysely<GatewayRestartSentinelDatabase>(db);
+        const rows = () =>
+          executeSqliteQuerySync(
+            db,
+            stateDb.selectFrom("gateway_restart_sentinel").selectAll().orderBy("sentinel_key"),
+          ).rows;
+        const before = rows();
+        const payload = { kind: "update" as const, status: "error" as const, ts: 2 };
+        const clock = vi.spyOn(Date, "now").mockReturnValue(first.revision - 1);
+        try {
+          const written = runOpenClawStateWriteTransaction(({ db: transactionDb }) =>
+            writeRestartSentinelRowIfRevisionSync(transactionDb, payload, null),
+          );
+          if (state === "missing") {
+            expect(written).toMatchObject({ payload, revision: first.revision + 1 });
+            expect(readRestartSentinelRowSync(db)).toEqual({ kind: "valid", sentinel: written });
+            expect(readSentinelRevisionFloor()).toBe(first.revision + 1);
+          } else {
+            expect(written).toBeNull();
+            expect(rows()).toEqual(before);
+          }
+          const settled = rows();
+          expect(
+            runOpenClawStateWriteTransaction(({ db: transactionDb }) =>
+              writeRestartSentinelRowIfRevisionSync(transactionDb, payload, null),
+            ),
+          ).toBeNull();
+          expect(rows()).toEqual(settled);
+        } finally {
+          clock.mockRestore();
+        }
+      });
+    },
+  );
 
   it("leaves malformed typed rows in place and reports them as unreadable", async () => {
     await withRestartSentinelStateDir(async () => {
@@ -819,28 +869,6 @@ describe("restart sentinel error visibility", () => {
         "Failed to check restart sentinel: SQLITE_BUSY: database is locked",
       );
     });
-  });
-});
-
-describe("restart success continuation", () => {
-  it("does not infer an agent turn from session context alone", () => {
-    expect(buildRestartSuccessContinuation({ sessionKey: "agent:main:main" })).toBeNull();
-  });
-
-  it("keeps explicit continuation messages", () => {
-    expect(
-      buildRestartSuccessContinuation({
-        sessionKey: "agent:main:main",
-        continuationMessage: "wake after restart",
-      }),
-    ).toEqual({
-      kind: "agentTurn",
-      message: "wake after restart",
-    });
-  });
-
-  it("stays silent without session context", () => {
-    expect(buildRestartSuccessContinuation({})).toBeNull();
   });
 });
 

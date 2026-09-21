@@ -7,6 +7,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import { GATEWAY_SERVER_CAPS } from "../../../packages/gateway-protocol/src/server-capabilities.js";
 import { resolveApiKeyForProviderCore } from "../../agents/model-auth.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -107,15 +108,22 @@ export async function runTtsConvert(params: {
         voiceId: params.voiceId,
         ...(remoteOutputRequested ? { includeAudio: true } : {}),
       },
+      // Negotiate on the same connection before synthesis; an older Gateway must
+      // not consume a provider call for output that this CLI cannot retrieve.
+      ...(remoteOutputRequested
+        ? { requiredCapabilities: [GATEWAY_SERVER_CAPS.TTS_CONVERT_INLINE_AUDIO] }
+        : {}),
       timeoutMs: 120_000,
     });
     let outputPath = result.audioPath;
-    if (params.output && result.audioPath) {
+    if (params.output) {
       const target = path.resolve(params.output);
       if (remoteOutputRequested) {
         await writeInlineTtsOutputAtomically(decodeInlineTtsAudio(result.audioBase64), target);
-      } else {
+      } else if (result.audioPath) {
         await copyTtsOutputAtomically(result.audioPath, target);
+      } else {
+        throw new Error("Gateway TTS response did not include an audio path.");
       }
       outputPath = target;
     }

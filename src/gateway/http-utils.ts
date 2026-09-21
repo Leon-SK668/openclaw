@@ -208,7 +208,7 @@ export async function resolveOpenAiCompatModelOverride(params: {
     ...modelManifestContext,
   });
   const normalized = modelKey(parsed.provider, parsed.model);
-  if (!policy.allowsKey(normalized)) {
+  if (!policy.allows(parsed)) {
     return {
       errorMessage: `Model '${normalized}' is not allowed for agent '${params.agentId}'.`,
     };
@@ -324,6 +324,7 @@ export function authorizeOpenAiCompatibleHttpSession(params: {
     client: createSyntheticPluginRuntimeClient({
       ...(authenticatedUserProfile ? { authenticatedUserProfile } : {}),
       operatorRoleActor: params.requestAuth.operatorRoleActor,
+      operatorAccessAuthority: params.requestAuth.operatorAccessAuthority,
       scopes: params.senderIsOwner ? [ADMIN_SCOPE] : [],
     }),
     sessionKey: params.sessionKey,
