@@ -1,14 +1,21 @@
+import fs from "node:fs";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ensureMemoryIndexSchema } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { describe, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
+import { afterEach, describe, expect, it } from "vitest";
 import { bm25RankToScore, buildFtsQuery } from "./keyword-query.js";
 import { searchKeyword } from "./manager-search.js";
+import { hasTrigramTokenizerForTests } from "./unicode-query.test-support.js";
 
 type Tokenizer = "unicode61" | "trigram";
 type Document = { id: string; text: string; source?: "memory" | "sessions" };
 type SearchOptions = Partial<
   Pick<Parameters<typeof searchKeyword>[0], "limit" | "sourceFilter" | "buildFtsQuery">
 >;
+
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const hasTrigram = hasTrigramTokenizerForTests();
 
 async function withSearch(
   ftsTokenizer: Tokenizer,
@@ -17,8 +24,9 @@ async function withSearch(
     search: (query: string, options?: SearchOptions) => ReturnType<typeof searchKeyword>,
     db: DatabaseSync,
   ) => Promise<void>,
+  databasePath = ":memory:",
 ) {
-  const db = new DatabaseSync(":memory:");
+  let db = new DatabaseSync(databasePath);
   try {
     const schema = ensureMemoryIndexSchema({
       db,
@@ -39,6 +47,12 @@ async function withSearch(
       db.prepare(
         "INSERT INTO memory_index_chunks_fts (text, id, path, source, model, start_line, end_line) VALUES (?, ?, ?, ?, 'fts-only', 1, 1)",
       ).run(document.text, document.id, path, source);
+    }
+    if (databasePath !== ":memory:") {
+      // Close the existing-format writer before testing the new query owner.
+      // A read-only reopen makes a hidden migration or reindex fail visibly.
+      db.close();
+      db = new DatabaseSync(databasePath, { readOnly: true });
     }
     await run(
       (query, options = {}) =>
@@ -65,7 +79,58 @@ const tokenizers = ["unicode61", "trigram"] as const;
 const forms = ["NFC", "NFD"] as const;
 
 describe("memory keyword query Unicode forms", () => {
-  it.each(
+  it.for(tokenizers)(
+    "reads a reopened existing %s index without rewriting it",
+    async (tokenizer, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
+      const databasePath = join(tempDirs.make("openclaw-memory-existing-index-"), "index.sqlite");
+      const documents = [
+        { id: "latin", text: "München weather" },
+        { id: "korean", text: "한국어 weather".normalize("NFD") },
+        { id: "control", text: "quartz handbook" },
+      ];
+      await withSearch(
+        tokenizer,
+        documents,
+        async (search, db) => {
+          const originalBytes = fs.readFileSync(databasePath);
+          const originalSchema = db
+            .prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name")
+            .all();
+          const originalVersion = db.prepare("PRAGMA user_version").get();
+          const observations: Record<string, string[]> = {};
+          for (const { query, expected } of [
+            { query: "München".normalize("NFD"), expected: "latin" },
+            { query: "한국어", expected: "korean" },
+            { query: "quartz", expected: "control" },
+          ]) {
+            const ids = (await search(query)).map((hit) => hit.id);
+            expect(ids).toEqual([expected]);
+            observations[query] = ids;
+          }
+          expect(await search("unrecordedword")).toEqual([]);
+          expect(
+            db.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name").all(),
+          ).toEqual(originalSchema);
+          expect(db.prepare("PRAGMA user_version").get()).toEqual(originalVersion);
+          expect(db.prepare("SELECT id, text FROM memory_index_chunks ORDER BY id").all()).toEqual(
+            documents.toSorted((left, right) => left.id.localeCompare(right.id)),
+          );
+          expect(db.prepare("SELECT total_changes() AS changes").get()).toEqual({ changes: 0 });
+          expect(fs.readFileSync(databasePath)).toEqual(originalBytes);
+          console.log(
+            "EXISTING_INDEX_READ_ONLY",
+            JSON.stringify({ tokenizer, observations, writes: 0, byteIdentical: true }),
+          );
+        },
+        databasePath,
+      );
+    },
+  );
+
+  it.for(
     tokenizers.flatMap((tokenizer) =>
       ["München", "한국어"].flatMap((word) =>
         forms.flatMap((stored) => forms.map((query) => ({ tokenizer, word, stored, query }))),
@@ -73,7 +138,10 @@ describe("memory keyword query Unicode forms", () => {
     ),
   )(
     "matches $stored $word text with a $query query using $tokenizer",
-    async ({ tokenizer, word, stored, query }) => {
+    async ({ tokenizer, word, stored, query }, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
       const text = `${word} weather`.normalize(stored);
       await withSearch(
         tokenizer,
@@ -100,26 +168,32 @@ describe("memory keyword query Unicode forms", () => {
     });
   });
 
-  it.each(tokenizers)("keeps AND semantics for mixed-form words with %s", async (tokenizer) => {
-    await withSearch(
-      tokenizer,
-      [
-        { id: "both", text: `München ${"caféteria".normalize("NFD")}` },
-        { id: "city", text: "München weather" },
-        { id: "lunch", text: "caféteria handbook" },
-      ],
-      async (search) => {
-        for (const form of forms) {
-          expect((await search("München caféteria".normalize(form))).map((hit) => hit.id)).toEqual([
-            "both",
-          ]);
-        }
-        expect(await search("München unrecordedword")).toEqual([]);
-      },
-    );
-  });
+  it.for(tokenizers)(
+    "keeps AND semantics for mixed-form words with %s",
+    async (tokenizer, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
+      await withSearch(
+        tokenizer,
+        [
+          { id: "both", text: `München ${"caféteria".normalize("NFD")}` },
+          { id: "city", text: "München weather" },
+          { id: "lunch", text: "caféteria handbook" },
+        ],
+        async (search) => {
+          for (const form of forms) {
+            expect(
+              (await search("München caféteria".normalize(form))).map((hit) => hit.id),
+            ).toEqual(["both"]);
+          }
+          expect(await search("München unrecordedword")).toEqual([]);
+        },
+      );
+    },
+  );
 
-  it("keeps short canonical trigram terms in substring fallback", async () => {
+  it.skipIf(!hasTrigram)("keeps short canonical trigram terms in substring fallback", async () => {
     await withSearch(
       "trigram",
       [
@@ -140,9 +214,12 @@ describe("memory keyword query Unicode forms", () => {
     );
   });
 
-  it.each(tokenizers)(
+  it.for(tokenizers)(
     "preserves scoped ranked limits for canonical %s queries",
-    async (tokenizer) => {
+    async (tokenizer, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
       const documents: Document[] = Array.from({ length: 64 }, (_, i) => ({
         id: `item-${i}`,
         text: "München weather".normalize(i % 3 === 0 ? "NFD" : "NFC"),

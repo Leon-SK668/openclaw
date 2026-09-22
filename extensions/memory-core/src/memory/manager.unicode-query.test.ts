@@ -12,7 +12,10 @@ import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { createMemorySearchTool } from "../tools.js";
 import { closeAllMemorySearchManagers, getMemorySearchManager } from "./index.js";
+import { hasTrigramTokenizerForTests } from "./unicode-query.test-support.js";
 import "./test-runtime-mocks.js";
+
+const hasTrigram = hasTrigramTokenizerForTests();
 
 const temporaryRoots = useAutoCleanupTempDirTracker((cleanup) =>
   afterAll(async () => {
@@ -25,7 +28,7 @@ const temporaryRoots = useAutoCleanupTempDirTracker((cleanup) =>
 );
 
 describe("memory manager Unicode query round trip", () => {
-  it.each(
+  it.for(
     (["unicode61", "trigram"] as const).flatMap((tokenizer) =>
       ["München", "한국어"].flatMap((word) =>
         (["NFC", "NFD"] as const).map((stored) => ({ tokenizer, word, stored })),
@@ -33,7 +36,10 @@ describe("memory manager Unicode query round trip", () => {
     ),
   )(
     "retrieves persisted $stored $word memories through the $tokenizer tool",
-    async ({ tokenizer, word, stored }) => {
+    async ({ tokenizer, word, stored }, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
       const workspace = temporaryRoots.make("openclaw-memory-unicode-");
       const storedText = `${word} weather report`.normalize(stored);
       await fs.mkdir(path.join(workspace, "memory"));
