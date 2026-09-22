@@ -36,7 +36,10 @@ export function planKeywordSearch(params: {
   canonicalVariants?: boolean;
 }): { matchQuery: string | null; substringTerms: string[] } {
   if (params.ftsTokenizer !== "trigram") {
-    return { matchQuery: params.buildFtsQuery(params.query), substringTerms: [] };
+    const matchQuery = params.canonicalVariants
+      ? buildMatchQueryFromTerms(tokenizeFtsQuery(params.query), true)
+      : params.buildFtsQuery(params.query);
+    return { matchQuery, substringTerms: [] };
   }
   const tokens = params.includeCombiningMarks
     ? normalizeStringEntries(params.query.match(/[\p{L}\p{M}\p{N}_]+/gu) ?? [])
