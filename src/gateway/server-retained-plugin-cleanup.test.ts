@@ -12,6 +12,7 @@ import {
   markRetainedManagedNpmInstall,
   resolveRetainedManagedNpmInstallMarkerPath,
 } from "../plugins/managed-npm-retention.js";
+import { seedInstalledPluginIndex } from "../plugins/test-helpers/installed-plugin-index.js";
 import { writeManagedNpmPlugin } from "../plugins/test-helpers/managed-npm-plugin.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { cleanupRetainedPluginInstallGenerations } from "./server-retained-plugin-cleanup.js";
@@ -56,7 +57,7 @@ it.each(["project", "legacy"] as const)(
       const desiredPackage = writePlugin("desired-plugin");
       const obsoletePackage = writePlugin("obsolete-plugin");
       const startupInstallPaths = [path.join(startupPackage, "dist", "index.js")];
-      await writePersistedInstalledPluginIndexInstallRecords(
+      await seedInstalledPluginIndex(
         {
           "desired-plugin": {
             source: "npm",

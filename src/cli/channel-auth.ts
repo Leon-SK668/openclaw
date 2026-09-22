@@ -9,7 +9,8 @@ import {
   normalizeChannelId,
 } from "../channels/plugins/index.js";
 import { resolveInstallableChannelPlugin } from "../commands/channel-setup/channel-plugin-resolution.js";
-import { assertAccountSelectorForMutation } from "../commands/channels/account-selector.js";
+import { parseAccountSelector } from "../commands/channels/account-selector.js";
+import { parseChannelSelector } from "../commands/channels/channel-selector.js";
 import { requireValidConfigForWrite } from "../commands/config-validation.js";
 import { getRuntimeConfig, type OpenClawConfig } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
@@ -104,7 +105,8 @@ async function resolveChannelPluginForMode(
   channelId: string;
   plugin: ChannelPlugin;
 } | null> {
-  assertAccountSelectorForMutation(opts.account);
+  parseAccountSelector(opts.account);
+  parseChannelSelector(opts.channel);
   const writeSnapshot = await requireValidConfigForWrite(runtime);
   if (!writeSnapshot) {
     return null;
