@@ -4,6 +4,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { html, nothing } from "lit";
+import { live } from "lit/directives/live.js";
 import type {
   AgentIdentityResult,
   GatewaySessionRow,
@@ -853,6 +854,9 @@ function renderSessionsAdvancedFilters(props: SessionsProps) {
     !includeGlobal ||
     includeUnknown ||
     props.groupBy !== "none";
+  // Popover reattachment can reset the native select without changing props;
+  // live() restores the component-owned grouping instead of keeping that drift.
+  const liveGroupBy = live(props.groupBy);
   return html`
     <button
       id="sessions-filter-popover-trigger"
@@ -912,6 +916,7 @@ function renderSessionsAdvancedFilters(props: SessionsProps) {
           <span class="session-groupby__label">${t("sessionsView.groupBy")}</span>
           <select
             class="session-groupby__select"
+            .value=${liveGroupBy}
             @change=${(event: Event) =>
               props.onGroupByChange((event.target as HTMLSelectElement).value as SessionsGroupBy)}
           >
