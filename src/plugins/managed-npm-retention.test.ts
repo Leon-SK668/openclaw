@@ -138,7 +138,7 @@ describe("managed npm retention", () => {
   });
 
   it.each(["ordinary", "generation"] as const)(
-    "cleans a retired %s project while preserving the active install root",
+    "cleans a preexisting v1 retired %s project while preserving the active install root",
     async (layout) => {
       const stateDir = retentionTempDirs.make("openclaw-retention-");
       const npmDir = path.join(stateDir, "npm");
@@ -160,11 +160,18 @@ describe("managed npm retention", () => {
       const activePackageDir = path.join(activeProjectRoot, "node_modules", "@openclaw", "codex");
       fs.mkdirSync(oldPackageDir, { recursive: true });
       fs.mkdirSync(activePackageDir, { recursive: true });
-      await markRetainedManagedNpmInstall({
-        packageDir: oldPackageDir,
-        pluginId: "codex",
-        reason: RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
-      });
+      const markerPath = resolveRetainedManagedNpmInstallMarkerPath(oldPackageDir);
+      fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+      fs.writeFileSync(
+        markerPath,
+        `${JSON.stringify({
+          version: 1,
+          pluginId: "codex",
+          retainedAt: "2026-08-01T00:00:00.000Z",
+          reason: RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
+        })}\n`,
+        "utf8",
+      );
 
       await expect(
         cleanupRetainedManagedNpmInstallGenerations({
@@ -285,6 +292,8 @@ describe("managed npm retention", () => {
     { layout: "legacy" as const, markerState: "corrupt" as const },
     { layout: "project" as const, markerState: "unknown" as const },
     { layout: "legacy" as const, markerState: "unknown" as const },
+    { layout: "project" as const, markerState: "unsupported-version" as const },
+    { layout: "legacy" as const, markerState: "unsupported-version" as const },
   ])(
     "preserves $layout package files for a $markerState marker",
     async ({ layout, markerState }) => {
@@ -310,6 +319,10 @@ describe("managed npm retention", () => {
       });
       if (markerState === "corrupt") {
         fs.writeFileSync(resolveRetainedManagedNpmInstallMarkerPath(packageDir), "{", "utf8");
+      } else if (markerState === "unsupported-version") {
+        const markerPath = resolveRetainedManagedNpmInstallMarkerPath(packageDir);
+        const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as Record<string, unknown>;
+        fs.writeFileSync(markerPath, `${JSON.stringify({ ...marker, version: 2 })}\n`, "utf8");
       }
       const onError = vi.fn();
 
@@ -361,6 +374,9 @@ describe("managed npm retention", () => {
         expect.objectContaining({ code: expect.stringMatching(/^(?:EACCES|EPERM)$/u) }),
         packageDir,
       );
+
+      await expect(cleanupRetainedManagedNpmInstallGenerations({ npmDir })).resolves.toBe(1);
+      expect(fs.existsSync(packageDir)).toBe(false);
     },
   );
 

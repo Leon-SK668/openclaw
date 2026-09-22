@@ -154,6 +154,13 @@ describe("retained managed npm record commits", () => {
           (candidate) => candidate.pluginId,
         ),
       ).not.toContain("retained-demo");
+
+      await expect(clearRetainedManagedNpmInstallMarker(installPath)).resolves.toBe(true);
+      expect(
+        listRecoveredManagedNpmInstallCandidates({ stateDir: state.stateDir }).map(
+          (candidate) => candidate.pluginId,
+        ),
+      ).toContain("retained-demo");
     });
   });
 
