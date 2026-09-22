@@ -1,11 +1,13 @@
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 
+export type FtsQueryBuilder = (raw: string, canonicalVariants?: boolean) => string | null;
+
 export function tokenizeFtsQuery(raw: string): string[] {
   return normalizeStringEntries(raw.match(/[\p{L}\p{N}_][\p{L}\p{M}\p{N}_]*/gu) ?? []);
 }
 
-export function buildFtsQuery(raw: string): string | null {
-  return buildMatchQueryFromTerms(tokenizeFtsQuery(raw));
+export function buildFtsQuery(raw: string, canonicalVariants = false): string | null {
+  return buildMatchQueryFromTerms(tokenizeFtsQuery(raw), canonicalVariants);
 }
 
 function canonicalTermForms(term: string): string[] {
@@ -31,14 +33,12 @@ export function buildMatchQueryFromTerms(
 export function planKeywordSearch(params: {
   query: string;
   ftsTokenizer?: "unicode61" | "trigram";
-  buildFtsQuery: (raw: string) => string | null;
+  buildFtsQuery: FtsQueryBuilder;
   includeCombiningMarks?: boolean;
   canonicalVariants?: boolean;
 }): { matchQuery: string | null; substringTerms: string[] } {
   if (params.ftsTokenizer !== "trigram") {
-    const matchQuery = params.canonicalVariants
-      ? buildMatchQueryFromTerms(tokenizeFtsQuery(params.query), true)
-      : params.buildFtsQuery(params.query);
+    const matchQuery = params.buildFtsQuery(params.query, params.canonicalVariants);
     return { matchQuery, substringTerms: [] };
   }
   const tokens = params.includeCombiningMarks

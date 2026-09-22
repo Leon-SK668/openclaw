@@ -7,7 +7,12 @@ import {
   uniqueStrings,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { escapeRegExp } from "openclaw/plugin-sdk/text-utility-runtime";
-import { buildMatchQueryFromTerms, planKeywordSearch, tokenizeFtsQuery } from "./keyword-query.js";
+import {
+  buildMatchQueryFromTerms,
+  planKeywordSearch,
+  tokenizeFtsQuery,
+  type FtsQueryBuilder,
+} from "./keyword-query.js";
 import { resolveSnippetProjection, type SearchRowResult } from "./manager-search-shared.js";
 
 const EXACT_PATH_SPECIFICITY_SQL_FUNCTION = "openclaw_memory_exact_path_specificity";
@@ -211,7 +216,7 @@ function buildExactPathCandidatePatterns(query: string): string[] {
 function planPathKeywordSearch(params: {
   query: string;
   ftsTokenizer?: "unicode61" | "trigram";
-  buildFtsQuery: (raw: string) => string | null;
+  buildFtsQuery: FtsQueryBuilder;
 }): Array<{ query: string; matchQuery: string | null; substringTerms: string[] }> {
   const forms =
     params.ftsTokenizer === "trigram"
@@ -260,7 +265,7 @@ export async function searchKeyword(params: {
   limit: number;
   snippetMaxChars: number;
   sourceFilter: { sql: string; params: SearchSource[] };
-  buildFtsQuery: (raw: string) => string | null;
+  buildFtsQuery: FtsQueryBuilder;
   bm25RankToScore: (rank: number) => number;
   boostFallbackRanking?: boolean;
   rankingQuery?: string;
@@ -388,7 +393,7 @@ export async function searchPathKeyword(params: {
   limit: number;
   snippetMaxChars: number;
   sourceFilter: { sql: string; params: SearchSource[] };
-  buildFtsQuery: (raw: string) => string | null;
+  buildFtsQuery: FtsQueryBuilder;
   bm25RankToScore: (rank: number) => number;
 }): Promise<PathKeywordSearchResult[]> {
   if (params.limit <= 0) {
