@@ -7,7 +7,7 @@ import {
   bindTaskFlowRecord,
   readTaskFlowRecord,
   upsertTaskFlowRowInDatabase,
-} from "../../../tasks/task-flow-registry.store.sqlite.js";
+} from "../../../tasks/task-flow-registry.store.kernel.js";
 import {
   prepareTaskMirroredFlowSync,
   publishTaskFlowAfterAtomicStore,
@@ -16,16 +16,15 @@ import {
   bindTaskRecord,
   readTaskRecord,
   upsertTaskRunRowInDatabase,
-} from "../../../tasks/task-registry.store.sqlite.js";
-import type { TaskRecord } from "../../../tasks/task-registry.types.js";
+} from "../../../tasks/task-registry.store.kernel.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import { publishSubagentRunsAfterAtomicStore } from "./subagent-registry-state.js";
+import { bindSubagentRunRecord } from "./subagent-registry.store.codec.js";
 import {
-  bindSubagentRunRecord,
   deleteSubagentRunRowInDatabase,
-  readSubagentRun,
   upsertSubagentRunRowInDatabase,
-} from "./subagent-registry.store.sqlite.js";
+} from "./subagent-registry.store.kernel.js";
+import { readSubagentRun } from "./subagent-registry.store.sqlite.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 function assertReplacementCorrelation(params: {
@@ -63,7 +62,7 @@ export function commitSubagentTaskReplacement(params: {
   source: SubagentRunRecord;
   successor: SubagentRunRecord;
   task: PreparedCanonicalTaskActivation;
-}): TaskRecord {
+}): void {
   assertReplacementCorrelation(params);
   const changedRows = params.changedRunIds.flatMap((runId) => {
     const entry = params.runs.get(runId);
@@ -112,12 +111,11 @@ export function commitSubagentTaskReplacement(params: {
   subagentRuns.commitOwnership(params.successor);
   const deferredObserverEvents: Array<() => void> = [];
   publishSubagentRunsAfterAtomicStore(params.runs, params.changedRunIds, deferredObserverEvents);
-  const task = publishTaskRecordAfterAtomicStore(params.task.next, {
-    syncTaskFlow: false,
+  publishTaskRecordAfterAtomicStore(params.task.next, {
     deferredObserverEvents,
   });
   if (flow) {
-    publishTaskFlowAfterAtomicStore(flow, deferredObserverEvents);
+    publishTaskFlowAfterAtomicStore(flow);
   }
   for (const emitObserverEvent of deferredObserverEvents) {
     emitObserverEvent();
@@ -125,5 +123,4 @@ export function commitSubagentTaskReplacement(params: {
       break;
     }
   }
-  return task;
 }

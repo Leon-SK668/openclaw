@@ -1,16 +1,17 @@
 // Covers command-session store updates after agent runs, CLI compaction, and
 // runtime metadata persistence.
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   resolveFreshSessionTotalTokens,
   type InternalSessionEntry as SessionEntry,
 } from "../../config/sessions.js";
 import * as sessionAccessor from "../../config/sessions/session-accessor.js";
-import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
+import { observeSessionMaintenanceCompletion } from "../../config/sessions/session-accessor.sqlite-maintenance.test-support.js";
+import { resolveSqliteTargetFromSessionStorePath } from "../../config/sessions/session-sqlite-target.js";
+import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
 import { buildAgentRunTerminalOutcomeFromLifecycleEvent } from "../agent-run-terminal-outcome.js";
 import { clearCliSessionInStore, persistCliSessionBindingResult } from "../cli-session-store.js";
 import type { EmbeddedAgentRunResult } from "../embedded-agent.js";
@@ -21,6 +22,7 @@ import {
   recordCliCompactionInStore,
   updateSessionStoreAfterAgentRun as updateSessionStoreAfterAgentRunBase,
 } from "./session-store.js";
+import { withTempSessionStore } from "./session-store.test-support.js";
 import { resolveSession } from "./session.js";
 
 const { listSessionEntriesCore, loadSessionEntry, patchSessionEntryCore, replaceSessionEntry } =
@@ -41,20 +43,6 @@ function acpMeta() {
     state: "idle" as const,
     lastActivityAt: Date.now(),
   };
-}
-
-async function withTempSessionStore<T>(
-  run: (params: { dir: string; storePath: string }) => Promise<T>,
-): Promise<T> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-store-"));
-  try {
-    return await run({ dir, storePath: path.join(dir, "sessions.json") });
-  } finally {
-    closeOpenClawAgentDatabasesForTest();
-    // SQLite teardown can race fixture removal on loaded CI hosts. Keep the
-    // retries bounded so persistent cleanup failures still surface.
-    await fs.rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 25 });
-  }
 }
 
 async function seedSessionStore(
@@ -82,10 +70,6 @@ function loadPersistedSessionEntry(
 ): SessionEntry | undefined {
   return loadSessionEntry({ storePath, sessionKey }) ?? undefined;
 }
-
-afterEach(() => {
-  closeOpenClawAgentDatabasesForTest();
-});
 
 type SessionStoreUpdateParams = Parameters<typeof updateSessionStoreAfterAgentRunBase>[0];
 
@@ -406,7 +390,7 @@ describe("updateSessionStoreAfterAgentRun", () => {
     });
   });
 
-  it("passes resolved maintenance config to the gateway turn store write", async () => {
+  it("passes resolved maintenance config to the gateway turn store write", async ({ signal }) => {
     await withTempSessionStore(async ({ storePath }) => {
       const cfg = {
         session: {
@@ -435,6 +419,10 @@ describe("updateSessionStoreAfterAgentRun", () => {
         ),
       };
       await seedSessionStore(storePath, sessionStore);
+      const databasePath = resolveSqliteTargetFromSessionStorePath(storePath, {
+        agentId: "main",
+      }).path;
+      const maintained = observeSessionMaintenanceCompletion(databasePath);
       const result: EmbeddedAgentRunResult = {
         meta: {
           durationMs: 1,
@@ -457,18 +445,23 @@ describe("updateSessionStoreAfterAgentRun", () => {
         result,
       });
 
-      await vi.waitFor(
-        () => {
-          const persisted = loadPersistedSessionStore(storePath);
-          expect(Object.keys(persisted)).toHaveLength(46);
-          expect(
-            Object.values(persisted).filter((entry) => entry.archivedAt === undefined),
-          ).toHaveLength(42);
-          expect(persisted[sessionKey]?.sessionId).toBe(sessionId);
-          expect(persisted["agent:main:stale:44"]?.archivedAt).toEqual(expect.any(Number));
-        },
-        { timeout: 5_000 },
-      );
+      await racePromiseWithAbortSignal(maintained, signal);
+      const persisted = loadPersistedSessionStore(storePath);
+      expect(Object.keys(persisted)).toHaveLength(46);
+      expect(
+        Object.values(persisted).filter((entry) => entry.archivedAt === undefined),
+      ).toHaveLength(42);
+      expect(persisted[sessionKey]?.sessionId).toBe(sessionId);
+      expect(persisted[sessionKey]?.archivedAt).toBeUndefined();
+      for (let index = 0; index < 45; index += 1) {
+        const entry = persisted[`agent:main:stale:${index}`];
+        expect(entry?.sessionId).toBe(`stale-${index}`);
+        if (index >= 41) {
+          expect(entry?.archivedAt).toEqual(expect.any(Number));
+        } else {
+          expect(entry?.archivedAt).toBeUndefined();
+        }
+      }
     });
   });
 
@@ -789,7 +782,7 @@ describe("updateSessionStoreAfterAgentRun", () => {
       });
       expect(sessionStore[sessionKey]?.sessionId).toBe(sessionId);
       expect(sessionStore[sessionKey]?.cliSessionIds?.["claude-cli"]).toBe("cli-session-123");
-      expect(sessionStore[sessionKey]?.claudeCliSessionId).toBe("cli-session-123");
+      expect(sessionStore[sessionKey]?.claudeCliSessionId).toBeUndefined();
 
       const persisted = loadPersistedSessionStore(storePath);
       expect(persisted[sessionKey]?.cliSessionBindings?.["claude-cli"]).toEqual({
@@ -797,7 +790,7 @@ describe("updateSessionStoreAfterAgentRun", () => {
       });
       expect(persisted[sessionKey]?.sessionId).toBe(sessionId);
       expect(persisted[sessionKey]?.cliSessionIds?.["claude-cli"]).toBe("cli-session-123");
-      expect(persisted[sessionKey]?.claudeCliSessionId).toBe("cli-session-123");
+      expect(persisted[sessionKey]?.claudeCliSessionId).toBeUndefined();
     });
   });
 
@@ -2828,6 +2821,7 @@ describe("recordCliCompactionInStore", () => {
           outputTokens: 100,
           cacheRead: 2_900,
           cacheWrite: 0,
+          estimatedCostUsd: 0.04,
           contextBudgetStatus: {
             schemaVersion: 1,
             source: "pre-prompt-estimate",
@@ -2877,12 +2871,14 @@ describe("recordCliCompactionInStore", () => {
       expect(sessionStore[sessionKey]?.outputTokens).toBeUndefined();
       expect(sessionStore[sessionKey]?.cacheRead).toBeUndefined();
       expect(sessionStore[sessionKey]?.cacheWrite).toBeUndefined();
+      expect(sessionStore[sessionKey]?.estimatedCostUsd).toBeUndefined();
       expect(sessionStore[sessionKey]?.contextBudgetStatus).toBeUndefined();
       expect(sessionStore[sessionKey]?.cliSessionBindings?.codex).toEqual({
         sessionId: "stale-cli-session",
       });
       expect(sessionStore[sessionKey]?.cliSessionIds?.codex).toBe("stale-cli-session");
       expect(persisted[sessionKey]?.totalTokens).toBe(3_210);
+      expect(persisted[sessionKey]?.estimatedCostUsd).toBeUndefined();
       expect(persisted[sessionKey]?.totalTokensFresh).toBe(true);
       expect(resolveFreshSessionTotalTokens(persisted[sessionKey])).toBe(3_210);
       expect(persisted[sessionKey]?.contextBudgetStatus).toBeUndefined();
