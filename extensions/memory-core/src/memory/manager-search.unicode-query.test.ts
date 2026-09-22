@@ -129,7 +129,7 @@ describe("memory keyword query Unicode forms", () => {
 
   it.for(
     tokenizers.flatMap((tokenizer) =>
-      ["München", "ộ", "한국어"].flatMap((word) =>
+      ["München", "ǽ", "ộ", "café東京", "한국어"].flatMap((word) =>
         forms.flatMap((stored) => forms.map((query) => ({ tokenizer, word, stored, query }))),
       ),
     ),
@@ -268,28 +268,35 @@ describe("memory keyword query Unicode forms", () => {
     },
   );
 
-  it.for(tokenizers)("does not double-count canonical %s phrases", async (tokenizer, context) => {
-    if (tokenizer === "trigram" && !hasTrigram) {
-      context.skip("SQLite does not provide the optional trigram tokenizer");
-    }
-    await withSearch(
-      tokenizer,
-      [
-        { id: "city", text: "München weather".normalize("NFD") },
-        { id: "control", text: "quartz handbook" },
-      ],
-      async (search) => {
-        const query = "München".normalize("NFD");
-        const canonical = await search(query);
-        const literal = await search(query, {
-          buildFtsQuery: (raw) => buildFtsQuery(raw),
-        });
+  it.for([
+    { tokenizer: "unicode61" as const, word: "München" },
+    { tokenizer: "unicode61" as const, word: "café東京" },
+    { tokenizer: "trigram" as const, word: "München" },
+  ])(
+    "does not double-count canonical $tokenizer $word phrases",
+    async ({ tokenizer, word }, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
+      await withSearch(
+        tokenizer,
+        [
+          { id: "city", text: `${word} weather`.normalize("NFD") },
+          { id: "control", text: "quartz handbook" },
+        ],
+        async (search) => {
+          const query = word.normalize("NFD");
+          const canonical = await search(query);
+          const literal = await search(query, {
+            buildFtsQuery: (raw) => buildFtsQuery(raw),
+          });
 
-        expect(canonical.map((hit) => hit.id)).toEqual(["city"]);
-        expect(canonical[0]?.textScore).toBe(literal[0]?.textScore);
-      },
-    );
-  });
+          expect(canonical.map((hit) => hit.id)).toEqual(["city"]);
+          expect(canonical[0]?.textScore).toBe(literal[0]?.textScore);
+        },
+      );
+    },
+  );
 
   it("preserves whole Unicode words in MATCH-error fallback", async () => {
     await withSearch(

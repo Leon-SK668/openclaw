@@ -18,15 +18,22 @@ export function buildFtsQuery(
   return buildMatchQueryFromTerms(tokenizeFtsQuery(raw), canonicalTokenizer);
 }
 
-// unicode61 keeps a legacy exception for precomposed Latin characters with
-// multiple marks. Collapse only forms it actually tokenizes identically.
-function unicode61FoldsCanonicalLatinForms(term: string): boolean {
+// unicode61 remove_diacritics=1 folds a single mark when its base case-folds to
+// ASCII Latin, plus one-code-point canonical aliases. Preserve all other forms.
+function unicode61FoldsCanonicalForms(term: string): boolean {
   return Array.from(term.normalize("NFC")).every((character) => {
-    if (!/\p{L}/u.test(character)) {
-      return true;
+    const decomposed = Array.from(character.normalize("NFD"));
+    const base = decomposed[0];
+    if (!base) {
+      return false;
     }
-    const markCount = character.normalize("NFD").match(/\p{M}/gu)?.length ?? 0;
-    return /\p{Script=Latin}/u.test(character) && markCount <= 1;
+    const foldedBase = base.toUpperCase().toLowerCase();
+    if (decomposed.length === 1) {
+      return character.toUpperCase().toLowerCase() === foldedBase;
+    }
+    return (
+      decomposed.length === 2 && /\p{M}/u.test(decomposed[1] ?? "") && /^[a-z]$/u.test(foldedBase)
+    );
   });
 }
 
@@ -46,7 +53,7 @@ export function buildMatchQueryFromTerms(
   }
   const quoted = terms.map((term) => {
     const forms =
-      canonicalTokenizer === "unicode61" && unicode61FoldsCanonicalLatinForms(term)
+      canonicalTokenizer === "unicode61" && unicode61FoldsCanonicalForms(term)
         ? [term]
         : canonicalTermForms(term, canonicalTokenizer);
     const alternatives = forms.map((form) => `"${form.replaceAll('"', "")}"`);
