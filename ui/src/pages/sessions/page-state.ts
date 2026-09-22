@@ -30,6 +30,11 @@ export type SessionsPagePreferences = {
   pageSize: number;
 };
 
+export type SessionsPageListFilters = Pick<
+  SessionsPagePreferences,
+  "activeMinutes" | "limit" | "includeGlobal" | "includeUnknown"
+>;
+
 const DEFAULT_SESSIONS_PAGE_PREFERENCES: SessionsPagePreferences = {
   activeMinutes: "",
   limit: "50",
@@ -41,6 +46,15 @@ const DEFAULT_SESSIONS_PAGE_PREFERENCES: SessionsPagePreferences = {
   sortDir: "desc",
   groupBy: "none",
   pageSize: 25,
+};
+
+const RESET_SESSIONS_PAGE_FILTERS: SessionsPageListFilters &
+  Pick<SessionsPagePreferences, "searchQuery"> = {
+  activeMinutes: DEFAULT_SESSIONS_PAGE_PREFERENCES.activeMinutes,
+  limit: DEFAULT_SESSIONS_PAGE_PREFERENCES.limit,
+  includeGlobal: DEFAULT_SESSIONS_PAGE_PREFERENCES.includeGlobal,
+  includeUnknown: DEFAULT_SESSIONS_PAGE_PREFERENCES.includeUnknown,
+  searchQuery: DEFAULT_SESSIONS_PAGE_PREFERENCES.searchQuery,
 };
 
 function isPreferenceValue<T extends string | number>(
@@ -137,5 +151,33 @@ export function saveSessionsPagePreferences(changes: Partial<SessionsPagePrefere
     storage.removeItem(LEGACY_GROUP_BY_STORAGE_KEY);
   } catch {
     // Storage may be unavailable or full; current in-memory preferences still apply.
+  }
+}
+
+export class SessionsPagePreferencesState {
+  private value = loadSessionsPagePreferences();
+
+  get current(): Readonly<SessionsPagePreferences> {
+    return this.value;
+  }
+
+  update(changes: Partial<SessionsPagePreferences>): void {
+    this.value = { ...this.value, ...changes };
+    saveSessionsPagePreferences(changes);
+  }
+
+  updateListFilters(next: SessionsPageListFilters): void {
+    const changes: Partial<SessionsPageListFilters> = {};
+    for (const key of ["activeMinutes", "limit", "includeGlobal", "includeUnknown"] as const) {
+      if (next[key] !== this.value[key]) {
+        Object.assign(changes, { [key]: next[key] });
+      }
+    }
+    this.update(changes);
+  }
+
+  resetFilters(): SessionsPageListFilters & Pick<SessionsPagePreferences, "searchQuery"> {
+    this.update(RESET_SESSIONS_PAGE_FILTERS);
+    return RESET_SESSIONS_PAGE_FILTERS;
   }
 }

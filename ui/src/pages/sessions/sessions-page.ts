@@ -70,9 +70,7 @@ import { prepareArchiveOutcome } from "./archive-outcome.ts";
 import { rememberSessionCustomGroup, sessionCategoryNames } from "./custom-groups.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
 import {
-  loadSessionsPagePreferences,
-  saveSessionsPagePreferences,
-  type SessionsPagePreferences,
+  SessionsPagePreferencesState,
   type SessionsSortColumn,
   type SessionsSortDirection,
 } from "./page-state.ts";
@@ -114,25 +112,24 @@ class SessionsPage extends OpenClawLightDomElement {
 
   @property({ attribute: false }) routeData?: SessionsRouteData;
 
-  private readonly initialPreferences = loadSessionsPagePreferences();
-  private preferenceSnapshot = this.initialPreferences;
+  private readonly preferences = new SessionsPagePreferencesState();
   @state() private result: SessionsListResult | null = null;
   @state() private loading = false;
   @state() private refreshing = false;
   @state() private error: string | null = null;
-  @state() private activeMinutes = this.initialPreferences.activeMinutes;
-  @state() private limit = this.initialPreferences.limit;
-  @state() private includeGlobal = this.initialPreferences.includeGlobal;
-  @state() private includeUnknown = this.initialPreferences.includeUnknown;
-  @state() private statusFilter: SessionArchivedFilter = this.initialPreferences.statusFilter;
-  @state() private searchQuery = this.initialPreferences.searchQuery;
+  @state() private activeMinutes = this.preferences.current.activeMinutes;
+  @state() private limit = this.preferences.current.limit;
+  @state() private includeGlobal = this.preferences.current.includeGlobal;
+  @state() private includeUnknown = this.preferences.current.includeUnknown;
+  @state() private statusFilter: SessionArchivedFilter = this.preferences.current.statusFilter;
+  @state() private searchQuery = this.preferences.current.searchQuery;
   @state() private transcriptSearchQuery = "";
   @state() private submittedTranscriptSearchQuery = "";
-  @state() private sortColumn: SessionsSortColumn = this.initialPreferences.sortColumn;
-  @state() private sortDir: SessionsSortDirection = this.initialPreferences.sortDir;
-  @state() private groupBy: SessionsGroupBy = this.initialPreferences.groupBy;
+  @state() private sortColumn: SessionsSortColumn = this.preferences.current.sortColumn;
+  @state() private sortDir: SessionsSortDirection = this.preferences.current.sortDir;
+  @state() private groupBy: SessionsGroupBy = this.preferences.current.groupBy;
   @state() private page = 0;
-  @state() private pageSize = this.initialPreferences.pageSize;
+  @state() private pageSize = this.preferences.current.pageSize;
   @state() private selectedKeys = new Set<string>();
   @state() private sessionMenu:
     | (Pick<GatewaySessionRow, "key" | "sessionId"> & { x: number; y: number })
@@ -388,7 +385,7 @@ class SessionsPage extends OpenClawLightDomElement {
       this.selectedKeys = new Set();
     } else {
       if (leavingDeepLink) {
-        this.restorePreferenceSnapshot();
+        Object.assign(this, this.preferences.current);
       }
       // An explicit route status owns this visit without overwriting the saved default.
       this.statusFilter = data.statusFilter;
@@ -608,28 +605,12 @@ class SessionsPage extends OpenClawLightDomElement {
     includeGlobal: boolean;
     includeUnknown: boolean;
   }) {
-    const changedPreferences: Partial<SessionsPagePreferences> = {};
-    if (next.activeMinutes !== this.activeMinutes) {
-      changedPreferences.activeMinutes = next.activeMinutes;
-    }
-    if (next.limit !== this.limit) {
-      changedPreferences.limit = next.limit;
-    }
-    if (next.includeGlobal !== this.includeGlobal) {
-      changedPreferences.includeGlobal = next.includeGlobal;
-    }
-    if (next.includeUnknown !== this.includeUnknown) {
-      changedPreferences.includeUnknown = next.includeUnknown;
-    }
-    this.activeMinutes = next.activeMinutes;
-    this.limit = next.limit;
-    this.includeGlobal = next.includeGlobal;
-    this.includeUnknown = next.includeUnknown;
+    this.preferences.updateListFilters(next);
+    Object.assign(this, next);
     this.page = 0;
     this.selectedKeys = new Set();
     // Explicit filter edits leave deep-link mode; load the full roster.
     this.deepLinkSessionKey = null;
-    this.persistPreferences(changedPreferences);
     void this.refreshSessionList();
   }
 
@@ -643,7 +624,7 @@ class SessionsPage extends OpenClawLightDomElement {
     this.page = 0;
     this.selectedKeys = new Set();
     this.deepLinkSessionKey = null;
-    this.persistPreferences({ statusFilter });
+    this.preferences.update({ statusFilter });
     // Route navigation changes the managed query; mask the old view's rows
     // until its current list subscription publishes.
     this.loading = true;
@@ -932,26 +913,7 @@ class SessionsPage extends OpenClawLightDomElement {
   private setGroupBy(mode: SessionsGroupBy) {
     this.groupBy = mode;
     this.page = 0;
-    this.persistPreferences({ groupBy: mode });
-  }
-
-  private persistPreferences(changes: Partial<SessionsPagePreferences>) {
-    this.preferenceSnapshot = { ...this.preferenceSnapshot, ...changes };
-    saveSessionsPagePreferences(changes);
-  }
-
-  private restorePreferenceSnapshot() {
-    // Deep-link filters are temporary; restore the in-memory choices without
-    // writing a stale whole-record snapshot over another page's changes.
-    this.activeMinutes = this.preferenceSnapshot.activeMinutes;
-    this.limit = this.preferenceSnapshot.limit;
-    this.includeGlobal = this.preferenceSnapshot.includeGlobal;
-    this.includeUnknown = this.preferenceSnapshot.includeUnknown;
-    this.searchQuery = this.preferenceSnapshot.searchQuery;
-    this.sortColumn = this.preferenceSnapshot.sortColumn;
-    this.sortDir = this.preferenceSnapshot.sortDir;
-    this.groupBy = this.preferenceSnapshot.groupBy;
-    this.pageSize = this.preferenceSnapshot.pageSize;
+    this.preferences.update({ groupBy: mode });
   }
 
   private async rememberCustomGroup(
@@ -1537,21 +1499,10 @@ class SessionsPage extends OpenClawLightDomElement {
           deleteSelectedDisabledReason: this.selectedDeleteDisabledReason(),
           onFiltersChange: (next) => this.updateFilters(next),
           onClearFilters: () => {
-            this.activeMinutes = "";
-            this.limit = String(SESSIONS_PAGE_DEFAULT_LIMIT);
-            this.includeGlobal = true;
-            this.includeUnknown = false;
-            this.searchQuery = "";
+            Object.assign(this, this.preferences.resetFilters());
             this.page = 0;
             this.selectedKeys = new Set();
             this.deepLinkSessionKey = null;
-            this.persistPreferences({
-              activeMinutes: "",
-              limit: String(SESSIONS_PAGE_DEFAULT_LIMIT),
-              includeGlobal: true,
-              includeUnknown: false,
-              searchQuery: "",
-            });
             void this.refreshSessionList();
           },
           onSearchChange: (query) => {
@@ -1568,7 +1519,7 @@ class SessionsPage extends OpenClawLightDomElement {
               }, SESSION_SEARCH_DEBOUNCE_MS);
             }
             this.bindSessionList();
-            this.persistPreferences({ searchQuery: query });
+            this.preferences.update({ searchQuery: query });
           },
           onTranscriptSearchChange: (query) => this.updateTranscriptSearchQuery(query),
           onTranscriptSearch: () => void this.runTranscriptSearch(),
@@ -1577,7 +1528,7 @@ class SessionsPage extends OpenClawLightDomElement {
             this.sortColumn = column;
             this.sortDir = direction;
             this.page = 0;
-            this.persistPreferences({ sortColumn: column, sortDir: direction });
+            this.preferences.update({ sortColumn: column, sortDir: direction });
           },
           onGroupByChange: (mode) => this.setGroupBy(mode),
           onAssignCategory: (key, category) => this.assignCategory(key, category),
@@ -1595,7 +1546,7 @@ class SessionsPage extends OpenClawLightDomElement {
           onPageSizeChange: (pageSize) => {
             this.pageSize = pageSize;
             this.page = 0;
-            this.persistPreferences({ pageSize });
+            this.preferences.update({ pageSize });
           },
           onRefresh: () => void this.refreshSessionList(),
           onStatusFilterChange: (statusFilter) => this.updateStatusFilter(statusFilter),

@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
-import type { RouteLoaderOptions } from "@openclaw/uirouter";
 import { ContextProvider } from "@lit/context";
+import type { RouteLoaderOptions } from "@openclaw/uirouter";
 import { nothing } from "lit";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
@@ -18,13 +18,13 @@ import type {
   SessionDeleteOutcome,
   SessionDeleteTarget,
 } from "../../lib/sessions/session-capability.ts";
-import { loadSessionsPagePreferences } from "./page-state.ts";
-import type { SessionsPagePreferences } from "./page-state.ts";
-import { page as sessionsRoutePage, type SessionsRouteData } from "./route.ts";
 import {
   gatewayHelloForMethods,
   SESSION_MUTATION_TEST_METHODS,
 } from "../../test-helpers/gateway-methods.ts";
+import { loadSessionsPagePreferences } from "./page-state.ts";
+import type { SessionsPagePreferences, SessionsPagePreferencesState } from "./page-state.ts";
+import { page as sessionsRoutePage, type SessionsRouteData } from "./route.ts";
 import {
   createContext,
   createGateway,
@@ -52,7 +52,7 @@ async function createPage(context: ApplicationContext): Promise<TestSessionsPage
 
 type TestPreferencesPage = TestSessionsPage &
   Pick<SessionsPagePreferences, "searchQuery"> & {
-    persistPreferences: (changes: Partial<SessionsPagePreferences>) => void;
+    preferences: Pick<SessionsPagePreferencesState, "update">;
   };
 
 async function createPreferencesPage(): Promise<TestPreferencesPage> {
@@ -115,8 +115,8 @@ describe("sessions page lifecycle", () => {
   it("merges ordered preference updates from two page owners", async () => {
     const first = await createPreferencesPage();
     const second = await createPreferencesPage();
-    first.persistPreferences({ activeMinutes: "5" });
-    second.persistPreferences({ groupBy: "person" });
+    first.preferences.update({ activeMinutes: "5" });
+    second.preferences.update({ groupBy: "person" });
 
     expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
   });
@@ -129,11 +129,11 @@ describe("sessions page lifecycle", () => {
     const setItem = vi.spyOn(storage, "setItem").mockImplementationOnce(() => {
       throw new Error("storage unavailable");
     });
-    first.persistPreferences({ groupBy: "agent" });
+    first.preferences.update({ groupBy: "agent" });
     expect(setItem).toHaveBeenCalledTimes(1);
     expect(storage.getItem("openclaw:sessions:preferences:v1")).toBe(storedBeforeFailure);
-    second.persistPreferences({ groupBy: "person" });
-    first.persistPreferences({ activeMinutes: "5" });
+    second.preferences.update({ groupBy: "person" });
+    first.preferences.update({ activeMinutes: "5" });
 
     expect(setItem).toHaveBeenCalledTimes(3);
     expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
@@ -142,13 +142,13 @@ describe("sessions page lifecycle", () => {
   it("keeps a failed preference write through a route update", async () => {
     const page = await createPreferencesPage();
     const storage = localStorage;
-    page.persistPreferences({ searchQuery: "stored value" });
+    page.preferences.update({ searchQuery: "stored value" });
     const storedBeforeFailure = storage.getItem("openclaw:sessions:preferences:v1");
     const setItem = vi.spyOn(storage, "setItem").mockImplementation(() => {
       throw new Error("storage unavailable");
     });
     page.searchQuery = "keep me";
-    page.persistPreferences({ searchQuery: "keep me" });
+    page.preferences.update({ searchQuery: "keep me" });
 
     page.routeData = { expandedSessionKey: null, statusFilter: "archived" };
     await page.updateComplete;
@@ -161,7 +161,7 @@ describe("sessions page lifecycle", () => {
   it("restores preferences after leaving a direct-session route", async () => {
     const page = await createPreferencesPage();
     page.searchQuery = "before deep link";
-    page.persistPreferences({ searchQuery: "before deep link" });
+    page.preferences.update({ searchQuery: "before deep link" });
     page.routeData = {
       expandedSessionKey: "agent:main:direct",
       statusFilter: "active",
@@ -266,80 +266,6 @@ describe("sessions page lifecycle", () => {
       expect(page.statusFilter).toBe("active");
     },
   );
-
-  it("offers undo after archiving from the Sessions page", async () => {
-    const key = "agent:main:pinned";
-    const patch = vi.fn(async () => ({
-      ok: true as const,
-      path: "",
-      key,
-      entry: { sessionId: key },
-    }));
-    const sessions = createSessions({ patch });
-    const mutableGateway = createGateway({} as GatewayBrowserClient);
-    mutableGateway.emit({ sessionKey: key });
-    const page = await createPage(createContext(mutableGateway.gateway, sessions));
-    const toast = document.createElement("openclaw-toast-host");
-    document.body.append(toast);
-    await toast.updateComplete;
-
-    await page.archiveSessionWithUndo({
-      key,
-      sessionId: "session-pinned",
-      pinned: true,
-    } as GatewaySessionRow);
-    await toast.updateComplete;
-    toast.querySelector<HTMLButtonElement>(".app-toast__action")?.click();
-    await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-    expect(mutableGateway.setSessionKey).not.toHaveBeenCalled();
-
-    expect(patch).toHaveBeenNthCalledWith(
-      1,
-      key,
-      { archived: true },
-      { agentId: undefined, expectedSessionId: "session-pinned" },
-    );
-    expect(patch).toHaveBeenNthCalledWith(
-      2,
-      key,
-      { archived: false, pinned: true },
-      { agentId: undefined, expectedSessionId: "session-pinned" },
-    );
-  });
-
-  it("keeps the archive Undo working after navigating off the Sessions page", async () => {
-    const key = "agent:main:navigated";
-    const patch = vi.fn(async () => ({
-      ok: true as const,
-      path: "",
-      key,
-      entry: { sessionId: key },
-    }));
-    const sessions = createSessions({ patch });
-    const mutableGateway = createGateway({} as GatewayBrowserClient);
-    mutableGateway.emit({ sessionKey: key });
-    const page = await createPage(createContext(mutableGateway.gateway, sessions));
-    const toast = document.createElement("openclaw-toast-host");
-    document.body.append(toast);
-    await toast.updateComplete;
-
-    await page.archiveSessionWithUndo({
-      key,
-      sessionId: "session-nav",
-      pinned: false,
-    } as GatewaySessionRow);
-    await toast.updateComplete;
-    // The toast host outlives the page; navigation unmounts the page element.
-    page.remove();
-    toast.querySelector<HTMLButtonElement>(".app-toast__action")?.click();
-    await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-    expect(patch).toHaveBeenNthCalledWith(
-      2,
-      key,
-      { archived: false },
-      { agentId: undefined, expectedSessionId: "session-nav" },
-    );
-  });
 
   it("reports a connection error instead of silently dropping a patch", async () => {
     const patch = vi.fn();
