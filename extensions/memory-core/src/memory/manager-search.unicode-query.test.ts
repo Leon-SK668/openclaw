@@ -166,6 +166,30 @@ describe("memory keyword query Unicode forms", () => {
   });
 
   it.for(tokenizers)(
+    "does not broaden canonical Latin terms to separator variants with %s",
+    async (tokenizer, context) => {
+      if (tokenizer === "trigram" && !hasTrigram) {
+        context.skip("SQLite does not provide the optional trigram tokenizer");
+      }
+      await withSearch(
+        tokenizer,
+        [
+          { id: "canonical", text: "München weather".normalize("NFD") },
+          { id: "space", text: "Mu nchen weather" },
+          { id: "hyphen", text: "Mu-nchen weather" },
+        ],
+        async (search) => {
+          for (const form of forms) {
+            expect((await search("München".normalize(form))).map((hit) => hit.id)).toEqual([
+              "canonical",
+            ]);
+          }
+        },
+      );
+    },
+  );
+
+  it.for(tokenizers)(
     "keeps AND semantics for mixed-form words with %s",
     async (tokenizer, context) => {
       if (tokenizer === "trigram" && !hasTrigram) {

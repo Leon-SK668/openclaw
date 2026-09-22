@@ -5,7 +5,7 @@ export function tokenizeFtsQuery(raw: string): string[] {
 }
 
 export function buildFtsQuery(raw: string): string | null {
-  return buildMatchQueryFromTerms(tokenizeFtsQuery(raw), true);
+  return buildMatchQueryFromTerms(tokenizeFtsQuery(raw));
 }
 
 function canonicalTermForms(term: string): string[] {
