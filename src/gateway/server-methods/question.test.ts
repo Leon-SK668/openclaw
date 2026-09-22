@@ -22,6 +22,7 @@ import {
 } from "../chat-abort.js";
 import { createGatewayBroadcaster } from "../server-broadcast.js";
 import { createChatRunState } from "../server-chat-state.js";
+import { GatewayClientRegistry } from "../server/client-registry.js";
 import type { GatewayWsClient } from "../server/ws-types.js";
 import { canReceiveSessionEvent } from "../session-sharing.js";
 import {
@@ -247,7 +248,11 @@ describe("question gateway methods", () => {
       const viewerClient = makeQuestionClient(viewer, "question-viewer");
       const guestClient = makeQuestionClient(guest, "question-guest");
       const gatewayBroadcaster = createGatewayBroadcaster({
-        clients: new Set([ownerClient.client, viewerClient.client, guestClient.client]),
+        clients: new GatewayClientRegistry([
+          ownerClient.client,
+          viewerClient.client,
+          guestClient.client,
+        ]),
         canReceiveSessionEvent: (client, sessionKeys, agentId, event, payload) =>
           canReceiveSessionEvent({ cfg, client, sessionKeys, agentId, event, payload }),
       });
@@ -283,34 +288,64 @@ describe("question gateway methods", () => {
     });
   });
 
-  it("requests questions, then gets and lists them", async () => {
-    const requested = await call("question.request", {
-      ...requestParams,
-      id: "client-question-id",
-    });
-    expect(requested[0]).toBe(true);
-    const id = (requested[1] as { id: string }).id;
-    expect(id).toBe("client-question-id");
-    expect(broadcast).toHaveBeenCalledWith(
-      "question.requested",
-      expect.objectContaining({
-        id,
-        runId: "run-main",
-        questions: [expect.objectContaining({ header: "Destination" })],
-        status: "pending",
-      }),
-    );
+  it.each([undefined, "https://example.test/connect", "http://localhost:8080/connect"])(
+    "requests questions with browser URL %s, then gets and lists them",
+    async (url) => {
+      const questions = [{ ...requestParams.questions[0], ...(url ? { url } : {}) }];
+      const requested = await call("question.request", {
+        ...requestParams,
+        id: "client-question-id",
+        questions,
+      });
+      expect(requested[0]).toBe(true);
+      const id = (requested[1] as { id: string }).id;
+      expect(id).toBe("client-question-id");
+      expect(broadcast).toHaveBeenCalledWith(
+        "question.requested",
+        expect.objectContaining({
+          id,
+          runId: "run-main",
+          questions,
+          status: "pending",
+        }),
+      );
 
-    expect(await call("question.get", { id })).toEqual([
-      true,
-      { question: expect.objectContaining({ id, runId: "run-main", status: "pending" }) },
-      undefined,
-    ]);
-    expect(await call("question.list", {})).toEqual([
-      true,
-      { questions: [expect.objectContaining({ id, runId: "run-main" })] },
-      undefined,
-    ]);
+      expect(await call("question.get", { id })).toEqual([
+        true,
+        {
+          question: expect.objectContaining({
+            id,
+            questions,
+            runId: "run-main",
+            status: "pending",
+          }),
+        },
+        undefined,
+      ]);
+      expect(await call("question.list", {})).toEqual([
+        true,
+        { questions: [expect.objectContaining({ id, questions, runId: "run-main" })] },
+        undefined,
+      ]);
+    },
+  );
+
+  it.each([
+    ["script", "javascript:alert(1)"],
+    ["data", "data:text/html,hello"],
+    ["relative", "/connect"],
+    ["ambiguous scheme", "https:example.test/connect"],
+    ["credentials", "https://fixture-user:fixture-password@example.test/connect"],
+    ["over-limit", "https://example.test/" + "x".repeat(2048)],
+  ])("rejects a %s browser URL before publishing", async (_name, url) => {
+    expect(
+      await call("question.request", {
+        ...requestParams,
+        questions: [{ ...requestParams.questions[0], url }],
+      }),
+    ).toMatchObject([false, undefined, { code: "INVALID_REQUEST" }]);
+    expect(manager.list()).toEqual([]);
+    expect(broadcast).not.toHaveBeenCalled();
   });
 
   it("broadcasts answered and expired terminal states", async () => {
@@ -806,7 +841,11 @@ describe("question gateway methods", () => {
       await withOpenClawTestState({ scenario: "minimal" }, async () => {
         mockReferencedStoreSnapshot();
         const reload = createDeferred<{ warningCount: number }>();
-        reloadSecrets.mockReturnValue(reload.promise);
+        const reloadStarted = createDeferred();
+        reloadSecrets.mockImplementation(() => {
+          reloadStarted.resolve();
+          return reload.promise;
+        });
         const id = await requestSecretQuestion();
         const firstValue = "test-secret-committed-first";
         const pending = call("question.resolve", {
@@ -831,6 +870,12 @@ describe("question gateway methods", () => {
             readSecretStoreValue({ scope: { kind: "team" }, name: "SERVICE_API_KEY" }),
           ).toEqual({ ok: true, value: firstValue });
           expect(manager.get(id)?.status).toBe("answered");
+          await Promise.race([
+            reloadStarted.promise,
+            pending.then(() => {
+              throw new Error("question.resolve settled before runtime refresh began");
+            }),
+          ]);
           expect(reloadSecrets).toHaveBeenCalledTimes(1);
         } finally {
           reload.resolve({ warningCount: 0 });

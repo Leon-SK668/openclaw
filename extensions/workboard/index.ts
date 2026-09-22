@@ -10,6 +10,8 @@ import {
   syncWorkboardAgentEnded,
   syncWorkboardSubagentEnded,
 } from "./src/lifecycle-sync.js";
+import { resolveWorkboardSqliteWorkerModuleUrl } from "./src/sqlite-store-paths.js";
+import { registerWorkboardStoreLifecycle } from "./src/store-lifecycle.js";
 import { WorkboardStore } from "./src/store.js";
 import { createWorkboardTools } from "./src/tools.js";
 import {
@@ -22,31 +24,27 @@ export default definePluginEntry({
   name: "Workboard",
   description: "Dashboard workboard for agent-owned issues and sessions.",
   register(api) {
-    const store = WorkboardStore.openSqlite();
-    api.lifecycle.registerRuntimeLifecycle({
-      id: "workboard-sqlite-store",
-      cleanup: ({ reason, sessionKey, runId }) => {
-        // Session cleanup shares this hook, but only registry retirement owns the whole store.
-        if (
-          sessionKey === undefined &&
-          runId === undefined &&
-          (reason === "disable" || reason === "restart")
-        ) {
-          return store.close();
-        }
-        return undefined;
-      },
+    const store = WorkboardStore.openSqlite(
+      resolveWorkboardSqliteWorkerModuleUrl(api.runtimeSource),
+    );
+    const resourceServices: Array<{ stop(): void | Promise<void> }> = [];
+    registerWorkboardStoreLifecycle(api, store, async () => {
+      await Promise.all(resourceServices.map(async (service) => await service.stop()));
     });
+    const changeEvents = createWorkboardChangeEventService(store);
+    resourceServices.push(changeEvents);
     const automationNudge = createWorkboardAutomationNudgeService({
       store,
       gateway: api.runtime.gateway,
     });
+    resourceServices.push(automationNudge);
     const lifecycleSync = createWorkboardLifecycleService({
       store,
       worktrees: api.runtime.worktrees,
       readSessions: async (options) =>
         await readWorkboardLifecycleSessions(api.runtime.gateway, options),
     });
+    resourceServices.push(lifecycleSync);
     api.session.controls.registerControlUiDescriptor({
       surface: "tab",
       id: "workboard",
@@ -76,10 +74,10 @@ export default definePluginEntry({
     });
     registerWorkboardGatewayMethods({ api, store });
     registerWorkboardCommand({ api, store });
-    api.registerService(createWorkboardChangeEventService(store));
+    api.registerService(changeEvents);
     api.registerService(automationNudge);
     api.registerService(lifecycleSync);
-    api.on("gateway_start", () => lifecycleSync.onGatewayStart());
+    api.on("gateway_start", (_event, context) => lifecycleSync.onGatewayStart(context.abortSignal));
     api.on("gateway_stop", () => lifecycleSync.onGatewayStop());
     api.on("subagent_ended", (event) =>
       store.runOperation(async () => {
