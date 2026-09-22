@@ -42,7 +42,7 @@ async function withSearch(
         "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, 0, 0)",
       ).run(path, source, document.id);
       db.prepare(
-        "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, 1, 1, ?, 'fts-only', ?, '[]', 0)",
+        "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, 1, 1, ?, 'fts-only', ?, x'5b5d', 0)",
       ).run(document.id, path, source, document.id, document.text);
       db.prepare(
         "INSERT INTO memory_index_chunks_fts (text, id, path, source, model, start_line, end_line) VALUES (?, ?, ?, ?, 'fts-only', 1, 1)",
