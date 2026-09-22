@@ -5,12 +5,14 @@ import {
   patchSessionEntryCore,
   recordSessionParticipant,
   replaceSessionEntry,
+  replaceSessionEntrySync,
 } from "../../config/sessions/session-accessor.js";
 import { addSessionMember } from "../../config/sessions/session-sharing-store.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { ensureProfileForEmail, setUserProfileRole } from "../../state/user-profiles.js";
+import { observeSessionRowBackfill } from "../session-row-backfill.test-support.js";
 import { rolePolicyConfig } from "../session-sharing.test-utils.js";
 import * as sessionTranscriptReaders from "../session-transcript-readers.js";
 import {
@@ -20,6 +22,7 @@ import {
 } from "../test/server-sessions.test-helpers.js";
 import {
   identifiedClient,
+  initializeSessionReadContext,
   listSessions,
   requestContext,
 } from "./sessions-read-cache.test-support.js";
@@ -32,6 +35,7 @@ afterEach(() => {
 });
 
 test("projects recap eligibility from current sharing authority, including capped shared viewers", async () => {
+  using _ = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
   const ownerId = ensureProfileForEmail("recap-reader@example.test").id;
   setUserProfileRole(ownerId, "view");
   const client = identifiedClient(ownerId);
@@ -42,7 +46,7 @@ test("projects recap eligibility from current sharing authority, including cappe
     ["member", foreignId, "read-only"],
     ["viewer", foreignId, "shared"],
   ] as const) {
-    await replaceSessionEntry(
+    replaceSessionEntrySync(
       { agentId: "main", sessionKey: `agent:main:recap-${name}`, storePath },
       {
         sessionId: `recap-${name}`,
@@ -57,9 +61,10 @@ test("projects recap eligibility from current sharing authority, including cappe
     { identityId: ownerId, addedBy: foreignId },
   );
   for (const capped of [true, false]) {
+    const context = requestContext(capped ? rolePolicyConfig() : {});
     const result = await listSessions({
       client,
-      context: requestContext(capped ? rolePolicyConfig() : {}),
+      context,
       request: { includeActivitySummary: true },
     });
     const sessions = new Map(result.sessions.map((session) => [session.key, session]));
@@ -76,6 +81,12 @@ test("projects recap eligibility from current sharing authority, including cappe
       visibility: "shared",
       activitySummary: { canEnsure: !capped },
     });
+    for (const includeActivitySummary of [undefined, false]) {
+      const ordinary = await listSessions({ client, context, request: { includeActivitySummary } });
+      expect(ordinary.sessions).toEqual(
+        result.sessions.map(({ activitySummary: _summary, ...row }) => row),
+      );
+    }
   }
 });
 
@@ -104,6 +115,7 @@ test.each([
       {
         sessionId,
         updatedAt: 42,
+        displayName: "Research transcript title",
         visibility: "draft",
         createdActor: { type: "human", source: "profile", id: ownerId },
       },
@@ -123,6 +135,11 @@ test.each([
       includeDerivedTitles: transcript,
       includeLastMessage: transcript,
     };
+    if (transcript) {
+      const backfilled = observeSessionRowBackfill([sessionKey]);
+      await initializeSessionReadContext(context);
+      await backfilled;
+    }
     const result = await listSessions({ client, context, request });
     expect.soft(result.sessions).toHaveLength(1);
     expect.soft(result.sessions[0]).toMatchObject({

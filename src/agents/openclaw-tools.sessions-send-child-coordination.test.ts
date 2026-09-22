@@ -39,6 +39,7 @@ vi.mock("../acp/runtime/session-meta-readonly.js", async () => {
   };
 });
 vi.mock("../gateway/call.js", () => ({ callGateway: (opts: unknown) => callGatewayMock(opts) }));
+vi.mock("../commands/agent.js", () => ({ agentCommandFromIngress: vi.fn() }));
 vi.mock("../config/config.js", () => ({
   getRuntimeConfig: () => config,
   resolveGatewayPort: () => 18789,
@@ -108,7 +109,7 @@ describe("sessions_send child coordination", () => {
       .mockReset()
       .mockImplementation((params: unknown) => readAcpSessionMetaMock(params));
     setActivePluginRegistry(createSessionConversationTestRegistry());
-    agentStepTesting.setDepsForTest({
+    await agentStepTesting.setDepsForTest({
       agentCommandFromIngress: async () => ({
         payloads: [{ text: "ANNOUNCE_SKIP", mediaUrl: null }],
         meta: { durationMs: 1 },
@@ -118,7 +119,7 @@ describe("sessions_send child coordination", () => {
   afterEach(async () => {
     await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
     resetGatewayWorkAdmission();
-    agentStepTesting.setDepsForTest();
+    await agentStepTesting.setDepsForTest();
     closeOpenClawStateDatabaseForTest();
     await state.cleanup();
   });
@@ -410,7 +411,7 @@ describe("sessions_send child coordination", () => {
         payloads: [{ text: "ANNOUNCE_SKIP", mediaUrl: null }],
         meta: { durationMs: 1 },
       }));
-      agentStepTesting.setDepsForTest({ agentCommandFromIngress: finalAnnounce });
+      await agentStepTesting.setDepsForTest({ agentCommandFromIngress: finalAnnounce });
       const tool = createSendTool(requesterKey);
       const result = await tool.execute("child-coordination", {
         sessionKey: targetKey,
@@ -449,6 +450,11 @@ describe("sessions_send child coordination", () => {
         name: "visible child",
         requesterKey: "agent:main:dashboard:child",
         entry: { spawnedBy: "agent:main:main", spawnDepth: 1 },
+      },
+      {
+        name: "restored child with cyclic lineage",
+        requesterKey: "agent:main:dashboard:cycle",
+        entry: { spawnedBy: "agent:main:dashboard:cycle" },
       },
       {
         name: "legacy ACP child",
@@ -508,15 +514,31 @@ describe("sessions_send child coordination", () => {
   it.each([
     { name: "dashboard threading", staleAcp: false },
     { name: "stale ACP shadow", staleAcp: true },
+    {
+      name: "explicit zero depth under a child-looking key",
+      staleAcp: false,
+      nativeKey: true,
+      entry: { spawnDepth: 0 },
+    },
+    {
+      name: "explicit zero depth with stale lineage",
+      staleAcp: false,
+      entry: { spawnDepth: 0, spawnedBy: "agent:main:dashboard:parent-uuid" },
+    },
   ])(
     "sessions_send keeps peer A2A for $name without canonical child ownership",
-    async ({ staleAcp }) => {
+    async ({ staleAcp, nativeKey = false, entry = {} }) => {
       const requesterKey = "agent:main:dashboard:parent-uuid";
-      const targetKey = staleAcp ? "agent:main:acp:stale" : "agent:main:dashboard:thread-uuid";
+      const targetKey = nativeKey
+        ? "agent:main:subagent:root"
+        : staleAcp
+          ? "agent:main:acp:stale"
+          : "agent:main:dashboard:thread-uuid";
       await writeEntry(targetKey, {
         sessionId: "thread-session",
         updatedAt: 1,
         parentSessionKey: requesterKey,
+        ...entry,
         ...(staleAcp
           ? {
               acp: {
