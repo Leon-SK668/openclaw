@@ -1,0 +1,73 @@
+name: PR 132591 exact-head browser proof
+
+on:
+  push:
+    branches:
+      - proof/leon-pr132591-browser-20260922
+
+permissions:
+  contents: read
+
+jobs:
+  browser-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      ORIGINAL_PR_SHA: f0287af0230893baeed38ae8a22a2465efabe2ee
+      PROOF_SHA: ${{ github.sha }}
+      OPENCLAW_CAPTURE_UI_PROOF: "1"
+      OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ github.workspace }}/.artifacts/control-ui-e2e
+    steps:
+      - name: Checkout proof branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.PROOF_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact PR production blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PROOF_SHA"
+          git merge-base --is-ancestor "$ORIGINAL_PR_SHA" HEAD
+          changed="$(git diff --name-only "$ORIGINAL_PR_SHA")"
+          test "$changed" = ".github/workflows/proof-pr132591-browser-20260922.yml"
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+
+      - name: Install Playwright Chromium
+        run: node --import tsx scripts/ensure-playwright-chromium.mts
+
+      - name: Capture exact-head active-run UI
+        run: |
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.ui-e2e.config.ts \
+            --configLoader runner \
+            ui/src/e2e/debug-diagnostics.e2e.test.ts
+
+      - name: Verify proof receipts
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$(find .artifacts/control-ui-e2e -maxdepth 1 -type d \
+            -name 'control-ui-debug-diagnostics-*' -print -quit)"
+          test -n "$proof_dir"
+          test -s "$proof_dir/active-runs.png"
+          video="$(find "$proof_dir/video" -type f -name '*.webm' -size +0c -print -quit)"
+          test -n "$video"
+          find "$proof_dir" -type f ! -name sha256sums.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > "$proof_dir/sha256sums.txt"
+
+      - name: Upload exact-head browser proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-132591-browser-${{ github.sha }}
+          path: .artifacts/control-ui-e2e/control-ui-debug-diagnostics-*
+          if-no-files-found: error
+          retention-days: 14
