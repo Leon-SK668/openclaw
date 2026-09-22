@@ -1,0 +1,63 @@
+name: PR 132503 running approval-window proof
+
+on:
+  push:
+    branches:
+      - proof/leon-pr132503-window-20260922
+
+permissions:
+  contents: read
+
+jobs:
+  macos-window-proof:
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      ORIGINAL_PR_SHA: 53da280215f2bdcd17f6166195c45efd424da1d9
+      PROOF_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout proof branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PROOF_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact PR production blobs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PROOF_SHA"
+          git merge-base --is-ancestor "$ORIGINAL_PR_SHA" HEAD
+          test -z "$(git diff --name-only "$ORIGINAL_PR_SHA" -- \
+            apps/macos/Sources \
+            apps/.i18n/native-source.json)"
+
+      - name: Prepare Apple Mermaid assets
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          node scripts/prepare-apple-mermaid.mjs
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Capture running native approval windows
+        run: |
+          set -euo pipefail
+          swift build --package-path apps/macos --build-system native --enable-code-coverage --build-tests
+          node scripts/test-macos-native.mts default \
+            --package-path apps/macos --build-system native --enable-code-coverage \
+            --skip-build --filter ExecApprovalPromptLayoutTests
+
+      - name: Upload running-window receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-132503-running-window-${{ github.sha }}
+          path: |
+            apps/macos/Tests/OpenClawIPCTests/pr132503-window-proof-output/approval-window-*.png
+            apps/macos/Tests/OpenClawIPCTests/pr132503-window-proof-output/approval-window-*.json
+          if-no-files-found: error

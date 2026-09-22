@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Testing
+import Vision
 @testable import OpenClaw
 
 @Suite(.serialized)
@@ -269,6 +270,71 @@ struct ExecApprovalPromptLayoutTests {
         print("Approval AX proof: populated Session present; blank Session absent; both action controls present")
     }
 
+    @Test func `running approval windows show session and omit blank session`() async throws {
+        _ = AppKitTestSupport.application
+        let output = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("pr132503-window-proof-output", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let cases: [(name: String, sessionKey: String?, expectedSession: String?)] = [
+            ("populated", "  agent:main:telegram:dm:12345  ", "agent:main:telegram:dm:12345"),
+            ("blank", " \n\t ", nil),
+        ]
+
+        for testCase in cases {
+            let panel = ExecApprovalsPromptPresenter.buildPanel(
+                ExecApprovalPromptRequest(
+                    command: "/bin/sh -lc pwd",
+                    sessionKey: testCase.sessionKey),
+                onDecision: { _ in })
+            defer { panel.close() }
+            NSApp.activate(ignoringOtherApps: true)
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+            panel.displayIfNeeded()
+            try await Task.sleep(for: .milliseconds(500))
+            #expect(panel.isVisible)
+            #expect(panel.windowNumber > 0)
+
+            let imageURL = output.appendingPathComponent("approval-window-\(testCase.name).png")
+            let capture = Process()
+            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            capture.arguments = ["-x", "-l\(panel.windowNumber)", imageURL.path]
+            try capture.run()
+            capture.waitUntilExit()
+            try #require(capture.terminationStatus == 0)
+            let image = try #require(NSImage(contentsOf: imageURL))
+            var imageRect = NSRect(origin: .zero, size: image.size)
+            let cgImage = try #require(
+                image.cgImage(forProposedRect: &imageRect, context: nil, hints: nil))
+            let text = try self.recognizedText(in: cgImage)
+            #expect(text.contains("Allow Once"))
+            if let expectedSession = testCase.expectedSession {
+                #expect(text.contains("Session"))
+                #expect(text.contains(expectedSession))
+            } else {
+                #expect(!text.contains("Session"))
+                #expect(!text.contains("agent:"))
+            }
+
+            let expectedSessionReceipt: Any =
+                testCase.expectedSession.map { $0 as Any } ?? NSNull()
+            let receipt: [String: Any] = [
+                "captureMethod": "/usr/sbin/screencapture -l<window-id>",
+                "expectedSession": expectedSessionReceipt,
+                "imageHeight": cgImage.height,
+                "imageWidth": cgImage.width,
+                "ocrText": text,
+                "panelVisible": panel.isVisible,
+                "windowNumber": panel.windowNumber,
+            ]
+            try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys])
+                .write(
+                    to: output.appendingPathComponent("approval-window-\(testCase.name).json"),
+                    options: .atomic)
+        }
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews.flatMap { [$0] + self.descendants(of: $0) }
     }
@@ -294,6 +360,19 @@ struct ExecApprovalPromptLayoutTests {
         }
         visit(root)
         return labels
+    }
+
+    private func recognizedText(in image: CGImage) throws -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? [])
+            .compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
 }
