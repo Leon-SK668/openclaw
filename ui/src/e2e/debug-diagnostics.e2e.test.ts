@@ -512,7 +512,7 @@ suite.define(() => {
         expect(await activeRuns.locator("li").count()).toBe(100);
         expect(await activeRuns.getByText("active-session-100", { exact: true }).count()).toBe(0);
         for (const sessionId of ["active-session-0", "active-session-1", "active-session-2"]) {
-          expect(await activeRuns.getByText(sessionId, { exact: true }).count()).toBe(1);
+          expect(await activeRuns.locator("li").filter({ hasText: sessionId }).count()).toBe(1);
         }
         for (const runId of ["active-run-0", "active-run-1", "active-run-2"]) {
           expect(await activeRuns.locator("li").filter({ hasText: runId }).count()).toBe(1);
