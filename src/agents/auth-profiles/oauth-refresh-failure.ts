@@ -3,12 +3,14 @@ import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeBoundedOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import { formatCliCommand } from "../../cli/command-format.js";
+import { toErrorObject } from "../../infra/errors.js";
 /**
  * OAuth refresh failure classification and operator hints.
  * Parses provider/reason codes from refresh failures and formats safe login
  * commands without trusting raw provider text.
  */
 import { formatInlineCodeSpan } from "../../shared/markdown-code.js";
+import { formatProviderLoginCommand } from "../../shared/provider-login-command.js";
 import type { AuthProfileFailureReason } from "./types.js";
 
 export type OAuthRefreshFailureReason =
@@ -35,6 +37,40 @@ export type OAuthRefreshFailurePresentation = {
   status?: number;
   summary?: string;
 };
+
+const oauthRefreshCleanupAggregates = new WeakSet<AggregateError>();
+
+export function appendOAuthRefreshCleanupErrors(
+  error: unknown,
+  cleanupErrors: readonly unknown[],
+): Error {
+  const primaryError = toErrorObject(error, "OAuth refresh failed");
+  if (cleanupErrors.length === 0) {
+    return primaryError;
+  }
+  const normalizedCleanupErrors = cleanupErrors.map((cleanupError) =>
+    toErrorObject(cleanupError, "OAuth refresh cleanup failed"),
+  );
+  const errors =
+    primaryError instanceof AggregateError && oauthRefreshCleanupAggregates.has(primaryError)
+      ? [...primaryError.errors, ...normalizedCleanupErrors]
+      : [primaryError, ...normalizedCleanupErrors];
+  const aggregate = new AggregateError(
+    errors,
+    "OAuth refresh failed and cleanup could not be completed.",
+    { cause: errors[0] },
+  );
+  oauthRefreshCleanupAggregates.add(aggregate);
+  return aggregate;
+}
+
+export function readOAuthRefreshInitiatingError(error: unknown): unknown {
+  return error instanceof AggregateError &&
+    oauthRefreshCleanupAggregates.has(error) &&
+    error.errors.length > 0
+    ? error.errors[0]
+    : error;
+}
 
 const OAUTH_REFRESH_FAILURE_ERROR_TYPE_MAX_CHARS = 100;
 const OAUTH_REFRESH_FAILURE_SUMMARY_MAX_CHARS = 500;
@@ -320,10 +356,17 @@ export function classifyOAuthRefreshFailureError(err: unknown): OAuthRefreshFail
 /** Build the login command operators should run after OAuth refresh failure. */
 export function buildOAuthRefreshFailureLoginCommand(
   provider: string | null | undefined,
-  options?: { profileId?: string | null },
+  options?: { profileId?: string | null; agentId?: string; surface?: "cli" | "chat" },
 ): string {
   const sanitizedProvider = sanitizeOAuthRefreshFailureProvider(provider);
+  if (options?.surface === "chat") {
+    return formatProviderLoginCommand(
+      sanitizedProvider === "claude-cli" ? null : sanitizedProvider,
+    );
+  }
   const sanitizedProfileId = sanitizeOAuthRefreshFailureProfileId(options?.profileId);
+  const agentId = options?.agentId ? sanitizeForLog(options.agentId).trim() : undefined;
+  const agentOption = agentId ? ` --agent ${quoteShellArg(agentId)}` : "";
   if (sanitizedProvider === "claude-cli") {
     // claude-cli is not a standalone provider id; it is the Anthropic provider
     // accessed via the CLI auth method. Refresh the local Claude CLI session
@@ -331,18 +374,18 @@ export function buildOAuthRefreshFailureLoginCommand(
     const claudeLoginCommand = formatCliCommand("claude auth login");
     const openclawLoginCommand = formatCliCommand(
       sanitizedProfileId
-        ? `openclaw models auth login --provider anthropic --method cli --profile-id ${quoteShellArg(sanitizedProfileId)}`
-        : "openclaw models auth login --provider anthropic --method cli",
+        ? `openclaw models auth login --provider anthropic --method cli --profile-id ${quoteShellArg(sanitizedProfileId)}${agentOption}`
+        : `openclaw models auth login --provider anthropic --method cli${agentOption}`,
     );
     return `${claudeLoginCommand} && ${openclawLoginCommand}`;
   }
   return sanitizedProvider
     ? formatCliCommand(
         sanitizedProfileId
-          ? `openclaw models auth login --provider ${sanitizedProvider} --profile-id ${quoteShellArg(sanitizedProfileId)}`
-          : `openclaw models auth login --provider ${sanitizedProvider}`,
+          ? `openclaw models auth login --provider ${sanitizedProvider} --profile-id ${quoteShellArg(sanitizedProfileId)}${agentOption}`
+          : `openclaw models auth login --provider ${sanitizedProvider}${agentOption}`,
       )
-    : formatCliCommand("openclaw models auth login");
+    : formatCliCommand(`openclaw models auth login${agentOption}`);
 }
 
 /** Build operator guidance for an active profile cooldown or disable window. */

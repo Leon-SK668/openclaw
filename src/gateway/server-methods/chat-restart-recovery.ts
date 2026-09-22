@@ -29,7 +29,7 @@ import { isCronSessionKey, isSubagentSessionKey } from "../../routing/session-ke
 import { isAgentHarnessSessionKey } from "../../sessions/agent-harness-session-key.js";
 import { isAcpSessionKey, resolveSessionDispatchKind } from "../../sessions/session-key-utils.js";
 import { recordGatewaySessionRunFailure } from "../../sessions/session-run-error.js";
-import { sessionDeliveryChannel } from "../../utils/delivery-context.shared.js";
+import { sessionDeliveryChannel } from "../../utils/delivery-context.read.js";
 import { parseInlineDirectives } from "../../utils/directive-tags.js";
 import { resolveChatRunOwnerAgentId } from "../chat-run-owner.js";
 import type { GatewayRecoveryRuntime } from "../server-instance-runtime.types.js";
@@ -316,7 +316,10 @@ export function resolveRestartSafeChatAdmission(params: {
   agentId: string;
   cfg: OpenClawConfig;
   clientRunId: string;
-  context: Pick<GatewayRequestContext, "chatAbortControllers" | "chatQueuedTurns">;
+  context: Pick<
+    GatewayRequestContext,
+    "chatAbortControllers" | "chatQueuedTurns" | "workerSessionPlacementService"
+  >;
   entry?: SessionEntry;
   initialSessionEntry?: SessionEntry;
   now: number;
@@ -328,6 +331,14 @@ export function resolveRestartSafeChatAdmission(params: {
 }): RestartSafeChatAdmission | undefined {
   const request = params.request;
   const entry = params.entry ?? params.initialSessionEntry;
+  const placement = params.context.workerSessionPlacementService
+    ?.getMany([params.sessionId])
+    .get(params.sessionId);
+  // Only local input may be consumed before turn admission. Worker setup and
+  // reconciliation retain approved input in custody until their writer is ready.
+  if (placement && placement.state !== "local") {
+    return undefined;
+  }
   if (
     !request ||
     !entry ||

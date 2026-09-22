@@ -13,11 +13,13 @@ import {
 import { tryBeginGatewayRootWorkAdmission } from "../../process/gateway-work-admission.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import {
+  closeOpenClawStateDatabaseByPathAsync,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { createWorkerSessionPlacementStore } from "./placement-store.js";
+import { seedAttachedPlacementEnvironment } from "./placement-test-fixtures.js";
 import { bindWorkerTurnOwner } from "./placement-turn-claim-events.js";
 import { createWorkerSessionToolExecutor } from "./worker-session-tool-executor.js";
 
@@ -351,6 +353,11 @@ async function createWorkerSessionToolTestFixture(
         remoteWorkspaceDir: `/workspace/${session.sessionId}`,
       },
     });
+    seedAttachedPlacementEnvironment(database, {
+      environmentId: session.environmentId,
+      sessionId: session.sessionId,
+      ownerEpoch: session.ownerEpoch,
+    });
     placements.transition({
       sessionId: session.sessionId,
       from: "starting",
@@ -413,6 +420,7 @@ async function createWorkerSessionToolTestFixture(
         releaseAgentRunDelegatedAuthority(authority);
       }
       rootAdmission.release();
+      await closeOpenClawStateDatabaseByPathAsync(database.path);
       closeOpenClawStateDatabaseForTest();
       await fs.rm(root, { recursive: true, force: true });
     },
