@@ -14,8 +14,8 @@ const SORT_COLUMNS = ["key", "kind", "updated", "tokens"] as const;
 const SORT_DIRECTIONS = ["asc", "desc"] as const;
 const STATUS_FILTERS = ["active", "archived", "all"] as const;
 const PAGE_SIZES = [10, 25, 50, 100] as const;
-export type SessionsSortColumn = (typeof SORT_COLUMNS)[number];
-export type SessionsSortDirection = (typeof SORT_DIRECTIONS)[number];
+type SessionsSortColumn = (typeof SORT_COLUMNS)[number];
+type SessionsSortDirection = (typeof SORT_DIRECTIONS)[number];
 
 export type SessionsPagePreferences = {
   activeMinutes: string;
@@ -30,7 +30,7 @@ export type SessionsPagePreferences = {
   pageSize: number;
 };
 
-export type SessionsPageListFilters = Pick<
+type SessionsPageListFilters = Pick<
   SessionsPagePreferences,
   "activeMinutes" | "limit" | "includeGlobal" | "includeUnknown"
 >;
@@ -137,7 +137,7 @@ export function loadSessionsPagePreferences(): SessionsPagePreferences {
   }
 }
 
-export function saveSessionsPagePreferences(changes: Partial<SessionsPagePreferences>): void {
+function saveSessionsPagePreferences(changes: Partial<SessionsPagePreferences>): void {
   try {
     const storage = getSafeLocalStorage();
     if (!storage) {

@@ -69,11 +69,7 @@ import { sessionAgentIdentityById, sessionAgentIds } from "./agent-scope.ts";
 import { prepareArchiveOutcome } from "./archive-outcome.ts";
 import { rememberSessionCustomGroup, sessionCategoryNames } from "./custom-groups.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
-import {
-  SessionsPagePreferencesState,
-  type SessionsSortColumn,
-  type SessionsSortDirection,
-} from "./page-state.ts";
+import { SessionsPagePreferencesState } from "./page-state.ts";
 import type { SessionsRouteData } from "./route.ts";
 import { renderSessionManagementMenu } from "./session-menu.ts";
 import { renderSessions, type SessionsProps } from "./view.ts";
@@ -125,8 +121,9 @@ class SessionsPage extends OpenClawLightDomElement {
   @state() private searchQuery = this.preferences.current.searchQuery;
   @state() private transcriptSearchQuery = "";
   @state() private submittedTranscriptSearchQuery = "";
-  @state() private sortColumn: SessionsSortColumn = this.preferences.current.sortColumn;
-  @state() private sortDir: SessionsSortDirection = this.preferences.current.sortDir;
+  @state() private sortColumn: "key" | "kind" | "updated" | "tokens" =
+    this.preferences.current.sortColumn;
+  @state() private sortDir: "asc" | "desc" = this.preferences.current.sortDir;
   @state() private groupBy: SessionsGroupBy = this.preferences.current.groupBy;
   @state() private page = 0;
   @state() private pageSize = this.preferences.current.pageSize;
