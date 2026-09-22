@@ -10,6 +10,7 @@ import { listRecoveredManagedNpmInstallCandidates } from "./installed-plugin-ind
 import { readPersistedInstalledPluginIndexRowSync } from "./installed-plugin-index-record-state.js";
 import { readPersistedInstalledPluginIndexInstallRecords } from "./installed-plugin-index-records.js";
 import {
+  clearRetainedManagedNpmInstallMarker,
   cleanupRetainedManagedNpmInstallGenerations,
   hasRetainedManagedNpmInstallMarker,
   markRetainedManagedNpmInstall,
