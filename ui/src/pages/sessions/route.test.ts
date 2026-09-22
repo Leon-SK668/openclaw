@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 
-import type { RouteLoaderOptions } from "@openclaw/uirouter";
+import { createRouter, type RouteLoaderOptions } from "@openclaw/uirouter";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApplicationContext } from "../../app/context.ts";
 import type { SessionListOptions } from "../../lib/sessions/index.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
-import { loadSessionsPagePreferences, saveSessionsPagePreferences } from "./page-state.ts";
+import { loadSessionsPagePreferences, SessionsPagePreferencesState } from "./page-state.ts";
 import { page, type SessionsRouteData } from "./route.ts";
 
 async function loadSessionsRoute(options: {
@@ -123,10 +123,7 @@ describe("sessions route", () => {
   });
 
   it("uses the persisted status for the initial roster", async () => {
-    saveSessionsPagePreferences({
-      ...loadSessionsPagePreferences(),
-      statusFilter: "archived",
-    });
+    new SessionsPagePreferencesState().update({ statusFilter: "archived" });
 
     await loadSessionsRoute({
       search: "",
@@ -144,10 +141,7 @@ describe("sessions route", () => {
   });
 
   it("keeps explicit status URLs ahead of persisted status", async () => {
-    saveSessionsPagePreferences({
-      ...loadSessionsPagePreferences(),
-      statusFilter: "archived",
-    });
+    new SessionsPagePreferencesState().update({ statusFilter: "archived" });
 
     await loadSessionsRoute({
       search: "?status=all",
@@ -164,10 +158,7 @@ describe("sessions route", () => {
   });
 
   it("keeps direct-session links active and isolated from persisted status", async () => {
-    saveSessionsPagePreferences({
-      ...loadSessionsPagePreferences(),
-      statusFilter: "archived",
-    });
+    new SessionsPagePreferencesState().update({ statusFilter: "archived" });
 
     await loadSessionsRoute({
       search: "?session=agent%3Aresearch%3Alinked",
@@ -183,5 +174,27 @@ describe("sessions route", () => {
         agentId: "research",
       },
     });
+  });
+
+  it("reloads the stored status after an explicit Active visit", async () => {
+    new SessionsPagePreferencesState().update({ statusFilter: "archived" });
+    const context = {
+      runtimeConfig: { ensureLoaded: vi.fn(async () => undefined) },
+      agentSelection: { state: { selectedId: "main", scopeId: "main" } },
+    } as unknown as ApplicationContext;
+    const router = createRouter<"sessions", ApplicationContext, null, SessionsRouteData>({
+      routes: [{ ...page, component: () => null }],
+    });
+    const location = (search: string) => ({ pathname: "/sessions", search, hash: "" });
+
+    try {
+      await router.navigate("sessions", context, {}, location("?status=active"));
+      expect(router.getState().matches[0]?.data?.statusFilter).toBe("active");
+
+      await router.navigate("sessions", context, {}, location(""));
+      expect(router.getState().matches[0]?.data?.statusFilter).toBe("archived");
+    } finally {
+      router.stop();
+    }
   });
 });

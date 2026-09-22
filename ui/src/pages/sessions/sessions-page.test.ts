@@ -135,8 +135,18 @@ describe("sessions page lifecycle", () => {
     second.preferences.update({ groupBy: "person" });
     first.preferences.update({ activeMinutes: "5" });
 
-    expect(setItem).toHaveBeenCalledTimes(3);
+    expect(setItem).toHaveBeenCalledTimes(5);
     expect(loadSessionsPagePreferences()).toMatchObject({ activeMinutes: "5", groupBy: "person" });
+  });
+
+  it("keeps grouping readable after rolling back to the legacy key", () => {
+    localStorage.setItem("openclaw:sessions:group-by", "agent");
+    const preferences = new SessionsPagePreferencesState();
+    preferences.update({ groupBy: "person" });
+
+    expect(localStorage.getItem("openclaw:sessions:group-by")).toBe("person");
+    localStorage.removeItem("openclaw:sessions:preferences:v1");
+    expect(loadSessionsPagePreferences().groupBy).toBe("person");
   });
 
   it("keeps a failed preference write through a route update", async () => {
@@ -173,6 +183,32 @@ describe("sessions page lifecycle", () => {
     await page.updateComplete;
 
     expect(page.searchQuery).toBe("before deep link");
+  });
+
+  it("persists only the filter edited while a direct-session route is active", async () => {
+    new SessionsPagePreferencesState().update({
+      limit: "25",
+      includeGlobal: false,
+      includeUnknown: false,
+    });
+    const { gateway } = createGateway({} as GatewayBrowserClient);
+    const page = await createRenderedPage(
+      createContext(gateway, createSessions()),
+      sessionsResult([], 0),
+      "active",
+      "agent:main:direct",
+    );
+    const minutes = page.querySelector<HTMLInputElement>(".session-filter-input--minutes");
+    expect(minutes).not.toBeNull();
+    minutes!.value = "15";
+    minutes!.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(loadSessionsPagePreferences()).toMatchObject({
+      activeMinutes: "15",
+      limit: "25",
+      includeGlobal: false,
+      includeUnknown: false,
+    });
   });
 
   it("switches between Active and Archived with the route parameter", async () => {

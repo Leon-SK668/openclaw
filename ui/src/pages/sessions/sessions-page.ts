@@ -602,7 +602,12 @@ class SessionsPage extends OpenClawLightDomElement {
     includeGlobal: boolean;
     includeUnknown: boolean;
   }) {
-    this.preferences.updateListFilters(next);
+    this.preferences.updateListFilters(next, {
+      activeMinutes: this.activeMinutes,
+      limit: this.limit,
+      includeGlobal: this.includeGlobal,
+      includeUnknown: this.includeUnknown,
+    });
     Object.assign(this, next);
     this.page = 0;
     this.selectedKeys = new Set();

@@ -148,7 +148,9 @@ function saveSessionsPagePreferences(changes: Partial<SessionsPagePreferences>):
       SESSIONS_PAGE_PREFERENCES_STORAGE_KEY,
       JSON.stringify({ version: 1, ...preferences }),
     );
-    storage.removeItem(LEGACY_GROUP_BY_STORAGE_KEY);
+    // Keep the previous release's grouping key current during the transition so
+    // rolling back does not silently discard a grouping change made here.
+    storage.setItem(LEGACY_GROUP_BY_STORAGE_KEY, preferences.groupBy);
   } catch {
     // Storage may be unavailable or full; current in-memory preferences still apply.
   }
@@ -166,10 +168,10 @@ export class SessionsPagePreferencesState {
     saveSessionsPagePreferences(changes);
   }
 
-  updateListFilters(next: SessionsPageListFilters): void {
+  updateListFilters(next: SessionsPageListFilters, displayed: SessionsPageListFilters): void {
     const changes: Partial<SessionsPageListFilters> = {};
     for (const key of ["activeMinutes", "limit", "includeGlobal", "includeUnknown"] as const) {
-      if (next[key] !== this.value[key]) {
+      if (next[key] !== displayed[key]) {
         Object.assign(changes, { [key]: next[key] });
       }
     }
