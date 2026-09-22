@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
-import { writePersistedInstalledPluginIndexInstallRecords } from "../plugins/installed-plugin-index-records.js";
 import {
   RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
   RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON,
