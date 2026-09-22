@@ -22,8 +22,11 @@ import {
   gatewayHelloForMethods,
   SESSION_MUTATION_TEST_METHODS,
 } from "../../test-helpers/gateway-methods.ts";
-import { loadSessionsPagePreferences } from "./page-state.ts";
-import type { SessionsPagePreferences, SessionsPagePreferencesState } from "./page-state.ts";
+import {
+  loadSessionsPagePreferences,
+  type SessionsPagePreferences,
+  SessionsPagePreferencesState,
+} from "./page-state.ts";
 import { page as sessionsRoutePage, type SessionsRouteData } from "./route.ts";
 import {
   createContext,

@@ -6,7 +6,7 @@ import type { ApplicationContext } from "../../app/context.ts";
 import type { SessionListOptions } from "../../lib/sessions/index.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
-import { loadSessionsPagePreferences, SessionsPagePreferencesState } from "./page-state.ts";
+import { SessionsPagePreferencesState } from "./page-state.ts";
 import { page, type SessionsRouteData } from "./route.ts";
 
 async function loadSessionsRoute(options: {

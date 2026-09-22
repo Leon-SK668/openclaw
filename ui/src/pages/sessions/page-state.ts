@@ -1,6 +1,10 @@
 import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { SESSION_GROUP_MODES, type SessionsGroupBy } from "../../lib/sessions/grouping.ts";
+import {
+  normalizeSessionsGroupBy,
+  SESSION_GROUP_MODES,
+  type SessionsGroupBy,
+} from "../../lib/sessions/grouping.ts";
 import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
 import { getSafeLocalStorage } from "../../local-storage.ts";
 
@@ -79,7 +83,7 @@ function readStorageValue(storage: Storage, key: string): string | null {
 
 function storedLegacyGroupBy(storage: Storage): SessionsGroupBy | undefined {
   const raw = readStorageValue(storage, LEGACY_GROUP_BY_STORAGE_KEY);
-  return isPreferenceValue(raw, SESSION_GROUP_MODES) ? raw : undefined;
+  return isPreferenceValue(raw, SESSION_GROUP_MODES) ? normalizeSessionsGroupBy(raw) : undefined;
 }
 
 export function loadSessionsPagePreferences(): SessionsPagePreferences {
@@ -172,10 +176,13 @@ export class SessionsPagePreferencesState {
     saveSessionsPagePreferences(changes);
   }
 
-  updateListFilters(next: SessionsPageListFilters, displayed: SessionsPageListFilters): void {
+  updateListFilters(
+    next: SessionsPageListFilters,
+    wasEdited: (key: keyof SessionsPageListFilters) => boolean,
+  ): void {
     const changes: Partial<SessionsPageListFilters> = {};
     for (const key of ["activeMinutes", "limit", "includeGlobal", "includeUnknown"] as const) {
-      if (next[key] !== displayed[key]) {
+      if (wasEdited(key)) {
         Object.assign(changes, { [key]: next[key] });
       }
     }
