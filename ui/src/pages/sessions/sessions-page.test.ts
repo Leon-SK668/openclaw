@@ -149,6 +149,15 @@ describe("sessions page lifecycle", () => {
     expect(loadSessionsPagePreferences().groupBy).toBe("person");
   });
 
+  it("keeps a grouping change made while rolled back", () => {
+    const preferences = new SessionsPagePreferencesState();
+    preferences.update({ groupBy: "person" });
+
+    localStorage.setItem("openclaw:sessions:group-by", "agent");
+
+    expect(loadSessionsPagePreferences().groupBy).toBe("agent");
+  });
+
   it("keeps a failed preference write through a route update", async () => {
     const page = await createPreferencesPage();
     const storage = localStorage;

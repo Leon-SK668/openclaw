@@ -1,10 +1,6 @@
 import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import {
-  normalizeSessionsGroupBy,
-  SESSION_GROUP_MODES,
-  type SessionsGroupBy,
-} from "../../lib/sessions/grouping.ts";
+import { SESSION_GROUP_MODES, type SessionsGroupBy } from "../../lib/sessions/grouping.ts";
 import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
 import { getSafeLocalStorage } from "../../local-storage.ts";
 
@@ -81,9 +77,9 @@ function readStorageValue(storage: Storage, key: string): string | null {
   }
 }
 
-function storedGroupBy(storage: Storage): SessionsGroupBy {
+function storedLegacyGroupBy(storage: Storage): SessionsGroupBy | undefined {
   const raw = readStorageValue(storage, LEGACY_GROUP_BY_STORAGE_KEY);
-  return normalizeSessionsGroupBy(raw);
+  return isPreferenceValue(raw, SESSION_GROUP_MODES) ? raw : undefined;
 }
 
 export function loadSessionsPagePreferences(): SessionsPagePreferences {
@@ -91,15 +87,19 @@ export function loadSessionsPagePreferences(): SessionsPagePreferences {
   if (!storage) {
     return { ...DEFAULT_SESSIONS_PAGE_PREFERENCES };
   }
-  const legacyGroupBy = storedGroupBy(storage);
+  const legacyGroupBy = storedLegacyGroupBy(storage);
+  const fallbackPreferences = {
+    ...DEFAULT_SESSIONS_PAGE_PREFERENCES,
+    groupBy: legacyGroupBy ?? DEFAULT_SESSIONS_PAGE_PREFERENCES.groupBy,
+  };
   const raw = readStorageValue(storage, SESSIONS_PAGE_PREFERENCES_STORAGE_KEY);
   if (!raw) {
-    return { ...DEFAULT_SESSIONS_PAGE_PREFERENCES, groupBy: legacyGroupBy };
+    return fallbackPreferences;
   }
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed) || parsed.version !== 1) {
-      return { ...DEFAULT_SESSIONS_PAGE_PREFERENCES, groupBy: legacyGroupBy };
+      return fallbackPreferences;
     }
     return {
       activeMinutes: positiveIntegerString(parsed.activeMinutes, "", true),
@@ -125,15 +125,19 @@ export function loadSessionsPagePreferences(): SessionsPagePreferences {
       sortDir: isPreferenceValue(parsed.sortDir, SORT_DIRECTIONS)
         ? parsed.sortDir
         : DEFAULT_SESSIONS_PAGE_PREFERENCES.sortDir,
-      groupBy: isPreferenceValue(parsed.groupBy, SESSION_GROUP_MODES)
-        ? parsed.groupBy
-        : legacyGroupBy,
+      // The legacy key stays authoritative while both releases can write it.
+      // A differing value means the user changed grouping after rolling back.
+      groupBy:
+        legacyGroupBy ??
+        (isPreferenceValue(parsed.groupBy, SESSION_GROUP_MODES)
+          ? parsed.groupBy
+          : fallbackPreferences.groupBy),
       pageSize: isPreferenceValue(parsed.pageSize, PAGE_SIZES)
         ? parsed.pageSize
         : DEFAULT_SESSIONS_PAGE_PREFERENCES.pageSize,
     };
   } catch {
-    return { ...DEFAULT_SESSIONS_PAGE_PREFERENCES, groupBy: legacyGroupBy };
+    return fallbackPreferences;
   }
 }
 
@@ -144,13 +148,13 @@ function saveSessionsPagePreferences(changes: Partial<SessionsPagePreferences>):
       return;
     }
     const preferences = { ...loadSessionsPagePreferences(), ...changes };
+    // Keep the previous release's grouping key current during the transition so
+    // rollback edits remain authoritative when this release is restored.
+    storage.setItem(LEGACY_GROUP_BY_STORAGE_KEY, preferences.groupBy);
     storage.setItem(
       SESSIONS_PAGE_PREFERENCES_STORAGE_KEY,
       JSON.stringify({ version: 1, ...preferences }),
     );
-    // Keep the previous release's grouping key current during the transition so
-    // rolling back does not silently discard a grouping change made here.
-    storage.setItem(LEGACY_GROUP_BY_STORAGE_KEY, preferences.groupBy);
   } catch {
     // Storage may be unavailable or full; current in-memory preferences still apply.
   }
