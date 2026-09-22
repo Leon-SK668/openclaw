@@ -5,13 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApplicationContext } from "../../app/context.ts";
 import type { SessionListOptions } from "../../lib/sessions/index.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
+import { buildSessionsListQuery } from "./list-query.ts";
 import { loadSessionsPagePreferences, saveSessionsPagePreferences } from "./page-state.ts";
-import { page, sessionsPageListQuery, type SessionsRouteData } from "./route.ts";
+import { page, type SessionsRouteData } from "./route.ts";
 
 async function loadSessionsRoute(options: {
   search: string;
   scopeId: string | null;
-  expectedData: SessionsRouteData;
+  expectedQuery: SessionListOptions;
 }) {
   const list = vi.fn();
   const listSnapshot = vi.fn();
@@ -36,7 +37,19 @@ async function loadSessionsRoute(options: {
   expect(refreshList).not.toHaveBeenCalled();
   expect(listSnapshot).not.toHaveBeenCalled();
   expect(list).not.toHaveBeenCalled();
-  expect(data).toEqual(options.expectedData);
+  expect(data).toEqual({
+    expandedSessionKey: options.expectedQuery.search ?? null,
+    statusFilter: options.expectedQuery.archivedFilter,
+  });
+  expect(
+    buildSessionsListQuery(context, {
+      statusFilter: data.statusFilter,
+      deepLinkSessionKey: data.expandedSessionKey,
+      includeGlobal: true,
+      includeUnknown: false,
+      limit: 50,
+    }),
+  ).toEqual(options.expectedQuery);
 }
 
 describe("sessions route", () => {
@@ -48,6 +61,67 @@ describe("sessions route", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    {
+      name: "default selected-agent roster",
+      search: "",
+      scopeId: "writer",
+      expectedQuery: {
+        limit: 50,
+        includeGlobal: true,
+        includeUnknown: false,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "active" as const,
+        agentId: "writer",
+      },
+    },
+    {
+      name: "archived all-agent roster",
+      search: "?status=archived",
+      scopeId: null,
+      expectedQuery: {
+        limit: 50,
+        includeGlobal: true,
+        includeUnknown: false,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "archived" as const,
+      },
+    },
+    {
+      name: "all-status selected-agent roster",
+      search: "?status=all",
+      scopeId: "main",
+      expectedQuery: {
+        limit: 50,
+        includeGlobal: true,
+        includeUnknown: false,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "all" as const,
+        agentId: "main",
+      },
+    },
+    {
+      name: "deep link owned by a different agent",
+      search: "?session=agent%3Aresearch%3Alinked",
+      scopeId: "main",
+      expectedQuery: {
+        limit: 50,
+        search: "agent:research:linked",
+        includeGlobal: true,
+        includeUnknown: true,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "active" as const,
+        agentId: "research",
+      },
+    },
+  ])("prepares the $name without issuing outside the page owner", async (testCase) => {
+    await loadSessionsRoute(testCase);
+  });
+
   it("uses the persisted status for the initial roster", async () => {
     saveSessionsPagePreferences({
       ...loadSessionsPagePreferences(),
@@ -57,7 +131,15 @@ describe("sessions route", () => {
     await loadSessionsRoute({
       search: "",
       scopeId: "writer",
-      expectedData: { expandedSessionKey: null, statusFilter: "archived" },
+      expectedQuery: {
+        limit: 50,
+        includeGlobal: true,
+        includeUnknown: false,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "archived",
+        agentId: "writer",
+      },
     });
   });
 
@@ -70,7 +152,14 @@ describe("sessions route", () => {
     await loadSessionsRoute({
       search: "?status=all",
       scopeId: null,
-      expectedData: { expandedSessionKey: null, statusFilter: "all" },
+      expectedQuery: {
+        limit: 50,
+        includeGlobal: true,
+        includeUnknown: false,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "all",
+      },
     });
   });
 
@@ -83,35 +172,16 @@ describe("sessions route", () => {
     await loadSessionsRoute({
       search: "?session=agent%3Aresearch%3Alinked",
       scopeId: "main",
-      expectedData: {
-        expandedSessionKey: "agent:research:linked",
-        statusFilter: "active",
+      expectedQuery: {
+        limit: 50,
+        search: "agent:research:linked",
+        includeGlobal: true,
+        includeUnknown: true,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        archivedFilter: "active",
+        agentId: "research",
       },
     });
-  });
-
-  it("keeps direct-session list queries independent from roster filters", () => {
-    const context = {
-      agentSelection: { state: { scopeId: "main" } },
-    } as unknown as ApplicationContext;
-    const query = sessionsPageListQuery(context, {
-      activeMinutes: 15,
-      limit: 10,
-      includeGlobal: false,
-      includeUnknown: false,
-      statusFilter: "archived",
-      deepLinkSessionKey: "agent:research:linked",
-    });
-
-    expect(query).toEqual({
-      limit: 50,
-      search: "agent:research:linked",
-      includeGlobal: true,
-      includeUnknown: true,
-      includeDerivedTitles: false,
-      includeLastMessage: false,
-      archivedFilter: "archived",
-      agentId: "research",
-    } satisfies SessionListOptions);
   });
 });

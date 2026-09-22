@@ -355,6 +355,8 @@ export function attachGatewayUpgradeHandler(opts: {
             allowRealIpFallback,
             rateLimiter,
             cfg: configSnapshot,
+            getRuntimeConfig,
+            getResolvedAuth,
           });
           if (!authCheck.ok) {
             rejectUpgradeAuth(socket, authCheck.authResult);
@@ -368,6 +370,10 @@ export function attachGatewayUpgradeHandler(opts: {
             req,
             authCheck.requestAuth,
           );
+        }
+        if (pluginGatewayRequestAuth?.hasCurrentClientAuthority?.() === false) {
+          rejectUpgradeAuth(socket, { ok: false, reason: "unauthorized" });
+          return;
         }
         if (
           await handlePluginUpgrade(req, socket, head, pathContext, {
@@ -441,7 +447,7 @@ export function attachGatewayUpgradeHandler(opts: {
       const remoteAddress = (socket as { remoteAddress?: string }).remoteAddress ?? "unknown";
       const errorMessage = err instanceof Error ? err.message : String(err);
       log?.warn(`ws upgrade error from ${remoteAddress}: ${errorMessage}`);
-      socket.destroy();
+      rejectWebSocketUpgrade(socket, { status: 503 });
     });
   });
 }
