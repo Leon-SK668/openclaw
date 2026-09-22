@@ -180,7 +180,7 @@ function renderActiveRuns({ sessions, totalCount, hasMore }: SessionsListResult)
   }
   return html`
     <div class="debug-overlay__count">
-      ${t("debug.overlay.activeRunsCount", { count: String(totalCount ?? sessions.length) })}
+      ${t("debug.overlay.activeRunsCount", { count: String(rows.length) })}
     </div>
     ${hasMore ? html`<div class="debug-overlay__count">${t("activityFeed.showing", { shown: String(sessions.length), total: String(totalCount ?? sessions.length) })}</div>` : nothing}
     ${
