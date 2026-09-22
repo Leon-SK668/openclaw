@@ -169,6 +169,7 @@ type ActiveRunRow = {
 
 function renderActiveRuns({ sessions, totalCount, hasMore }: SessionsListResult): TemplateResult {
   const rows: ActiveRunRow[] = [];
+  // SAFETY: the Gateway may expose activeRunIds before the generated session type is updated.
   for (const session of sessions as ActiveSession[]) {
     const sessionId = session.sessionId ?? session.key ?? t("common.unknown");
     if (session.activeRunIds?.length) {
