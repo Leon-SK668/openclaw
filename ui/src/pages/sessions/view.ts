@@ -4,7 +4,6 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { html, nothing } from "lit";
-import { live } from "lit/directives/live.js";
 import type {
   AgentIdentityResult,
   GatewaySessionRow,
@@ -45,7 +44,6 @@ import { resolveSessionContextLimit } from "../../lib/sessions/context-budget.ts
 import { SESSION_DRAG_MIME } from "../../lib/sessions/drag.ts";
 import {
   groupSessionRows,
-  SESSION_GROUP_MODES,
   type SessionRowGroup,
   type SessionsGroupBy,
   UNGROUPED_ID,
@@ -58,6 +56,7 @@ import {
 import { formatSessionArchiveReason } from "../../lib/sessions/session-archive-reason.ts";
 import { parseAgentSessionKey, parseSessionKeyParts } from "../../lib/sessions/session-key.ts";
 import { SESSIONS_PAGE_DEFAULT_LIMIT } from "../../lib/sessions/session-requests.ts";
+import { renderSessionsGroupBySelect } from "./group-by-select.ts";
 import { renderTranscriptSearch, type TranscriptSearchProps } from "./transcript-search-view.ts";
 
 export type SessionsProps = TranscriptSearchProps & {
@@ -460,20 +459,6 @@ function sessionsTableColumnCount(props: SessionsProps): number {
   return props.groupBy === "category" ? 8 : 7;
 }
 
-const SESSION_GROUP_MODE_LABELS = {
-  none: "sessionsView.groupByNone",
-  category: "sessionsView.groupByCategory",
-  person: "sessionsView.groupByPerson",
-  channel: "sessionsView.groupByChannel",
-  kind: "sessionsView.groupByKind",
-  agent: "sessionsView.groupByAgent",
-  date: "sessionsView.groupByDate",
-} as const satisfies Record<SessionsGroupBy, string>;
-
-function groupModeLabel(mode: SessionsGroupBy): string {
-  return t(SESSION_GROUP_MODE_LABELS[mode] ?? SESSION_GROUP_MODE_LABELS.none);
-}
-
 function sessionGroupLabel(group: SessionRowGroup, props: SessionsProps): string {
   const { id } = group;
   if (props.groupBy === "date") {
@@ -854,9 +839,6 @@ function renderSessionsAdvancedFilters(props: SessionsProps) {
     !includeGlobal ||
     includeUnknown ||
     props.groupBy !== "none";
-  // Popover reattachment can reset the native select without changing props;
-  // live() restores the component-owned grouping instead of keeping that drift.
-  const liveGroupBy = live(props.groupBy);
   return html`
     <button
       id="sessions-filter-popover-trigger"
@@ -912,25 +894,11 @@ function renderSessionsAdvancedFilters(props: SessionsProps) {
             }),
           )}
         </div>
-        <label class="session-groupby">
-          <span class="session-groupby__label">${t("sessionsView.groupBy")}</span>
-          <select
-            class="session-groupby__select"
-            .value=${liveGroupBy}
-            @change=${(event: Event) =>
-              props.onGroupByChange((event.target as HTMLSelectElement).value as SessionsGroupBy)}
-          >
-            ${SESSION_GROUP_MODES.filter(
-              (mode) => mode !== "person" || props.personGroupingAvailable,
-            ).map(
-              (mode) => html`
-                <option value=${mode} ?selected=${props.groupBy === mode}>
-                  ${groupModeLabel(mode)}
-                </option>
-              `,
-            )}
-          </select>
-        </label>
+        ${renderSessionsGroupBySelect({
+          groupBy: props.groupBy,
+          personGroupingAvailable: props.personGroupingAvailable,
+          onGroupByChange: props.onGroupByChange,
+        })}
         ${
           props.groupBy === "category"
             ? html`

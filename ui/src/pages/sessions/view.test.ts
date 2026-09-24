@@ -526,25 +526,6 @@ describe("sessions view", () => {
     expect(modes).toContain("category");
   });
 
-  it("restores the live group selector value after the popover DOM resets", async () => {
-    const container = document.createElement("div");
-    const props = {
-      ...buildProps(buildMultiResult([])),
-      groupBy: "agent" as const,
-    };
-    render(renderSessions(props), container);
-    await Promise.resolve();
-
-    const select = container.querySelector<HTMLSelectElement>(".session-groupby__select");
-    expect(select?.value).toBe("agent");
-    select!.value = "none";
-
-    render(renderSessions(props), container);
-    await Promise.resolve();
-
-    expect(select?.value).toBe("agent");
-  });
-
   it("selects and names the current page size on first render", async () => {
     const container = document.createElement("div");
     render(
