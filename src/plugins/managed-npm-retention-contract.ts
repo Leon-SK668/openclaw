@@ -5,6 +5,10 @@ export const RETAINED_MANAGED_NPM_KEEP_FILES_REASON = "removed-managed-npm-insta
 export const RETAINED_MANAGED_NPM_DOCTOR_REPAIR_REASON =
   "doctor-repaired-stale-managed-npm-generation";
 
+/** Marker reason for packages awaiting Doctor's required-dependency repair. */
+export const RETAINED_MANAGED_NPM_DOCTOR_MISSING_DEPENDENCIES_REASON =
+  "doctor-missing-required-dependencies";
+
 /** Marker reason for a generation superseded by a managed npm update. */
 export const RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON =
   "replaced-by-managed-npm-generation-update";
@@ -18,6 +22,7 @@ export const RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON =
 
 const RETAINED_MANAGED_NPM_CLEANUP_ELIGIBLE_REASONS = new Set<string>([
   RETAINED_MANAGED_NPM_DOCTOR_REPAIR_REASON,
+  RETAINED_MANAGED_NPM_DOCTOR_MISSING_DEPENDENCIES_REASON,
   RETAINED_MANAGED_NPM_GENERATION_UPDATE_REASON,
   RETAINED_MANAGED_NPM_PLUGIN_SOURCE_CHANGE_REASON,
   RETAINED_MANAGED_NPM_INFERENCE_ACTIVATION_REASON,
