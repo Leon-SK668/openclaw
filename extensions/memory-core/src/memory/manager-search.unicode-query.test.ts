@@ -165,6 +165,12 @@ describe("memory keyword query Unicode forms", () => {
     });
   });
 
+  it("recalls a Unicode compatibility alias with unicode61", async () => {
+    await withSearch("unicode61", [{ id: "cjk", text: "豈 weather" }], async (search) => {
+      expect((await search("豈")).map((hit) => hit.id)).toEqual(["cjk"]);
+    });
+  });
+
   it.for(tokenizers)(
     "does not broaden canonical Latin terms to separator variants with %s",
     async (tokenizer, context) => {
@@ -271,6 +277,7 @@ describe("memory keyword query Unicode forms", () => {
   it.for([
     { tokenizer: "unicode61" as const, word: "München" },
     { tokenizer: "unicode61" as const, word: "café東京" },
+    { tokenizer: "unicode61" as const, word: "caféǽ" },
     { tokenizer: "trigram" as const, word: "München" },
   ])(
     "does not double-count canonical $tokenizer $word phrases",

@@ -20,7 +20,18 @@ export function buildFtsQuery(
 
 // unicode61 remove_diacritics=1 folds a single mark when its base case-folds to
 // ASCII Latin, plus one-code-point canonical aliases. Preserve all other forms.
+function hasCompatibilityAlias(term: string): boolean {
+  return Array.from(term).some(
+    (character) =>
+      character !== character.normalize("NFC") &&
+      character.normalize("NFC") === character.normalize("NFD"),
+  );
+}
+
 function unicode61FoldsCanonicalForms(term: string): boolean {
+  if (hasCompatibilityAlias(term)) {
+    return false;
+  }
   return Array.from(term.normalize("NFC")).every((character) => {
     const decomposed = Array.from(character.normalize("NFD"));
     const base = decomposed[0];
@@ -37,11 +48,49 @@ function unicode61FoldsCanonicalForms(term: string): boolean {
   });
 }
 
+function unicode61TokenizerKey(term: string): string {
+  if (hasCompatibilityAlias(term)) {
+    return `compat:${term}`;
+  }
+  let key = "";
+  let followsAsciiBase = false;
+  for (const character of term) {
+    const decomposed = Array.from(character.normalize("NFD"));
+    const base = decomposed[0];
+    const foldedBase = base?.toUpperCase().toLowerCase();
+    if (
+      decomposed.length === 2 &&
+      /\p{M}/u.test(decomposed[1] ?? "") &&
+      foldedBase &&
+      /^[a-z]$/u.test(foldedBase)
+    ) {
+      key += foldedBase;
+      followsAsciiBase = true;
+      continue;
+    }
+    if (/\p{M}/u.test(character) && followsAsciiBase) {
+      continue;
+    }
+    const folded = character.toUpperCase().toLowerCase();
+    key += folded;
+    followsAsciiBase = /^[a-z]$/u.test(folded);
+  }
+  return key;
+}
+
 function canonicalTermForms(term: string, tokenizer?: FtsCanonicalTokenizer): string[] {
   if (!tokenizer) {
     return [term];
   }
-  return [...new Set([term, term.normalize("NFC"), term.normalize("NFD")])];
+  const seen = new Set<string>();
+  return [term, term.normalize("NFC"), term.normalize("NFD")].filter((form) => {
+    const key = tokenizer === "unicode61" ? unicode61TokenizerKey(form) : form;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 export function buildMatchQueryFromTerms(
