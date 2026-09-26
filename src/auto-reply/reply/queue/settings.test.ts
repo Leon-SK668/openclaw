@@ -33,6 +33,15 @@ describe("resolveQueueSettingsCore", () => {
     });
   });
 
+  it("resolves plugin channel queue overrides", () => {
+    expect(
+      resolveQueueSettings({
+        cfg: { messages: { queue: { byChannel: { buzz: "collect" } } } } as OpenClawConfig,
+        channel: "buzz",
+      }).mode,
+    ).toBe("collect");
+  });
+
   it("maps retired persisted session queue modes to compatible modes", () => {
     expect(
       resolveQueueSettingsCore({
