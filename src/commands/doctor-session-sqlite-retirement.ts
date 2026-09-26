@@ -52,7 +52,7 @@ function assertRecoveryOriginal(
       artifact.disposal.state === "pending-disposal" &&
       artifact.disposal.phase === "unlink-pending"
     ) {
-      return;
+      return undefined;
     }
     throw new Error("artifact is unexpectedly missing");
   }
