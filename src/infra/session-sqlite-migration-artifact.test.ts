@@ -14,9 +14,9 @@ const identity: MigrationArtifactIdentity = {
 
 describe("sameMigrationArtifact", () => {
   it("can verify retained artifacts across a device-number change", () => {
-    expect(
-      sameMigrationArtifact({ ...identity, dev: "9" }, identity, { ignoreDevice: true }),
-    ).toBe(true);
+    expect(sameMigrationArtifact({ ...identity, dev: "9" }, identity, { ignoreDevice: true })).toBe(
+      true,
+    );
   });
 
   it("keeps device identity strict by default", () => {
