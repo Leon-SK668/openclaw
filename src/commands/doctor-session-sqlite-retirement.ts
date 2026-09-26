@@ -54,7 +54,11 @@ function assertRecoveryOriginal(archivePath: string, artifact: MigrationArtifact
   }
   const links = isPendingMigrationArtifactClaim(archivePath, artifact) ? 2n : 1n;
   if (
-    !sameMigrationArtifact(readMigrationArtifactIdentity(currentPath, links), artifact.identity)
+    !sameMigrationArtifact(readMigrationArtifactIdentity(currentPath, links), artifact.identity, {
+      // APFS can assign a different st_dev after reboot while the retained inode and bytes stay
+      // unchanged; the receipt still identifies the same protected recovery artifact.
+      ignoreDevice: true,
+    })
   ) {
     throw new Error("artifact identity or contents changed");
   }
