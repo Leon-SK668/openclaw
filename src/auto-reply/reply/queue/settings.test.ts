@@ -1,7 +1,7 @@
 // Tests queue setting normalization and directive parsing.
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
-import { resolveQueueSettingsCore } from "./settings.js";
+import { resolveQueueSettings, resolveQueueSettingsCore } from "./settings.js";
 
 describe("resolveQueueSettingsCore", () => {
   it.each([
