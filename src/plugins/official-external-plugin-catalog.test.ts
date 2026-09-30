@@ -334,6 +334,12 @@ describe("official external plugin catalog", () => {
 
   it.each([
     { pluginId: "google-meet", packageName: "@openclaw/google-meet", external: true },
+    {
+      pluginId: "google-meet",
+      packageName: "@openclaw/google-meet",
+      packageBuild: { bundledDist: true },
+      external: false,
+    },
     { pluginId: "google-meet", packageName: "@example/google-meet", external: false },
     { pluginId: "other-plugin", packageName: "@openclaw/google-meet", external: false },
     {
@@ -2254,26 +2260,6 @@ describe("official external plugin catalog", () => {
     expect(envVarsByChannel.get("clickclack")).toEqual(["CLICKCLACK_BOT_TOKEN"]);
     expect(envVarsByChannel.get("mattermost")).toEqual(["MATTERMOST_BOT_TOKEN", "MATTERMOST_URL"]);
   });
-
-  it.each([
-    ["teams-meetings", "@openclaw/teams-meetings", "teams_meetings", "teams"],
-    ["zoom-meetings", "@openclaw/zoom-meetings", "zoom_meetings", "zoom"],
-  ] as const)(
-    "lists %s as an official external meeting plugin",
-    (id, npmSpec, toolId, transcriptSourceProviderId) => {
-      const entry = expectCatalogEntry(id);
-      const contracts = getOfficialExternalPluginCatalogManifest(entry)?.contracts;
-
-      expect(resolveOfficialExternalPluginInstall(entry)).toEqual({
-        clawhubSpec: `clawhub:${npmSpec}`,
-        npmSpec,
-        defaultChoice: "npm",
-        minHostVersion: ">=2026.7.2",
-      });
-      expect(contracts?.tools).toEqual([toolId]);
-      expect(contracts?.transcriptSourceProviders).toEqual([transcriptSourceProviderId]);
-    },
-  );
 
   it("lists LongCat as an official external provider", () => {
     const longcat = expectCatalogEntry("longcat");

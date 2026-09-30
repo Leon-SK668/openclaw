@@ -16,6 +16,7 @@ import {
 import {
   CHAT_SNAPSHOT_METADATA_STORE_NAME,
   CHAT_SNAPSHOT_STORE_NAME,
+  debugSnapshotStore,
   openSessionSnapshotDatabase,
   readStoredChatSnapshotRecord,
   resetSessionSnapshotDatabase,
@@ -61,6 +62,7 @@ const snapshotSchema = z
 
 const recordSchema = z
   .object({
+    cursorMatchesSnapshot: z.literal(true).optional(),
     savedAt: z.number().finite().nonnegative(),
     sessionId: z.string().nullable(),
     sessionKey: z.string().min(1),
@@ -85,14 +87,6 @@ type PendingSessionState = {
 
 const activeStores = new Set<SessionSnapshotStore>();
 
-function debugSnapshotStore(message: string, error?: unknown): void {
-  if (error === undefined) {
-    console.debug(`[chat-snapshot-cache] ${message}`);
-  } else {
-    console.debug(`[chat-snapshot-cache] ${message}`, error);
-  }
-}
-
 function sanitizeSnapshot(snapshot: ChatSessionSnapshot): unknown {
   try {
     const json = JSON.stringify(snapshot);
@@ -116,6 +110,7 @@ function createSnapshotRecord(
   const snapshot = sanitizeSnapshot(pending.snapshot);
   return snapshot
     ? parseSnapshotRecord({
+        cursorMatchesSnapshot: true,
         savedAt: pending.savedAt,
         sessionId: pending.snapshot.sessionId,
         sessionKey,
@@ -156,19 +151,15 @@ async function readSnapshotMetadata(): Promise<SessionSnapshotMetadata[] | null>
 }
 
 function measureStoredRecordWeight(record: SessionSnapshotRecord): number {
-  const snapshotWeight = measureChatSnapshotWeight(record.snapshot) ?? 0;
-  try {
-    return (
-      snapshotWeight +
-      JSON.stringify({
-        savedAt: record.savedAt,
-        sessionId: record.sessionId,
-        sessionKey: record.sessionKey,
-      }).length
-    );
-  } catch {
-    return snapshotWeight;
-  }
+  return (
+    (measureChatSnapshotWeight(record.snapshot) ?? 0) +
+    JSON.stringify({
+      cursorMatchesSnapshot: record.cursorMatchesSnapshot,
+      savedAt: record.savedAt,
+      sessionId: record.sessionId,
+      sessionKey: record.sessionKey,
+    }).length
+  );
 }
 
 async function writeSnapshotRecords(
@@ -290,6 +281,10 @@ export class SessionSnapshotStore implements ChatCacheObserver {
       await resetSessionSnapshotDatabase();
       return null;
     }
+    // Older split panes could save a sibling's newer cursor with an incomplete transcript.
+    if (!record.cursorMatchesSnapshot) {
+      delete record.snapshot.deltaCursor;
+    }
     setSessionCacheValue(this.hydratedSnapshots, sessionKey, new WeakRef(record.snapshot));
     return record.snapshot;
   }
@@ -334,10 +329,7 @@ export class SessionSnapshotStore implements ChatCacheObserver {
   }
 
   async flush(): Promise<void> {
-    if (this.writeTimer !== null) {
-      globalThis.clearTimeout(this.writeTimer);
-      this.writeTimer = null;
-    }
+    this.clearWriteTimer();
     const pending = [...this.pending.entries()];
     const pendingRevisions = new Map(
       pending.map(([sessionKey]) => [sessionKey, this.revisions.get(sessionKey) ?? 0]),
@@ -373,10 +365,7 @@ export class SessionSnapshotStore implements ChatCacheObserver {
   }
 
   clearMemory(): void {
-    if (this.writeTimer !== null) {
-      globalThis.clearTimeout(this.writeTimer);
-      this.writeTimer = null;
-    }
+    this.clearWriteTimer();
     this.pending.clear();
     this.hydratedSnapshots.clear();
     this.revisions.clear();
@@ -395,13 +384,18 @@ export class SessionSnapshotStore implements ChatCacheObserver {
     };
     this.pending.set(sessionKey, pending);
     this.savedAtBySession.set(sessionKey, pending.savedAt);
-    if (this.writeTimer !== null) {
-      globalThis.clearTimeout(this.writeTimer);
-    }
+    this.clearWriteTimer();
     this.writeTimer = globalThis.setTimeout(() => {
       this.writeTimer = null;
       void this.flush();
     }, CHAT_SNAPSHOT_WRITE_DELAY_MS);
+  }
+
+  private clearWriteTimer(): void {
+    if (this.writeTimer !== null) {
+      globalThis.clearTimeout(this.writeTimer);
+      this.writeTimer = null;
+    }
   }
 
   private async seedSavedAtIndex(): Promise<void> {
