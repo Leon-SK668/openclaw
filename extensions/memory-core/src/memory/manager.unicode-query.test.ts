@@ -55,7 +55,7 @@ describe("memory manager Unicode query round trip", () => {
             cache: { enabled: false },
           },
         },
-        agents: { defaults: { workspace }, list: [{ id: "main", default: true }] },
+        agents: { defaults: { workspace }, entries: { main: {} } },
       } satisfies OpenClawConfig;
       const result = await getMemorySearchManager({ cfg, agentId: "main" });
       const manager = result.manager;
