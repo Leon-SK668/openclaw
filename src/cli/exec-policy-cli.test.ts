@@ -778,7 +778,7 @@ describe("exec-policy CLI", () => {
     mocks.readConfigFileSnapshot.mockRejectedValueOnce(cause);
 
     const error = await runExecPolicyCommand(["exec-policy", "show", "--json"]).catch(
-      (error: unknown) => error,
+      (caughtError: unknown) => caughtError,
     );
 
     expect(error).toBeInstanceOf(Error);
