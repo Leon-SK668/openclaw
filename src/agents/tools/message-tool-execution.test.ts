@@ -5,10 +5,12 @@ import {
   GatewayErrorDetailCodes,
 } from "../../../packages/gateway-protocol/src/gateway-error-details.js";
 import { withGroupThreadTurn } from "../../auto-reply/group-thread-context.js";
+import { createReplyOperation } from "../../auto-reply/reply/reply-run-registry.js";
 import { resolveReactionMessageId } from "../../channels/plugins/actions/reaction-message-id.js";
 import type {
-  ChannelPlugin,
   ChannelMessageActionContext,
+  ChannelMessageActionName,
+  ChannelPlugin,
 } from "../../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
@@ -54,6 +56,217 @@ const EMPTY_CATALOG = {
   getChannel: () => undefined,
 } as const;
 
+const secretDeps = {
+  getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
+  resolveCommandSecretRefsViaGateway: async ({ config }) => ({
+    resolvedConfig: config,
+    diagnostics: [],
+    targetStatesByPath: {},
+    hadUnresolvedTargets: false,
+  }),
+} satisfies Pick<
+  NonNullable<Parameters<typeof createMessageTool>[0]>,
+  "getScopedChannelsCommandSecretTargets" | "resolveCommandSecretRefsViaGateway"
+>;
+
+describe("registered message action source completion", () => {
+  afterEach(() => resetPluginRuntimeStateForTest());
+
+  const cases: Array<{
+    action: ChannelMessageActionName;
+    mode: string;
+    target?: string;
+    delivery?: Record<string, unknown>;
+    media?: boolean;
+    expected?: true;
+  }> = [
+    ...(
+      [
+        "send",
+        "poll",
+        "reply",
+        "thread-reply",
+        "upload-file",
+        "sendAttachment",
+        "sendWithEffect",
+      ] as const
+    ).map((action) => ({ action, mode: "implicit target", expected: true as const })),
+    { action: "send", mode: "explicit target", target: "channel:C123", expected: true },
+    {
+      action: "upload-file",
+      mode: "different delivered recipient",
+      target: "C123",
+      delivery: { toJid: "C999" },
+    },
+    { action: "send", mode: "media", media: true, expected: true },
+    { action: "send", mode: "redirected media", media: true, delivery: { channelId: "C999" } },
+    { action: "upload-file", mode: "other destination", target: "C999" },
+    {
+      action: "upload-file",
+      mode: "other request returning source",
+      target: "C999",
+      delivery: { toJid: "C123" },
+    },
+    ...["chatId", "channelId", "roomId", "conversationId"].map((field) => ({
+      action: "upload-file" as const,
+      mode: `reported ${field}`,
+      delivery: { [field]: "C999" },
+    })),
+    {
+      action: "upload-file",
+      mode: "canonical target",
+      delivery: { target: { kind: "chat", id: "C999" } },
+    },
+    {
+      action: "upload-file",
+      mode: "normalized recipient",
+      delivery: { toJid: "channel:C123" },
+      expected: true,
+    },
+    {
+      action: "sendWithEffect",
+      mode: "legacy result without recipient",
+      delivery: {},
+      expected: true,
+    },
+    {
+      action: "upload-file",
+      mode: "nested result",
+      delivery: { result: { messageId: "native-message-1", roomId: "C999" } },
+    },
+    {
+      action: "upload-file",
+      mode: "mixed receipt parts",
+      delivery: {
+        receipt: {
+          parts: [
+            { platformMessageId: "native-message-1", raw: { channelId: "C123" } },
+            { platformMessageId: "native-message-2", raw: { channelId: "C999" } },
+          ],
+        },
+      },
+    },
+    ...["failure", "partial", "dry run", "progress", "throw"].map((mode) => ({
+      action: "upload-file" as const,
+      mode,
+      target: "C123",
+    })),
+    { action: "react", mode: "non-reply mutation", target: "C123" },
+  ];
+
+  it.each(cases)(
+    "records only eligible source completion for $action ($mode)",
+    async ({ action, mode, target, delivery, media, expected }) => {
+      const handleAction = vi.fn(async ({ params }: ChannelMessageActionContext) => {
+        if (mode === "throw") {
+          throw new Error("synthetic upload failure");
+        }
+        return jsonResult({
+          ok: mode !== "failure",
+          messageId: "native-message-1",
+          ...(delivery ?? { toJid: params.to }),
+          ...(action === "thread-reply" ? { receipt: { replyToId: "inbound-message" } } : {}),
+          ...(mode === "partial" ? { sentBeforeError: true } : {}),
+        });
+      });
+      setActivePluginRegistry(
+        createTestRegistry([
+          {
+            pluginId: "workspace",
+            source: "test",
+            plugin: {
+              ...workspaceTestPlugin,
+              actions: {
+                describeMessageTool: () => ({ actions: [action] }),
+                handleAction,
+              },
+            } satisfies ChannelPlugin,
+          },
+        ]),
+      );
+      const identity = {
+        agentId: "main",
+        runId: "source-completion-run",
+        sessionKey: "agent:main:workspace:group:C123",
+      };
+      const source = {
+        currentChannelProvider: "workspace",
+        currentChannelId: "C123",
+        currentMessagingTarget: "C123",
+        currentMessageId: "inbound-message",
+      };
+      const capability = mintMessageActionTurnCapability({
+        ...identity,
+        requesterAccountId: "default",
+        toolContext: source,
+      });
+      // The turn's reply operation keeps this fact so a later stall cannot answer again.
+      const operation = createReplyOperation({
+        sessionKey: identity.sessionKey,
+        sessionId: "source-completion-session",
+        resetTriggered: false,
+      });
+      try {
+        const tool = createMessageTool({
+          config: {
+            ...workspaceConfig,
+            tools: { message: { crossContext: { allowWithinProvider: true } } },
+          },
+          ...source,
+          agentId: identity.agentId,
+          runId: identity.runId,
+          sessionId: operation.sessionId,
+          agentSessionKey: identity.sessionKey,
+          agentAccountId: "default",
+          messageActionTurnCapability: capability,
+          sourceReplyDeliveryMode: "automatic",
+          ...secretDeps,
+        });
+        const execution = tool.execute("source-upload", {
+          action,
+          message: "Uploaded source reply",
+          ...(media ? { media: "https://example.invalid/source.png" } : {}),
+          ...(action === "reply" ? { messageId: "inbound-message" } : {}),
+          ...(action === "poll" ? { pollQuestion: "Ready?", pollOption: ["Yes", "No"] } : {}),
+          ...(target ? { target } : {}),
+          ...(mode === "progress" ? { final: false } : {}),
+          ...(mode === "dry run" ? { dryRun: true } : {}),
+        });
+        let result;
+        if (mode === "throw") {
+          await expect(execution).rejects.toThrow("synthetic upload failure");
+        } else {
+          result = await execution;
+        }
+        expect(handleAction).toHaveBeenCalledTimes(mode === "dry run" ? 0 : 1);
+        if (mode !== "dry run") {
+          expect(handleAction.mock.calls[0]?.[0]).toMatchObject({
+            accountId: "default",
+            params: { to: target === "C999" ? "C999" : "C123" },
+          });
+        }
+        if (result) {
+          const deliveryFact = readEmbeddedMessageDeliveryFact(
+            (result.details as { messageDelivery?: unknown }).messageDelivery,
+          );
+          expect(deliveryFact?.sourceReplyDelivered).toBe(expected);
+          expect(operation.sourceReplyDelivered).toBe(expected === true);
+          if (expected) {
+            expect(deliveryFact).toMatchObject({
+              status: "settled",
+              primaryPlatformMessageId: "native-message-1",
+              partialDelivery: false,
+            });
+          }
+        }
+      } finally {
+        operation.complete();
+        revokeMessageActionTurnCapability(capability);
+      }
+    },
+  );
+});
+
 function createFailingMessageTool(error: Error) {
   const runMessageAction = vi.fn(async () => {
     throw error;
@@ -67,13 +280,7 @@ function createFailingMessageTool(error: Error) {
     currentChannelProvider: "telegram",
     currentChannelId: "chat-123",
     currentMessagingTarget: "chat-123",
-    getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
-    resolveCommandSecretRefsViaGateway: async ({ config }) => ({
-      resolvedConfig: config,
-      diagnostics: [],
-      targetStatesByPath: {},
-      hadUnresolvedTargets: false,
-    }),
+    ...secretDeps,
     runMessageAction,
   });
   return { tool, runMessageAction };
@@ -87,18 +294,19 @@ function sentIdempotencyKey(runMessageAction: ReturnType<typeof vi.fn>, call: nu
 }
 
 describe("message tool queued gateway delivery", () => {
-  it("returns a do-not-resend result when the gateway owns the retry", async () => {
-    const { tool, runMessageAction } = createFailingMessageTool(
-      new GatewayClientRequestError({
-        code: ErrorCodes.UNAVAILABLE,
-        message: "connect ECONNREFUSED",
-        details: { code: GatewayErrorDetailCodes.OUTBOUND_DELIVERY_QUEUED },
-      }),
-    );
-
-    const result = await tool.execute("queued-send", { action: "send", message: "hello" });
-
-    expect(result).toMatchObject({
+  it.each([true, false])("preserves retry ownership for queued=%s", async (queued) => {
+    const error = new GatewayClientRequestError({
+      code: ErrorCodes.UNAVAILABLE,
+      message: "connect ECONNREFUSED",
+      ...(queued ? { details: { code: GatewayErrorDetailCodes.OUTBOUND_DELIVERY_QUEUED } } : {}),
+    });
+    const { tool, runMessageAction } = createFailingMessageTool(error);
+    const pending = tool.execute("send", { action: "send", message: "hello" });
+    if (!queued) {
+      await expect(pending).rejects.toBe(error);
+      return;
+    }
+    expect(await pending).toMatchObject({
       details: {
         status: "delivery_queued",
         delivered: false,
@@ -106,24 +314,9 @@ describe("message tool queued gateway delivery", () => {
           "Delivery is pending: connect ECONNREFUSED. The gateway owns retry or reconciliation; delivery is not yet confirmed. Do not resend it.",
       },
     });
-
-    // A model that resends anyway must reuse the queued key so the gateway's
-    // idempotency cache answers instead of a second durable send.
-    await tool.execute("queued-send-again", { action: "send", message: "hello" });
+    await tool.execute("send-again", { action: "send", message: "hello" });
     expect(sentIdempotencyKey(runMessageAction, 0)).toBeDefined();
     expect(sentIdempotencyKey(runMessageAction, 1)).toBe(sentIdempotencyKey(runMessageAction, 0));
-  });
-
-  it("keeps an unstructured unavailable error throwable", async () => {
-    const error = new GatewayClientRequestError({
-      code: ErrorCodes.UNAVAILABLE,
-      message: "connect ECONNREFUSED",
-    });
-    const { tool } = createFailingMessageTool(error);
-
-    await expect(
-      tool.execute("ordinary-failure", { action: "send", message: "hello" }),
-    ).rejects.toBe(error);
   });
 });
 
@@ -351,13 +544,7 @@ describe("message tool terminal source actions", () => {
       messageActionTurnCapability: turnCapability,
       ...source,
       sourceReplyDeliveryMode: "automatic",
-      getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
-      resolveCommandSecretRefsViaGateway: async ({ config }) => ({
-        resolvedConfig: config,
-        diagnostics: [],
-        targetStatesByPath: {},
-        hadUnresolvedTargets: false,
-      }),
+      ...secretDeps,
       runMessageAction: runRealMessageAction,
     });
 
@@ -466,13 +653,7 @@ describe("message tool group thread replies", () => {
       currentChannelId: "C12345678",
       currentMessagingTarget: "C12345678",
       currentThreadTs: "42",
-      getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
-      resolveCommandSecretRefsViaGateway: async ({ config }) => ({
-        resolvedConfig: config,
-        diagnostics: [],
-        targetStatesByPath: {},
-        hadUnresolvedTargets: false,
-      }),
+      ...secretDeps,
       runMessageAction: runRealMessageAction,
     });
     const participant = { agentId: "reviewer", name: "Reviewer" };
@@ -525,13 +706,7 @@ describe("message tool group thread replies", () => {
         currentChannelId: "123",
         currentMessagingTarget: "123",
         currentThreadTs: sourceThread,
-        getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
-        resolveCommandSecretRefsViaGateway: async ({ config }) => ({
-          resolvedConfig: config,
-          diagnostics: [],
-          targetStatesByPath: {},
-          hadUnresolvedTargets: false,
-        }),
+        ...secretDeps,
         runMessageAction: async ({
           action,
           params,

@@ -49,7 +49,12 @@ async function loadSessionsRoute(options: {
       includeUnknown: false,
       limit: 50,
     }),
-  ).toEqual(options.expectedQuery);
+  ).toEqual({
+    source: "sessions-page",
+    rowMode: "compact",
+    excludeDock: !data.expandedSessionKey,
+    ...options.expectedQuery,
+  });
 }
 
 describe("sessions route", () => {
@@ -192,6 +197,31 @@ describe("sessions route", () => {
       expect(router.getState().matches[0]?.data?.statusFilter).toBe("active");
 
       await router.navigate("sessions", context, {}, location(""));
+      expect(router.getState().matches[0]?.data?.statusFilter).toBe("archived");
+    } finally {
+      router.stop();
+    }
+  });
+
+  it("preloads the current saved status after leaving a cached roster", async () => {
+    const preferences = new SessionsPagePreferencesState();
+    const context = {
+      runtimeConfig: { ensureLoaded: vi.fn(async () => undefined) },
+      agentSelection: { state: { selectedId: "main", scopeId: "main" } },
+    } as unknown as ApplicationContext;
+    const router = createRouter<"sessions" | "other", ApplicationContext, null, SessionsRouteData>({
+      routes: [
+        { ...page, component: () => null },
+        { id: "other", path: "/other", component: () => null },
+      ],
+    });
+    try {
+      await router.navigate("sessions", context);
+      preferences.update({ statusFilter: "archived" });
+      await router.navigate("other", context);
+      await router.preloadRoute("sessions", context);
+      await router.navigate("sessions", context);
+
       expect(router.getState().matches[0]?.data?.statusFilter).toBe("archived");
     } finally {
       router.stop();

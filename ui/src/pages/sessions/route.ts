@@ -4,6 +4,7 @@ import { html } from "lit";
 import { routePageSpec } from "../../app-route-paths.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
+import { readSessionsPagePreferences } from "./route-preferences.runtime.ts";
 
 export type SessionsRouteData = {
   expandedSessionKey: string | null;
@@ -36,7 +37,7 @@ async function loadSessionsRoute(
   context: ApplicationContext,
   location: RouteLocation,
 ): Promise<SessionsRouteData> {
-  const preferenceState = await import("./route-preferences.runtime.ts");
+  const preferenceState = await import("./page-state.ts");
   const preferences = preferenceState.loadSessionsPagePreferences();
   await context.runtimeConfig.ensureLoaded().catch(() => undefined);
   // The mounted page owns list issuance, including scope/status navigation
@@ -50,7 +51,13 @@ export const page = definePage({
   loaderDeps: (context: ApplicationContext, location: RouteLocation) => {
     const options = routeOptions(location);
     const statusSource = options.hasExplicitStatus ? "explicit" : "stored";
-    return `${options.expandedSessionKey ?? ""}\u0000${options.statusFilter}\u0000${statusSource}\u0000${context.agentSelection.state.scopeId ?? "all"}`;
+    // A saved-status edit must not promote a cached preload for the old default.
+    // Keep this eager storage read lightweight; preference parsing stays lazy.
+    const savedPreferences =
+      !options.hasExplicitStatus && !options.expandedSessionKey
+        ? readSessionsPagePreferences()
+        : null;
+    return `${options.expandedSessionKey ?? ""}\u0000${options.statusFilter}\u0000${statusSource}\u0000${context.agentSelection.state.scopeId ?? "all"}\u0000${savedPreferences ?? ""}`;
   },
   loader: (context: ApplicationContext, { location }) => loadSessionsRoute(context, location),
   component: () =>

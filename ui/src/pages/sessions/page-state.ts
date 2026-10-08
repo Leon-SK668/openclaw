@@ -7,9 +7,12 @@ import {
 } from "../../lib/sessions/grouping.ts";
 import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
 import { getSafeLocalStorage } from "../../local-storage.ts";
+import {
+  readSessionsPagePreferences,
+  SESSIONS_PAGE_PREFERENCES_STORAGE_KEY,
+} from "./route-preferences.runtime.ts";
 
 const LEGACY_GROUP_BY_STORAGE_KEY = "openclaw:sessions:group-by";
-const SESSIONS_PAGE_PREFERENCES_STORAGE_KEY = "openclaw:sessions:preferences:v1";
 const SORT_COLUMNS = ["key", "kind", "updated", "tokens"] as const;
 const SORT_DIRECTIONS = ["asc", "desc"] as const;
 const STATUS_FILTERS = ["active", "archived", "all"] as const;
@@ -96,7 +99,7 @@ export function loadSessionsPagePreferences(): SessionsPagePreferences {
     ...DEFAULT_SESSIONS_PAGE_PREFERENCES,
     groupBy: legacyGroupBy ?? DEFAULT_SESSIONS_PAGE_PREFERENCES.groupBy,
   };
-  const raw = readStorageValue(storage, SESSIONS_PAGE_PREFERENCES_STORAGE_KEY);
+  const raw = readSessionsPagePreferences();
   if (!raw) {
     return fallbackPreferences;
   }
