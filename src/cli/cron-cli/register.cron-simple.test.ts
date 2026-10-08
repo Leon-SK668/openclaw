@@ -216,18 +216,18 @@ it.each([undefined, { enabled: false }])(
 
 describe("cron history", () => {
   it("returns the selected transcript page as JSON without changing its messages", async () => {
-    const page = {
+    const historyPage = {
       messages: [{ role: "assistant", content: [{ type: "text", text: "report".repeat(1_000) }] }],
       activity: [{ kind: "compaction", id: "activity-1" }],
       nextCursor: "opaque-bound-cursor+/=:%20",
     };
-    callGatewayFromCli.mockResolvedValueOnce(page);
+    callGatewayFromCli.mockResolvedValueOnce(historyPage);
     await run(["history", "job-1", "--run-id", "run-1"]);
     expect(callGatewayFromCli).toHaveBeenCalledExactlyOnceWith("cron.history", expect.anything(), {
       id: "job-1",
       runId: "run-1",
     });
-    expect(defaultRuntime.writeJson).toHaveBeenCalledExactlyOnceWith(page);
+    expect(defaultRuntime.writeJson).toHaveBeenCalledExactlyOnceWith(historyPage);
   });
 
   it("forwards an opaque cursor unchanged and leaves page limits to the Gateway", async () => {
@@ -291,7 +291,7 @@ describe("cron history", () => {
     const argv = process.argv;
     process.argv = [...argv.slice(0, 2), "cron", "history", "job-1", "--run-id", "run-1", "--json"];
     try {
-      const error = await run(process.argv.slice(3)).catch((error: unknown) => error);
+      const error = await run(process.argv.slice(3)).catch((caughtError: unknown) => caughtError);
       expect(error).toBeInstanceOf(ExpectedCliError);
       expect(formatCliJsonFailure(error)).toEqual({
         ok: false,
