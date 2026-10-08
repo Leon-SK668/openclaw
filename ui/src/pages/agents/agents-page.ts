@@ -10,6 +10,7 @@ import type {
   ToolsEffectiveResult,
 } from "../../api/types.ts";
 import { pathForAgentPanel } from "../../app-route-paths.ts";
+import { togglePinnedAgent } from "../../app/bootstrap-navigation-preferences.ts";
 import { applicationContext, type ApplicationContext } from "../../app/context.ts";
 import {
   beginPanelRefresh,
@@ -61,7 +62,6 @@ import {
   loadAgentFileContent,
   overwriteAgentFile,
   reloadAgentFile,
-  retainAgentFileDrafts,
   resetAgentFile,
   resetAgentFiles,
   saveAgentFile,
@@ -72,7 +72,6 @@ import {
   saveIdentityDraft,
   selectIdentityAvatar,
   setIdentityDraftField,
-  togglePinnedAgent,
 } from "./identity-actions.ts";
 import { createAgentModelActions } from "./model-config.ts";
 import type { AgentIdentityDraft } from "./panels-overview.ts";
@@ -82,12 +81,11 @@ import {
   syncAgentsCanonicalLocation,
 } from "./route-navigation.ts";
 import type { AgentsRouteData } from "./route.ts";
+import { AgentSelectionDrafts } from "./selection-drafts.ts";
 import { clearAgentSkillFilter, loadAgentSkills } from "./skills.ts";
 import { renderAgents, renderAgentsPageHeader } from "./view.ts";
 
-type AgentsRequestSources = Partial<
-  Pick<ApplicationContext, "agents" | "agentIdentity" | "sessions">
->;
+type AgentsRequestSources = Partial<Pick<ApplicationContext, "agents" | "agentIdentity">>;
 
 class AgentsPage
   extends OpenClawLightDomElement
@@ -126,9 +124,11 @@ class AgentsPage
   @state() agentFileActive: string | null = null;
   @state() agentFileSaving = false;
   readonly agentFileWriteRevisions = new Map<string, number>();
-  private readonly retainedFileDrafts = new Map<string, RetainedAgentFileDrafts>();
   @state() agentIdentityLoading = false;
   @state() identityDraft: AgentIdentityDraft = { name: null, emoji: null, avatar: null };
+  private readonly selectionDrafts = new AgentSelectionDrafts(this, () =>
+    this.resetSelectionState(),
+  );
   private readonly identityAvatarLoader = new IdentityAvatarController(this);
   @state() identitySaving = false;
   @state() identityError: string | null = null;
@@ -142,12 +142,7 @@ class AgentsPage
   private routeDataInitialized = false;
   private applyingRouteSelection = false;
   private routeSelectionSuperseded = false;
-  private hasBoundAgents = false;
-  private agentsSource: ApplicationContext["agents"] | null = null;
-  private hasBoundAgentIdentity = false;
-  private agentIdentitySource: ApplicationContext["agentIdentity"] | null = null;
-  private hasBoundSessions = false;
-  private sessionsSource: ApplicationContext["sessions"] | null = null;
+  private readonly boundSources = new Set<"agents" | "agentIdentity" | "sessions">();
   private chatModelCatalogSubscription: {
     isCurrent: () => boolean;
     unsubscribe: () => void;
@@ -169,7 +164,8 @@ class AgentsPage
       this.invalidateTransientRequests();
       this.resetModelCatalog();
     },
-    onSnapshot: ({ becameAvailable, becameConnected }) => {
+    onSnapshot: ({ snapshot: gatewaySnapshot, becameAvailable, becameConnected }) => {
+      this.selectionDrafts.observeGateway(gatewaySnapshot);
       this.syncGatewayState();
       if (becameAvailable && !becameConnected) {
         const subscription = this.chatModelCatalogSubscription;
@@ -190,10 +186,7 @@ class AgentsPage
     ensureInitialData: () => this.ensureInitialData(),
   });
   private readonly subscriptions = new SubscriptionsController(this)
-    .watch(
-      () => this.context?.config,
-      (config, notify) => config.subscribe(notify),
-    )
+    .watchStore(() => this.context?.config)
     .watch(() => this.client, subscribeModelCatalogCache)
     .effect(
       () => this.context?.settingsAgentSelection,
@@ -224,97 +217,74 @@ class AgentsPage
     )
     .effect(
       () => this.context?.agents,
-      (agents) => {
-        const resetForSourceBind = this.hasBoundAgents;
-        this.hasBoundAgents = true;
-        this.agentsSource = agents;
-        if (resetForSourceBind) {
-          this.resetForSourceChange();
-        }
-        this.syncAgentState(agents);
-        this.ensureInitialData();
-        const stop = agents.subscribe(() => {
-          if (this.agentsSource !== agents || this.context.agents !== agents) {
-            return;
+      this.observeSource(
+        "agents",
+        (agents, replacement) => {
+          if (replacement) {
+            this.resetForSourceChange();
           }
+          this.syncAgentState(agents);
+          this.ensureInitialData();
+        },
+        (agents) => {
           this.syncAgentState(agents);
           this.ensureAgentIdentities();
           this.loadActivePanelData();
-          this.requestUpdate();
-        });
-        return () => {
-          stop();
-          if (this.agentsSource === agents) {
-            this.agentsSource = null;
-          }
-        };
-      },
+        },
+      ),
     )
     .effect(
       () => this.context?.agentIdentity,
-      (agentIdentity) => {
-        const resetForSourceBind = this.hasBoundAgentIdentity;
-        this.hasBoundAgentIdentity = true;
-        this.agentIdentitySource = agentIdentity;
-        if (resetForSourceBind) {
+      this.observeSource("agentIdentity", (_agentIdentity, replacement) => {
+        if (replacement) {
           this.invalidateTransientRequests();
         }
         this.ensureAgentIdentities();
         this.ensureInitialData();
-        const stop = agentIdentity.subscribe(() => {
-          if (
-            this.agentIdentitySource === agentIdentity &&
-            this.context.agentIdentity === agentIdentity
-          ) {
-            this.requestUpdate();
-          }
-        });
-        return () => {
-          stop();
-          if (this.agentIdentitySource === agentIdentity) {
-            this.agentIdentitySource = null;
-          }
-        };
-      },
+      }),
     )
-    .watch(
-      () => this.context?.channels,
-      (channels, notify) => channels.subscribe(notify),
-    )
-    .watch(
-      () => this.context?.navigation,
-      (navigation, notify) => navigation.subscribe(notify),
-    )
-    .watch(
-      () => this.context?.runtimeConfig,
-      (runtimeConfig, notify) => runtimeConfig.subscribe(notify),
-    )
+    .watchStore(() => this.context?.channels)
+    .watchStore(() => this.context?.navigation)
+    .watchStore(() => this.context?.runtimeConfig)
     .effect(
       () => this.context?.sessions,
-      (sessions) => {
-        const resetForSourceBind = this.hasBoundSessions;
-        this.hasBoundSessions = true;
-        this.sessionsSource = sessions;
-        if (resetForSourceBind) {
-          this.invalidateTransientRequests();
-          resetToolsEffectiveState(this);
-          this.loadActivePanelData();
-        }
-        const stop = sessions.subscribe(() => {
-          if (this.sessionsSource !== sessions || this.context.sessions !== sessions) {
-            return;
+      this.observeSource(
+        "sessions",
+        (_sessions, replacement) => {
+          if (replacement) {
+            this.invalidateTransientRequests();
+            resetToolsEffectiveState(this);
+            this.loadActivePanelData();
           }
+        },
+        () => {
           void refreshVisibleToolsEffectiveForCurrentSession(this);
-          this.requestUpdate();
-        });
-        return () => {
-          stop();
-          if (this.sessionsSource === sessions) {
-            this.sessionsSource = null;
-          }
-        };
-      },
+        },
+      ),
     );
+
+  private observeSource<Key extends "agents" | "agentIdentity" | "sessions">(
+    key: Key,
+    onBind: (source: ApplicationContext[Key], replacement: boolean) => void,
+    onChange?: (source: ApplicationContext[Key]) => void,
+  ) {
+    return (source: ApplicationContext[Key]) => {
+      const replacement = this.boundSources.has(key);
+      this.boundSources.add(key);
+      onBind(source, replacement);
+      let active = true;
+      const stop = source.subscribe(() => {
+        if (active && this.context[key] === source) {
+          onChange?.(source);
+          this.requestUpdate();
+        }
+      });
+      return () => {
+        stop();
+        active = false;
+      };
+    };
+  }
 
   get sessions() {
     return this.context.sessions;
@@ -382,26 +352,13 @@ class AgentsPage
   }
 
   private syncSettingsSelection() {
-    const selectedId = this.context.settingsAgentSelection.state.selectedId;
-    if (selectedId !== this.agentsSelectedId) {
-      if (this.agentsSelectedId) {
-        const drafts = retainAgentFileDrafts(this);
-        if (drafts) {
-          this.retainedFileDrafts.set(this.agentsSelectedId, drafts);
-        }
-      }
-      this.agentsSelectedId = selectedId;
-      this.resetSelectionState();
-      const retained = selectedId ? this.retainedFileDrafts.get(selectedId) : undefined;
-      if (retained && selectedId) {
-        this.retainedFileDrafts.delete(selectedId);
-        this.agentFileDrafts = retained.drafts;
-        this.agentFileVersions = retained.versions;
-        this.agentFileActive = retained.active;
-        this.agentFileConflict = retained.conflict;
-        // Loaded bases stay empty: returning must read disk while retaining the draft's ancestry.
-      }
-    }
+    const selection = this.context.settingsAgentSelection;
+    this.selectionDrafts.select({
+      selectedId: selection.state.selectedId,
+      intentRevision: selection.intentRevision,
+      awaitingRoster: !selection.state.selectedId && !this.context.agents.state.agentsList,
+      profileId: this.context.gateway.snapshot.selfUser?.id ?? null,
+    });
   }
 
   private syncCurrentAgentFiles(agents = this.context.agents) {
@@ -430,7 +387,7 @@ class AgentsPage
   }
 
   private resetForSourceChange() {
-    this.retainedFileDrafts.clear();
+    this.selectionDrafts.clear();
     this.agentsList = null;
     this.agentsSelectedId = null;
     this.resetSelectionState();
@@ -536,8 +493,8 @@ class AgentsPage
   private isCurrentRequest(
     client: GatewayBrowserClient,
     generation: number,
-    agentId?: string,
-    sources: AgentsRequestSources = {},
+    agentId: string | undefined,
+    sources: AgentsRequestSources,
   ): boolean {
     return (
       this.client === client &&
@@ -545,7 +502,6 @@ class AgentsPage
       this.requestGeneration === generation &&
       (!sources.agents || this.context.agents === sources.agents) &&
       (!sources.agentIdentity || this.context.agentIdentity === sources.agentIdentity) &&
-      (!sources.sessions || this.context.sessions === sources.sessions) &&
       (!agentId || this.agentsSelectedId === agentId)
     );
   }

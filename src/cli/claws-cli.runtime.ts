@@ -47,7 +47,6 @@ import {
   CLAW_OUTPUT_STABILITY,
   type ClawAddPlan,
 } from "../claws/types.js";
-// Runtime handlers for experimental local Claws commands.
 import { getRuntimeConfig } from "../config/config.js";
 import { listConfiguredMcpServers } from "../config/mcp-config.js";
 import { redactSensitiveArgv } from "../config/redact-argv.js";
@@ -74,6 +73,7 @@ import type {
 } from "./claws-cli.js";
 import { clawMonitorCleanupGateway } from "./claws-cli.monitor-cleanup.js";
 import { clawPackageRemovalGateway } from "./claws-cli.package-removal.js";
+import { clawRemovalJournalGateway } from "./claws-cli.removal-journal.js";
 import { listCronJobsFromGateway } from "./cron-cli/list-jobs.js";
 import { callGatewayFromCli } from "./gateway-rpc.js";
 import { resolvePluginBatchReload } from "./plugins-lifecycle-client.js";
@@ -500,8 +500,6 @@ export async function runClawsStatusCommand(
   }
 }
 
-export { runClawsUpdateCommand } from "./claws-update-cli.runtime.js";
-
 export async function runClawsRemoveCommand(
   target: string,
   opts: ClawsRemoveOptions,
@@ -563,6 +561,7 @@ export async function runClawsRemoveCommand(
   }
   try {
     const result = await applyClawRemovePlan(plan, {
+      journalGateway: clawRemovalJournalGateway,
       monitorGateway: clawMonitorCleanupGateway,
       packageGateway: clawPackageRemovalGateway,
       consentPlanIntegrity: opts.planIntegrity,

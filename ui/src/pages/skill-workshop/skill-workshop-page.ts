@@ -69,10 +69,7 @@ class SkillWorkshopPage extends OpenClawLightDomElement {
     this.requestPageUpdate,
   );
   private readonly subscriptions = new SubscriptionsController(this)
-    .watch(
-      () => this.context?.agents,
-      (agents, notify) => agents.subscribe(notify),
-    )
+    .watchStore(() => this.context?.agents)
     .effect(
       () => this.context,
       (context) => {
@@ -96,20 +93,16 @@ class SkillWorkshopPage extends OpenClawLightDomElement {
       () => this.context?.gateway,
       (gateway) => {
         const snapshot = gateway.snapshot;
-        const sourceChanged = this.gatewaySource !== undefined && this.gatewaySource !== gateway;
-        const clientChanged =
-          this.gatewaySource !== undefined && this.gatewayClient !== snapshot.client;
-        const connectionChanged =
-          this.gatewaySource !== undefined &&
-          this.gatewayConnected !== (snapshot.phase === "connected");
-        const helloChanged =
-          this.gatewaySource !== undefined && this.gatewayHello !== snapshot.hello;
         this.applyGatewaySnapshot(
           gateway,
           snapshot,
-          sourceChanged || clientChanged || connectionChanged || helloChanged,
+          this.gatewaySource !== undefined &&
+            (this.gatewaySource !== gateway ||
+              this.gatewayClient !== snapshot.client ||
+              this.gatewayConnected !== (snapshot.phase === "connected") ||
+              this.gatewayHello !== snapshot.hello),
         );
-        const cleanup = gateway.subscribe((nextSnapshot) => {
+        return gateway.subscribe((nextSnapshot) => {
           if (this.gatewaySource !== gateway || this.context?.gateway !== gateway) {
             return;
           }
@@ -119,13 +112,9 @@ class SkillWorkshopPage extends OpenClawLightDomElement {
             nextSnapshot.hello !== this.gatewayHello;
           this.applyGatewaySnapshot(gateway, nextSnapshot, sourceEpochChanged);
         });
-        return cleanup;
       },
     )
-    .watch(
-      () => this.context?.config,
-      (config, notify) => config.subscribe(notify),
-    )
+    .watchStore(() => this.context?.config)
     .effect(
       () => this.context?.agentSelection,
       (agentSelection) => {
@@ -166,17 +155,10 @@ class SkillWorkshopPage extends OpenClawLightDomElement {
         }
       },
     )
-    .watch(
-      () => this.context?.agentIdentity,
-      (agentIdentity, notify) => agentIdentity.subscribe(notify),
-    )
-    .watch(
-      () => this.context?.runtimeConfig,
-      (runtimeConfig, notify) => runtimeConfig.subscribe(notify),
-    )
-    .watch(
-      () => (this.context ? skillWorkshopRevisionAdmissionsFor(this.context) : undefined),
-      (admissions, notify) => admissions.subscribe(notify),
+    .watchStore(() => this.context?.agentIdentity)
+    .watchStore(() => this.context?.runtimeConfig)
+    .watchStore(() =>
+      this.context ? skillWorkshopRevisionAdmissionsFor(this.context) : undefined,
     );
 
   private readonly handleRevisionRequest: SkillWorkshopRevisionRequest = async (
@@ -451,11 +433,7 @@ class SkillWorkshopPage extends OpenClawLightDomElement {
     }
   };
 
-  private readonly handleSelfLearningToggle = (enabled: boolean) => {
-    void this.applySelfLearningToggle(enabled);
-  };
-
-  private async applySelfLearningToggle(enabled: boolean): Promise<void> {
+  private async handleSelfLearningToggle(enabled: boolean): Promise<void> {
     if (!canCallWorkshopAdminMethod(this.context?.gateway?.snapshot, "config.patch")) {
       return;
     }
@@ -517,7 +495,7 @@ class SkillWorkshopPage extends OpenClawLightDomElement {
               this.selfLearningError,
               canCallWorkshopAdminMethod(scope.context.gateway.snapshot, "config.patch"),
             ),
-            onSelfLearningToggle: this.handleSelfLearningToggle,
+            onSelfLearningToggle: (enabled) => void this.handleSelfLearningToggle(enabled),
             learningBusy: this.learningBusy,
             learningError: this.learningError,
             onLearn: this.handleLearn,

@@ -25,6 +25,7 @@ type HookGeneration = {
   registrations: Array<{ event: string; handler: InternalHookHandler }>;
   discovery?: { sources: HookSourceFact[]; declaredNames: Set<string> };
   committed?: true;
+  startupBaseline?: HookGeneration;
 };
 const hookOwner = resolveGlobalSingleton<{ generation: HookGeneration }>(
   Symbol.for("openclaw.loadedInternalHookRegistrations"),
@@ -146,11 +147,13 @@ export async function prepareInternalHooks(
   return {
     loadedCount,
     commit({ initial = false } = {}) {
-      // Deferred startup must not overwrite a reload, or a later Gateway lifecycle.
-      if (
-        previousGeneration !== hookOwner.generation ||
-        (initial && previousGeneration.committed)
-      ) {
+      // A config reload may supersede startup from the same baseline, but never
+      // another reload or a later Gateway lifecycle. Startup cannot supersede either.
+      const currentGeneration = hookOwner.generation;
+      const ownsGeneration =
+        previousGeneration === currentGeneration ||
+        (!initial && currentGeneration.startupBaseline === previousGeneration);
+      if (!ownsGeneration || (initial && previousGeneration.committed)) {
         return false;
       }
       // Publish synchronously so events see one complete generation; keep unrelated listeners.
@@ -162,6 +165,7 @@ export async function prepareInternalHooks(
         registrations,
         discovery: { sources: discovery.sources, declaredNames: selection.declaredNames },
         committed: true,
+        ...(initial ? { startupBaseline: previousGeneration } : {}),
       };
       setInternalHooksEnabled(enabled);
       return true;

@@ -684,6 +684,44 @@ describe("loader", () => {
       },
     );
 
+    it.each(["startup", "reload"])(
+      "keeps the reload authoritative when %s commits first on the startup baseline",
+      async (first) => {
+        await drainGlobalSingletonLifecycleState("restart");
+        await writeDiscoveredHook({ hookName: "startup" });
+        await writeDiscoveredHook({ hookName: "reload" });
+        const startup = await prepareInternalHooks(createSelectedHooksConfig("startup"), tmpDir);
+        const reload = await prepareInternalHooks(createSelectedHooksConfig("reload"), tmpDir);
+
+        if (first === "startup") {
+          expect(startup.commit({ initial: true })).toBe(true);
+          expect(reload.commit()).toBe(true);
+        } else {
+          expect(reload.commit()).toBe(true);
+          expect(startup.commit({ initial: true })).toBe(false);
+        }
+
+        const event = createInternalHookEvent("command", "new", "test-session");
+        await triggerInternalHook(event);
+        expect(event.messages).toEqual(["reload"]);
+      },
+    );
+
+    it("rejects a pending reload from before Gateway restart after new startup commits", async () => {
+      await drainGlobalSingletonLifecycleState("restart");
+      await writeDiscoveredHook({ hookName: "stale" });
+      await writeDiscoveredHook({ hookName: "startup" });
+      const stale = await prepareInternalHooks(createSelectedHooksConfig("stale"), tmpDir);
+      await drainGlobalSingletonLifecycleState("restart");
+      const startup = await prepareInternalHooks(createSelectedHooksConfig("startup"), tmpDir);
+
+      expect(startup.commit({ initial: true })).toBe(true);
+      expect(stale.commit()).toBe(false);
+      const event = createInternalHookEvent("command", "new", "test-session");
+      await triggerInternalHook(event);
+      expect(event.messages).toEqual(["startup"]);
+    });
+
     it("rejects a stale non-initial commit after a newer reload wins", async () => {
       const managedHooksDir = path.join(tmpDir, "managed-hooks");
       const options = { managedHooksDir, bundledHooksDir: "/nonexistent/bundled/hooks" };
