@@ -58,6 +58,32 @@ async function withAccountingFixture(
 }
 
 describe("completed compaction accounting", () => {
+  it.each([80, undefined])(
+    "invalidates prior run accounting with tokensAfter=%s",
+    async (tokensAfter) => {
+      await withAccountingFixture(async (fixture) => {
+        await fixture.replace({
+          inputTokens: 18_420,
+          outputTokens: 840,
+          cacheRead: 76_500,
+          cacheWrite: 300,
+          estimatedCostUsd: 0.023,
+          totalTokens: 95_760,
+          totalTokensFresh: true,
+        });
+        expect(await incrementCompactionCount({ ...fixture.params, tokensAfter })).toBe(1);
+        for (const row of [fixture.read(), fixture.cached()]) {
+          expect(row?.inputTokens).toBeUndefined();
+          expect(row?.outputTokens).toBeUndefined();
+          expect(row?.cacheRead).toBeUndefined();
+          expect(row?.cacheWrite).toBeUndefined();
+          expect(row?.estimatedCostUsd).toBeUndefined();
+        }
+        expect(fixture.read()?.totalTokens).toBe(tokensAfter ?? 95_760);
+        expect(fixture.read()?.totalTokensFresh).toBe(tokensAfter !== undefined);
+      });
+    },
+  );
   it.each([true, false])(
     "increments the authoritative count with caller cache=%s",
     async (withCache) => {
@@ -82,24 +108,19 @@ describe("completed compaction accounting", () => {
     },
   );
 
-  it.each([120, 40, 0, undefined])(
-    "persists the latest private context snapshot (%s)",
-    async (currentContextTokens) => {
-      await withAccountingFixture(async (fixture) => {
-        await fixture.replace({ totalTokens: 999, totalTokensFresh: true });
+  it("persists an empty private context snapshot as fresh", async () => {
+    await withAccountingFixture(async (fixture) => {
+      await fixture.replace({ totalTokens: 999, totalTokensFresh: true });
 
-        expect(
-          await incrementCompactionCount({ ...fixture.params, tokensAfter: currentContextTokens }),
-        ).toBe(1);
+      expect(await incrementCompactionCount({ ...fixture.params, tokensAfter: 0 })).toBe(1);
 
-        expect(fixture.read()).toMatchObject({
-          compactionCount: 1,
-          totalTokens: currentContextTokens ?? 999,
-          totalTokensFresh: currentContextTokens !== undefined,
-        });
+      expect(fixture.read()).toMatchObject({
+        compactionCount: 1,
+        totalTokens: 0,
+        totalTokensFresh: true,
       });
-    },
-  );
+    });
+  });
 
   it("records and clears byte-compaction progress with authoritative accounting", async () => {
     await withAccountingFixture(async (fixture) => {
@@ -214,26 +235,32 @@ describe("completed compaction accounting", () => {
     });
   });
 
-  it("does not commit accounting when authority closes after the queued updater", async () => {
-    await withAccountingFixture(async (fixture) => {
-      let authorized = true;
+  it.each(["compaction", "usage"] as const)(
+    "does not commit %s accounting when authority closes after admission",
+    async (kind) => {
+      await withAccountingFixture(async (fixture) => {
+        let authorized = true;
+        const authorize = () => {
+          queueMicrotask(() => {
+            authorized = false;
+          });
+          return authorized;
+        };
+        const result =
+          kind === "compaction"
+            ? await incrementCompactionCount({ ...fixture.params, tokensAfter: 123, authorize })
+            : await persistSessionUsageUpdate({
+                ...fixture.params,
+                cfg: {},
+                currentContextSnapshot: { tokens: 123 },
+                authorize,
+              });
 
-      expect(
-        await incrementCompactionCount({
-          ...fixture.params,
-          tokensAfter: 123,
-          authorize: () => {
-            queueMicrotask(() => {
-              authorized = false;
-            });
-            return authorized;
-          },
-        }),
-      ).toBeUndefined();
-
-      expect(fixture.cached()).toBe(fixture.entry);
-      expect(fixture.read()?.compactionCount).toBe(0);
-      expect(fixture.read()?.totalTokens).toBeUndefined();
-    });
-  });
+        expect(result).toBeUndefined();
+        expect(fixture.cached()).toBe(fixture.entry);
+        expect(fixture.read()?.compactionCount).toBe(0);
+        expect(fixture.read()?.totalTokens).toBeUndefined();
+      });
+    },
+  );
 });

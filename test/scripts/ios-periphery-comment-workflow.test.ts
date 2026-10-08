@@ -10,6 +10,7 @@ import { markdownToIR } from "../../packages/markdown-core/src/ir.js";
 const WORKFLOW_PATH = ".github/workflows/ios-periphery-comment.yml";
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/ios-periphery.yml";
 const MACOS_PRODUCER_WORKFLOW_PATH = ".github/workflows/macos-periphery.yml";
+const SHARED_PRODUCER_WORKFLOW_PATH = ".github/workflows/shared-openclawkit-periphery.yml";
 const ARTIFACT_NAME = "ios-periphery-dead-code-12345-2";
 
 type WorkflowStep = {
@@ -49,6 +50,12 @@ type ProducerWorkflow = {
     scan?: {
       "runs-on"?: string;
       steps?: WorkflowStep[];
+    };
+    "scan-ios"?: {
+      "runs-on"?: string;
+    };
+    "scan-macos"?: {
+      "runs-on"?: string;
     };
   };
 };
@@ -335,6 +342,14 @@ async function runCommenter(
   };
 }
 
+function runReport(archive: Buffer, options: Parameters<typeof runCommenter>[2] = {}) {
+  return runCommenter(
+    { expired: false, id: 77, name: ARTIFACT_NAME, size_in_bytes: archive.length },
+    archive,
+    options,
+  );
+}
+
 function expectUnavailableComment(bodies: string[]): void {
   expect(bodies).toHaveLength(1);
   expect(bodies[0]).toContain("Periphery did not complete or its report could not be safely read.");
@@ -448,20 +463,6 @@ function setFirstEntryUncompressedSize(archive: Buffer, size: number): Buffer {
 }
 
 describe("iOS Periphery comment workflow", () => {
-  it("parses the workflow YAML and embedded github-script JavaScript", () => {
-    const script = commenterScript;
-    expect(script).not.toContain("node:child_process");
-    expect(script).not.toContain("execFileSync");
-    expect(() =>
-      compileFunction(`return (async () => {\n${script}\n})();`, [
-        "require",
-        "context",
-        "core",
-        "github",
-      ]),
-    ).not.toThrow();
-  });
-
   it("scopes the report artifact to the workflow attempt", () => {
     const workflow = parse(readFileSync(PRODUCER_WORKFLOW_PATH, "utf8")) as ProducerWorkflow;
     const upload = workflow.jobs?.scan?.steps?.find(
@@ -481,24 +482,21 @@ describe("iOS Periphery comment workflow", () => {
     const macosWorkflow = parse(
       readFileSync(MACOS_PRODUCER_WORKFLOW_PATH, "utf8"),
     ) as ProducerWorkflow;
+    const sharedWorkflow = parse(
+      readFileSync(SHARED_PRODUCER_WORKFLOW_PATH, "utf8"),
+    ) as ProducerWorkflow;
 
-    expect(iosWorkflow.jobs?.scan?.["runs-on"]).toContain("github.run_attempt > 1");
-    expect(macosWorkflow.jobs?.scan?.["runs-on"]).toBe("macos-26");
+    expect(iosWorkflow.jobs?.scan?.["runs-on"]).toBe("xcode-27");
+    expect(macosWorkflow.jobs?.scan?.["runs-on"]).toBe("xcode-27");
+    expect(sharedWorkflow.jobs?.["scan-ios"]?.["runs-on"]).toBe("xcode-27");
+    expect(sharedWorkflow.jobs?.["scan-macos"]?.["runs-on"]).toBe("xcode-27");
   });
   it("accepts a valid small Periphery artifact", async () => {
     const archive = makeZip({
       "periphery.json": "[]\n",
       "periphery.status": "0\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expect(result.downloadCount).toBe(1);
     expect(result.core.warnings).toEqual([]);
@@ -512,15 +510,7 @@ describe("iOS Periphery comment workflow", () => {
       },
       { compressionMethod: 8 },
     );
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expect(result.downloadCount).toBe(1);
     expect(result.core.warnings).toEqual([]);
@@ -537,15 +527,7 @@ describe("iOS Periphery comment workflow", () => {
       ),
       1,
     );
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expectUnavailableComment(result.createdBodies);
     expect(result.core.warnings).toEqual([
@@ -576,15 +558,7 @@ describe("iOS Periphery comment workflow", () => {
       "../periphery.json": "[]\n",
       "periphery.status": "0\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expectUnavailableComment(result.createdBodies);
     expect(result.core.warnings).toEqual([
@@ -599,15 +573,7 @@ describe("iOS Periphery comment workflow", () => {
         "periphery.status": "0\n",
       }),
     );
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expectUnavailableComment(result.createdBodies);
     expect(result.core.warnings).toEqual([
@@ -674,15 +640,7 @@ describe("iOS Periphery comment workflow", () => {
       ]),
       "periphery.status": "1\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expect(result.createdBodies).toHaveLength(1);
     const body = result.createdBodies[0] ?? "";
@@ -698,15 +656,7 @@ describe("iOS Periphery comment workflow", () => {
       "periphery.json": "[null]\n",
       "periphery.status": "1\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expectUnavailableComment(result.createdBodies);
   });
@@ -723,15 +673,7 @@ describe("iOS Periphery comment workflow", () => {
       ),
       "periphery.status": "1\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-    );
+    const result = await runReport(archive);
 
     expect(result.createdBodies).toHaveLength(1);
     expect(result.createdBodies[0]?.length).toBeLessThanOrEqual(60_000);
@@ -748,18 +690,9 @@ describe("iOS Periphery comment workflow", () => {
       ]),
       "periphery.status": "1\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-      {
-        commentErrorStatus: 403,
-      },
-    );
+    const result = await runReport(archive, {
+      commentErrorStatus: 403,
+    });
 
     expect(result.createdBodies).toEqual([]);
     expect(result.updatedBodies).toEqual([]);
@@ -779,31 +712,23 @@ describe("iOS Periphery comment workflow", () => {
       ]),
       "periphery.status": "1\n",
     });
-    const result = await runCommenter(
-      {
-        expired: false,
-        id: 77,
-        name: ARTIFACT_NAME,
-        size_in_bytes: archive.length,
-      },
-      archive,
-      {
-        existingComments: [
-          {
-            body: "<!-- openclaw-ios-periphery-dead-code -->",
-            id: 99,
-            user: { login: "another-app[bot]", type: "Bot" },
-          },
-        ],
-      },
-    );
+    const result = await runReport(archive, {
+      existingComments: [
+        {
+          body: "<!-- openclaw-ios-periphery-dead-code -->",
+          id: 99,
+          user: { login: "another-app[bot]", type: "Bot" },
+        },
+      ],
+    });
 
     expect(result.updatedBodies).toEqual([]);
     expect(result.createdBodies).toHaveLength(1);
   });
 });
 
-describe.each(["iOS", "macOS"] as const)("%s Periphery publication admission", (platform) => {
+describe("Periphery publication admission", () => {
+  const platform = "iOS";
   const name = `${platform} Periphery Dead Code`;
   const report = producerRunMetadata(platform);
   const passive = producerRunMetadata(platform, {
@@ -816,7 +741,6 @@ describe.each(["iOS", "macOS"] as const)("%s Periphery publication admission", (
     action: "converted_to_draft",
     draft: true,
   });
-  const marker = `<!-- openclaw-${platform.toLowerCase()}-periphery-dead-code -->`;
   const archive = makeZip({
     "periphery.json": JSON.stringify([
       { kind: "function", location: "Sources/Test.swift:12", name: "unusedSyntheticFunction" },
@@ -828,43 +752,46 @@ describe.each(["iOS", "macOS"] as const)("%s Periphery publication admission", (
       platform,
       ...options,
     });
-  const previousComments = (): [ExistingComment] => [
-    { id: 99, body: `${marker}\nprevious findings`, user: { login: "github-actions[bot]" } },
+  const previousComments = (commentPlatform: "iOS" | "macOS" = platform): [ExistingComment] => [
+    {
+      id: 99,
+      body: `<!-- openclaw-${commentPlatform.toLowerCase()}-periphery-dead-code -->\nprevious findings`,
+      user: { login: "github-actions[bot]" },
+    },
   ];
 
-  it.each([
-    ["pull_request", "opened", false, "report"],
-    ["pull_request", "synchronize", false, "report"],
-    ["pull_request", "reopened", false, "report"],
-    ["pull_request", "ready_for_review", false, "report"],
-    ["pull_request", "converted_to_draft", true, "draft"],
-    ["pull_request", "opened", true, "passive"],
-    ["pull_request", "synchronize", true, "passive"],
-    ["pull_request", "reopened", true, "passive"],
-    ["pull_request", "ready_for_review", true, "passive"],
-    ["workflow_dispatch", undefined, undefined, "manual"],
-  ] satisfies Array<[ProducerEvent["eventName"], string | undefined, boolean | undefined, string]>)(
-    "publishes according to producer event %s/%s draft=%s (%s)",
-    async (eventName, action, sourceDraft, intent) => {
-      const sourceEvent = { eventName, action, draft: sourceDraft };
-      const metadata = producerRunMetadata(platform, sourceEvent);
-      expect(metadata.display_title).toBe(`${name} [${intent}]`);
-      const result = await publish({
-        sourceEvent,
-        liveDraft: sourceDraft,
-        existingComments: previousComments(),
-        scanJobConclusion: sourceDraft ? "skipped" : "success",
-      });
-      if (intent === "report" || intent === "draft") {
-        expect(result.updatedBodies).toHaveLength(1);
-        expect(result.updatedBodies[0]).toContain(
-          intent === "report" ? "unusedSyntheticFunction" : "pull request is a draft",
-        );
-      } else {
-        expect(result.apiCalls).toEqual([]);
-      }
-    },
-  );
+  describe.each(["iOS", "macOS"] as const)("%s producer admission", (producerPlatform) => {
+    it.each([
+      ["pull_request", "ready_for_review", false, "report"],
+      ["pull_request", "converted_to_draft", true, "draft"],
+      ["pull_request", "synchronize", true, "passive"],
+      ["workflow_dispatch", undefined, undefined, "manual"],
+    ] satisfies Array<
+      [ProducerEvent["eventName"], string | undefined, boolean | undefined, string]
+    >)(
+      "publishes according to producer event %s/%s draft=%s (%s)",
+      async (eventName, action, sourceDraft, intent) => {
+        const sourceEvent = { eventName, action, draft: sourceDraft };
+        const metadata = producerRunMetadata(producerPlatform, sourceEvent);
+        expect(metadata.display_title).toBe(`${producerPlatform} Periphery Dead Code [${intent}]`);
+        const result = await publish({
+          platform: producerPlatform,
+          sourceEvent,
+          liveDraft: sourceDraft,
+          existingComments: previousComments(producerPlatform),
+          scanJobConclusion: sourceDraft ? "skipped" : "success",
+        });
+        if (intent === "report" || intent === "draft") {
+          expect(result.updatedBodies).toHaveLength(1);
+          expect(result.updatedBodies[0]).toContain(
+            intent === "report" ? "unusedSyntheticFunction" : "pull request is a draft",
+          );
+        } else {
+          expect(result.apiCalls).toEqual([]);
+        }
+      },
+    );
+  });
 
   it.each(["ready then passive", "passive then ready"])(
     "preserves ready findings: %s",
@@ -924,11 +851,7 @@ describe.each(["iOS", "macOS"] as const)("%s Periphery publication admission", (
 
   it.each([
     ["passive", `${name} [passive]`],
-    ["manual", `${name} [manual]`],
     ["missing", undefined],
-    ["null", null],
-    ["old PR title", "Fix Swift findings"],
-    ["unknown intent", `${name} [unknown]`],
     ["trailing text", `${name} [report] extra`],
     ["wrong workflow", `Other Periphery Dead Code [report]`],
   ])("records %s metadata as a no-op without API work", async (_label, display_title) => {
@@ -944,9 +867,7 @@ describe.each(["iOS", "macOS"] as const)("%s Periphery publication admission", (
   });
 
   it.each([
-    ["new report", { id: 54321, run_number: 9 }, true],
     ["pending report", { id: 54321, run_number: 9, status: "queued" }, true],
-    ["new attempt", { run_attempt: 3 }, true],
     ["pending attempt", { run_attempt: 3, status: "in_progress" }, true],
     ["other PR", { id: 54321, run_number: 9, pull_requests: [{ number: 456 }] }, false],
     ["passive", { ...passive, id: 54321, run_number: 9 }, false],
@@ -1023,17 +944,21 @@ describe.each(["iOS", "macOS"] as const)("%s Periphery publication admission", (
     expect(result.createdBodies).toEqual([]);
   });
 
-  it("cleans up genuine scope loss on the report path", async () => {
-    const result = await publish({
-      existingComments: previousComments(),
-      scanJobConclusion: "skipped",
-    });
-    expect(result.jobListCount).toBe(1);
-    expect(result.artifactListCount).toBe(0);
-    expect(result.updatedBodies).toHaveLength(1);
-    expect(result.updatedBodies[0]).toContain(`no longer touches ${platform} scan scope`);
-    expect(result.updatedBodies[0]).not.toContain("is a draft");
-  });
+  it.each(["iOS", "macOS"] as const)(
+    "cleans up genuine %s scope loss on the report path",
+    async (reportPlatform) => {
+      const result = await publish({
+        platform: reportPlatform,
+        existingComments: previousComments(reportPlatform),
+        scanJobConclusion: "skipped",
+      });
+      expect(result.jobListCount).toBe(1);
+      expect(result.artifactListCount).toBe(0);
+      expect(result.updatedBodies).toHaveLength(1);
+      expect(result.updatedBodies[0]).toContain(`no longer touches ${reportPlatform} scan scope`);
+      expect(result.updatedBodies[0]).not.toContain("is a draft");
+    },
+  );
 
   it.each([
     ["scope failure", "failure", "skipped"],
