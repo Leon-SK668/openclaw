@@ -91,7 +91,6 @@ suite.define(() => {
         deltaText: interimText,
         message: {
           role: "assistant",
-          phase: "commentary",
           content: [{ type: "text", text: interimText }],
           timestamp: 1,
         },
@@ -103,9 +102,9 @@ suite.define(() => {
         seq: 2,
         state: "delta",
         deltaText: partialFinalText,
+        replace: true,
         message: {
           role: "assistant",
-          phase: "final_answer",
           content: [{ type: "text", text: partialFinalText }],
           timestamp: 2,
         },
@@ -163,7 +162,7 @@ suite.define(() => {
       });
 
       const staleRequest = await gateway.waitForRequest("chat.history", { after: historyCount });
-      expect(staleRequest.params).toMatchObject({ sessionKey, limit: 800 });
+      expect(staleRequest.params).toMatchObject({ sessionKey, limit: 80 });
       // The first authoritative snapshot can promote the same interim text to
       // a durable row before the distinct terminal reply is committed. That
       // identity change is not a recovered final; retry until new content lands.
