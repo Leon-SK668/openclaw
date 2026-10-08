@@ -2,11 +2,6 @@ import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtim
 
 type FtsCanonicalTokenizer = "unicode61" | "trigram";
 
-export type FtsQueryBuilder = (
-  raw: string,
-  canonicalTokenizer?: FtsCanonicalTokenizer,
-) => string | null;
-
 export function tokenizeFtsQuery(raw: string): string[] {
   return normalizeStringEntries(raw.match(/[\p{L}\p{N}_][\p{L}\p{M}\p{N}_]*/gu) ?? []);
 }
@@ -18,64 +13,45 @@ export function buildFtsQuery(
   return buildMatchQueryFromTerms(tokenizeFtsQuery(raw), canonicalTokenizer);
 }
 
-// unicode61 remove_diacritics=1 folds a single mark when its base case-folds to
-// ASCII Latin, plus one-code-point canonical aliases. Preserve all other forms.
-function hasCompatibilityAlias(term: string): boolean {
-  return Array.from(term).some(
-    (character) =>
-      character !== character.normalize("NFC") &&
-      character.normalize("NFC") === character.normalize("NFD"),
-  );
+function simpleCaseFold(character: string): string {
+  const upper = character.toUpperCase();
+  const folded = Array.from(upper).length === 1 ? upper.toLowerCase() : character.toLowerCase();
+  // SQLite folds one code point to one code point. Full case expansions such
+  // as Greek dialytika/tonos must not erase a distinct canonical query form.
+  return Array.from(folded).length === 1 ? folded : character;
 }
 
-function unicode61FoldsCanonicalForms(term: string): boolean {
-  if (hasCompatibilityAlias(term)) {
-    return false;
-  }
-  return Array.from(term.normalize("NFC")).every((character) => {
-    const decomposed = Array.from(character.normalize("NFD"));
-    const base = decomposed[0];
-    if (!base) {
-      return false;
-    }
-    const foldedBase = base.toUpperCase().toLowerCase();
-    if (decomposed.length === 1) {
-      return character.toUpperCase().toLowerCase() === foldedBase;
-    }
-    return (
-      decomposed.length === 2 && /\p{M}/u.test(decomposed[1] ?? "") && /^[a-z]$/u.test(foldedBase)
-    );
-  });
-}
+// Match sqlite3Fts5UnicodeIsdiacritic in SQLite ext/fts5/fts5_unicode2.c.
+// Other combining marks are separators: dropping them can discard a necessary
+// canonical alternative even though MATCH succeeds without finding a row.
+const UNICODE61_DIACRITIC =
+  /[\u0300-\u0304\u0306-\u030c\u030f\u0311\u031b\u0323-\u0328\u032d\u032e\u0330\u0331]/u;
 
 function unicode61TokenizerKey(term: string): string {
-  if (hasCompatibilityAlias(term)) {
-    return `compat:${term}`;
-  }
   let key = "";
-  let followsAsciiBase = false;
   for (const character of term) {
+    if (UNICODE61_DIACRITIC.test(character)) {
+      continue;
+    }
+    if (/\p{M}/u.test(character)) {
+      key += " ";
+      continue;
+    }
     const decomposed = Array.from(character.normalize("NFD"));
     const base = decomposed[0];
-    const foldedBase = base?.toUpperCase().toLowerCase();
+    const foldedBase = base ? simpleCaseFold(base) : undefined;
     if (
       decomposed.length === 2 &&
-      /\p{M}/u.test(decomposed[1] ?? "") &&
+      UNICODE61_DIACRITIC.test(decomposed[1] ?? "") &&
       foldedBase &&
       /^[a-z]$/u.test(foldedBase)
     ) {
       key += foldedBase;
-      followsAsciiBase = true;
       continue;
     }
-    if (/\p{M}/u.test(character) && followsAsciiBase) {
-      continue;
-    }
-    const folded = character.toUpperCase().toLowerCase();
-    key += folded;
-    followsAsciiBase = /^[a-z]$/u.test(folded);
+    key += simpleCaseFold(character);
   }
-  return key;
+  return key.replace(/ +/g, " ").trim();
 }
 
 function canonicalTermForms(term: string, tokenizer?: FtsCanonicalTokenizer): string[] {
@@ -84,7 +60,10 @@ function canonicalTermForms(term: string, tokenizer?: FtsCanonicalTokenizer): st
   }
   const seen = new Set<string>();
   return [term, term.normalize("NFC"), term.normalize("NFD")].filter((form) => {
-    const key = tokenizer === "unicode61" ? unicode61TokenizerKey(form) : form;
+    const key =
+      tokenizer === "unicode61"
+        ? unicode61TokenizerKey(form)
+        : Array.from(form, simpleCaseFold).join("");
     if (seen.has(key)) {
       return false;
     }
@@ -101,10 +80,7 @@ export function buildMatchQueryFromTerms(
     return null;
   }
   const quoted = terms.map((term) => {
-    const forms =
-      canonicalTokenizer === "unicode61" && unicode61FoldsCanonicalForms(term)
-        ? [term]
-        : canonicalTermForms(term, canonicalTokenizer);
+    const forms = canonicalTermForms(term, canonicalTokenizer);
     const alternatives = forms.map((form) => `"${form.replaceAll('"', "")}"`);
     // Alternatives belong to each word: one document can mix NFC and NFD words.
     return alternatives.length === 1 ? alternatives[0] : `(${alternatives.join(" OR ")})`;
@@ -115,7 +91,6 @@ export function buildMatchQueryFromTerms(
 export function planKeywordSearch(params: {
   query: string;
   ftsTokenizer?: "unicode61" | "trigram";
-  buildFtsQuery: FtsQueryBuilder;
   includeCombiningMarks?: boolean;
   canonicalVariants?: boolean;
 }): { matchQuery: string | null; substringTerms: string[] } {
@@ -123,7 +98,7 @@ export function planKeywordSearch(params: {
     ? (params.ftsTokenizer ?? "unicode61")
     : undefined;
   if (params.ftsTokenizer !== "trigram") {
-    const matchQuery = params.buildFtsQuery(params.query, canonicalTokenizer);
+    const matchQuery = buildFtsQuery(params.query, canonicalTokenizer);
     return { matchQuery, substringTerms: [] };
   }
   const tokens = params.includeCombiningMarks

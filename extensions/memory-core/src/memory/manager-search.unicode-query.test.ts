@@ -3,16 +3,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ensureMemoryIndexSchema } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bm25RankToScore, buildFtsQuery } from "./keyword-query.js";
 import { searchKeyword } from "./manager-search.js";
 import { hasTrigramTokenizerForTests } from "./unicode-query.test-support.js";
 
 type Tokenizer = "unicode61" | "trigram";
 type Document = { id: string; text: string; source?: "memory" | "sessions" };
-type SearchOptions = Partial<
-  Pick<Parameters<typeof searchKeyword>[0], "limit" | "sourceFilter" | "buildFtsQuery">
->;
+type SearchOptions = Partial<Pick<Parameters<typeof searchKeyword>[0], "limit" | "sourceFilter">>;
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const hasTrigram = hasTrigramTokenizerForTests();
@@ -61,8 +59,6 @@ async function withSearch(
           limit: 10,
           snippetMaxChars: 200,
           sourceFilter: { sql: "", params: [] },
-          buildFtsQuery,
-          bm25RankToScore,
           ...options,
         }),
       db,
@@ -129,7 +125,7 @@ describe("memory keyword query Unicode forms", () => {
 
   it.for(
     tokenizers.flatMap((tokenizer) =>
-      ["München", "ǽ", "ộ", "café東京", "한국어"].flatMap((word) =>
+      ["München", "ǽ", "ộ", "café東京", "한국어", "Μαΐου"].flatMap((word) =>
         forms.flatMap((stored) => forms.map((query) => ({ tokenizer, word, stored, query }))),
       ),
     ),
@@ -170,6 +166,22 @@ describe("memory keyword query Unicode forms", () => {
       expect((await search("豈")).map((hit) => hit.id)).toEqual(["cjk"]);
     });
   });
+
+  it.for(["re\u0340sume\u0301", "re\u0341sume\u0301", "mu\u0344nchen"])(
+    "retains canonical alternatives for separator mark query %s",
+    async (query) => {
+      await withSearch(
+        "unicode61",
+        [
+          { id: "canonical", text: query.normalize("NFC") },
+          { id: "control", text: "quartz handbook" },
+        ],
+        async (search) => {
+          expect((await search(query)).map((hit) => hit.id)).toEqual(["canonical"]);
+        },
+      );
+    },
+  );
 
   it.for(tokenizers)(
     "does not broaden canonical Latin terms to separator variants with %s",
@@ -278,7 +290,14 @@ describe("memory keyword query Unicode forms", () => {
     { tokenizer: "unicode61" as const, word: "München" },
     { tokenizer: "unicode61" as const, word: "café東京" },
     { tokenizer: "unicode61" as const, word: "caféǽ" },
+    { tokenizer: "unicode61" as const, word: "Kelvin" },
+    { tokenizer: "unicode61" as const, word: "Ωmega" },
+    { tokenizer: "unicode61" as const, word: "α\u0301\u0323" },
+    { tokenizer: "unicode61" as const, word: "re\u0343sume" },
+    { tokenizer: "unicode61" as const, word: "re\u0343\u0343sume" },
     { tokenizer: "trigram" as const, word: "München" },
+    { tokenizer: "trigram" as const, word: "Kelvin" },
+    { tokenizer: "trigram" as const, word: "Ωmega" },
   ])(
     "does not double-count canonical $tokenizer $word phrases",
     async ({ tokenizer, word }, context) => {
@@ -291,15 +310,17 @@ describe("memory keyword query Unicode forms", () => {
           { id: "city", text: `${word} weather`.normalize("NFD") },
           { id: "control", text: "quartz handbook" },
         ],
-        async (search) => {
-          const query = word.normalize("NFD");
-          const canonical = await search(query);
-          const literal = await search(query, {
-            buildFtsQuery: (raw) => buildFtsQuery(raw),
-          });
-
-          expect(canonical.map((hit) => hit.id)).toEqual(["city"]);
-          expect(canonical[0]?.textScore).toBe(literal[0]?.textScore);
+        async (search, db) => {
+          const literal = db
+            .prepare(
+              "SELECT bm25(memory_index_chunks_fts) AS rank FROM memory_index_chunks_fts WHERE memory_index_chunks_fts MATCH ?",
+            )
+            .get(buildFtsQuery(word.normalize("NFD"))) as { rank: number };
+          for (const query of new Set([word, word.normalize("NFD")])) {
+            const canonical = await search(query);
+            expect(canonical.map((hit) => hit.id)).toEqual(["city"]);
+            expect(canonical[0]?.textScore).toBe(bm25RankToScore(literal.rank));
+          }
         },
       );
     },
@@ -312,12 +333,17 @@ describe("memory keyword query Unicode forms", () => {
         { id: "city", text: "München weather" },
         { id: "split", text: "Mu nchen weather" },
       ],
-      async (search) => {
-        const hits = await search("München".normalize("NFD"), {
-          buildFtsQuery: () => "BROKEN <<<",
+      async (search, db) => {
+        const prepare = vi.spyOn(db, "prepare").mockImplementationOnce(() => {
+          throw new Error("FTS5 MATCH failed");
         });
-        expect(hits.map((hit) => hit.id)).toEqual(["city"]);
-        expect(hits[0]?.textScore).toBe(0);
+        try {
+          const hits = await search("München".normalize("NFD"));
+          expect(hits.map((hit) => hit.id)).toEqual(["city"]);
+          expect(hits[0]?.textScore).toBe(0);
+        } finally {
+          prepare.mockRestore();
+        }
       },
     );
   });
