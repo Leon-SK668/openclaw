@@ -101,7 +101,6 @@ export {
   ensureModelProviderLocalServiceMock,
   fetchWithSsrFGuardMock,
   managedStreamCleanupRegistrations,
-  mergeModelProviderRequestOverridesMock,
   resolveProviderRequestPolicyConfigMock,
   shouldUseEnvHttpProxyForUrlMock,
   withTrustedEnvProxyGuardedFetchModeMock,
@@ -131,4 +130,14 @@ export function installProviderTransportFetchTestHooks() {
   afterEach(() => {
     delete process.env.OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS;
   });
+}
+
+export function latestGuardedFetchParams(): Record<string, unknown> {
+  // All transport calls should pass through the SSRF-guarded fetch seam.
+  const calls = fetchWithSsrFGuardMock.mock.calls;
+  const params = calls[calls.length - 1]?.[0];
+  if (!params || typeof params !== "object") {
+    throw new Error("Expected guarded fetch call");
+  }
+  return params;
 }

@@ -5,14 +5,18 @@ const CONSULT_TRANSCRIPT_SETTLE_MAX_MS = 1_000;
 
 export type UserTranscriptState = {
   partial?: string;
+  partialOwner?: object;
   rawPartial?: string;
   partialUpdatedAt?: number;
   recentFinal?: string;
+  recentFinalOwner?: object;
   recentFinalTimer?: ReturnType<typeof setTimeout>;
   nativeConsultInvocation?: { id: string };
 };
 
-export type NativeConsultTranscript = () => string | undefined;
+type TranscriptSnapshot = { text: string | undefined; owner: object | undefined };
+
+export type NativeConsultTranscript = () => TranscriptSnapshot;
 
 /** Capture before persistence yields; later invocations must not change an earlier question. */
 export function captureNativeConsultTranscript(
@@ -22,12 +26,15 @@ export function captureNativeConsultTranscript(
   const previous = state.nativeConsultInvocation;
   const invocation =
     invocationId.trim() && previous?.id === invocationId ? previous : { id: invocationId };
-  const initial = state.partial ?? state.recentFinal;
+  const read = (): TranscriptSnapshot => ({
+    text: state.partial ?? state.recentFinal,
+    owner: state.partial !== undefined ? state.partialOwner : state.recentFinalOwner,
+  });
+  const initial = read();
   state.nativeConsultInvocation = invocation;
   // Exact replays retain the same marker and normal ASR settling. An empty frozen
   // snapshot is meaningful: never replace it with a later caller's transcript.
-  return () =>
-    state.nativeConsultInvocation === invocation ? (state.partial ?? state.recentFinal) : initial;
+  return () => (state.nativeConsultInvocation === invocation ? read() : initial);
 }
 
 function remainingNativeConsultTranscript(
@@ -43,14 +50,17 @@ function remainingNativeConsultTranscript(
 
 export function consumeNativeConsultTranscript(
   state: UserTranscriptState | undefined,
-  consumed: string | undefined,
+  consumed: TranscriptSnapshot | undefined,
   clearPartial: () => void,
   clearRecentFinal: () => void,
 ): void {
-  if (!state) {
+  if (!state || !consumed?.owner) {
     return;
   }
-  const partial = remainingNativeConsultTranscript(state.partial, consumed);
+  const partial =
+    state.partialOwner === consumed.owner
+      ? remainingNativeConsultTranscript(state.partial, consumed.text)
+      : state.partial;
   if (partial !== state.partial) {
     if (partial) {
       state.partial = partial;
@@ -59,7 +69,12 @@ export function consumeNativeConsultTranscript(
       clearPartial();
     }
   }
-  const final = remainingNativeConsultTranscript(state.recentFinal, consumed);
+  // Repeated words do not establish lineage. Only the admitted ASR buffer or its
+  // finalization may be consumed; an independently replaced final belongs to B.
+  const final =
+    state.recentFinalOwner === consumed.owner
+      ? remainingNativeConsultTranscript(state.recentFinal, consumed.text)
+      : state.recentFinal;
   if (final !== state.recentFinal) {
     if (final) {
       // The original timer still owns expiry; consuming A must not extend B's lifetime.
@@ -99,7 +114,7 @@ export type NativeConsultState = {
   cancellation: Promise<void>;
   readonly cancelled: boolean;
   cancel: () => void;
-  partialUserTranscript?: string;
+  transcript?: TranscriptSnapshot;
 };
 
 type NativeConsultOutcome = { kind: "completed"; result: unknown } | { kind: "cancelled" };

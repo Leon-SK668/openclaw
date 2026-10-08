@@ -1,5 +1,5 @@
 import { isSettingsTakeover } from "../app-navigation.ts";
-import { isSessionRouteId, routeIdFromPath, type RouteId } from "../app-route-paths.ts";
+import { isSessionRouteId, routeIdFromPath } from "../app-route-paths.ts";
 import { desktopPanelLayout } from "../components/desktop/desktop-panel-layout.ts";
 import { browserPanelLayout, terminalPanelLayout } from "../components/dock-panel-layout.ts";
 import { resolveLinkReaderTarget } from "../components/link-reader-target.ts";
@@ -24,7 +24,7 @@ import { isNativeEmbedHost } from "./native-web-chrome.ts";
 import { isBrowserPanelSurfaceAvailable, isDesktopPanelAvailable } from "./panel-availability.ts";
 
 export interface ShellPanelHost {
-  readonly context: ApplicationContext<RouteId> | undefined;
+  readonly context: ApplicationContext | undefined;
   readonly lazyCustomElements: LazyCustomElementRequestController;
   readonly terminalPanelElement: OptionalCustomElement;
   readonly browserPanelElement: OptionalCustomElement;
@@ -94,49 +94,41 @@ export class ShellPanelOwner {
     return isSessionRouteId(locationRouteId ?? this.host.routeState.routeId);
   }
 
-  readonly handleDeferredTerminalToggle = (event: Event): void => {
+  private handleDeferredToggle(panel: "terminal" | "browser", event: Event): void {
     const host = this.host;
     if (this.isSessionRoute()) {
-      rememberSessionPanelToggle("terminal", event);
+      rememberSessionPanelToggle(panel, event);
       return;
     }
-    if (isOptionalElementDefined(host.terminalPanelElement)) {
+    const element = panel === "terminal" ? host.terminalPanelElement : host.browserPanelElement;
+    if (isOptionalElementDefined(element)) {
       return;
     }
     const context = host.context;
     const snapshot = context?.gateway?.snapshot;
     if (
       !snapshot ||
-      !isTerminalAvailable(snapshot, context.config.current.terminalEnabled ?? false)
+      !(panel === "terminal"
+        ? isTerminalAvailable(snapshot, context.config.current.terminalEnabled ?? false)
+        : isBrowserPanelSurfaceAvailable(snapshot))
     ) {
       event.preventDefault();
       return;
     }
     this.requestLazyElement(
-      host.terminalPanelElement,
-      lazyShellEvent(TERMINAL_PANEL_TOGGLE_EVENT, event),
+      element,
+      lazyShellEvent(
+        panel === "terminal" ? TERMINAL_PANEL_TOGGLE_EVENT : BROWSER_PANEL_TOGGLE_EVENT,
+        event,
+      ),
     );
-  };
+  }
 
-  readonly handleDeferredBrowserToggle = (event: Event): void => {
-    const host = this.host;
-    if (this.isSessionRoute()) {
-      rememberSessionPanelToggle("browser", event);
-      return;
-    }
-    if (isOptionalElementDefined(host.browserPanelElement)) {
-      return;
-    }
-    const snapshot = host.context?.gateway?.snapshot;
-    if (snapshot && isBrowserPanelSurfaceAvailable(snapshot)) {
-      this.requestLazyElement(
-        host.browserPanelElement,
-        lazyShellEvent(BROWSER_PANEL_TOGGLE_EVENT, event),
-      );
-    } else {
-      event.preventDefault();
-    }
-  };
+  readonly handleDeferredTerminalToggle = (event: Event): void =>
+    this.handleDeferredToggle("terminal", event);
+
+  readonly handleDeferredBrowserToggle = (event: Event): void =>
+    this.handleDeferredToggle("browser", event);
 
   readonly handleDeferredLinkReaderToggle = (event: Event): void => {
     const host = this.host;

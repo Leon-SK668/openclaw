@@ -1,12 +1,45 @@
 import { gatewayOriginScope } from "@openclaw/gateway-client/browser";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import type { FastMode } from "../../api/types.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
 import { getSafeLocalStorage } from "../../local-storage.ts";
+import type { DraftRemoteProject } from "./project-chip.ts";
 
 const STORAGE_KEY_PREFIX = "openclaw.new-session.preferences.v1:";
 const IDENTITY_KEY_PREFIX = "new-session.v1:";
 export const PREFS_MIGRATION_KEY = "new-session.migration.v1";
+// users.prefs is already authenticated-user and Gateway scoped. Null deletes this key.
+export const PALETTE_PREFERENCE_KEY = "new-session.palette.v1";
+
+export type PaletteSessionPreference = {
+  agentId: string;
+  selection: NewSessionPreference;
+};
+
+export function decodePalettePreference(value: unknown): PaletteSessionPreference | null {
+  if (!isRecord(value) || typeof value.agentId !== "string" || !value.agentId.trim()) {
+    return null;
+  }
+  const selection = normalizePreference(value.selection);
+  if (!selection || !isRecord(value.selection)) {
+    return null;
+  }
+  // Empty placement fields are explicit overrides, not permission to inherit a /new choice.
+  for (const key of ["folder", "projectId", "baseRef"] as const) {
+    const field = value.selection[key];
+    if (typeof field === "string") {
+      selection[key] = field.trim();
+    }
+  }
+  // The palette owns placement knobs; model/thinking continue to follow ordinary defaults.
+  delete selection.model;
+  delete selection.agentRuntime;
+  delete selection.thinkingLevel;
+  delete selection.fastMode;
+  delete selection.worktreeName;
+  return { agentId: normalizeAgentId(value.agentId), selection };
+}
 
 export type NewSessionWhere =
   | { kind: "local" }
@@ -33,6 +66,8 @@ export type NewSessionPreference = {
   folder?: string;
   where?: NewSessionWhere;
   projectId?: string;
+  remoteProject?: DraftRemoteProject | null;
+  defaultRepositoryOptOut?: boolean;
   worktree?: boolean;
   freshWorkspace?: boolean;
   baseRef?: string;
@@ -40,7 +75,16 @@ export type NewSessionPreference = {
   model?: string;
   agentRuntime?: string;
   thinkingLevel?: string;
+  fastMode?: FastMode;
 };
+
+export function hasNewSessionModelPreference(
+  preference: NewSessionPreference | null | undefined,
+): preference is NewSessionPreference {
+  return Boolean(
+    preference?.model || preference?.thinkingLevel || preference?.fastMode !== undefined,
+  );
+}
 
 export function resolveNewSessionFolderPreference(
   preference: NewSessionPreference | null,
@@ -92,6 +136,13 @@ function normalizePreference(value: unknown): NewSessionPreference | null {
   if (preference.model && agentRuntime) {
     preference.agentRuntime = agentRuntime;
   }
+  if (
+    typeof value.fastMode === "boolean" ||
+    value.fastMode === "auto" ||
+    value.fastMode === "ultrafast"
+  ) {
+    preference.fastMode = value.fastMode;
+  }
   if (typeof value.worktree === "boolean") {
     preference.worktree = value.worktree;
   }
@@ -101,10 +152,38 @@ function normalizePreference(value: unknown): NewSessionPreference | null {
     // Preserve the legacy source choice before Git discovery clears worktree availability.
     preference.freshWorkspace = false;
   }
+  if (typeof value.defaultRepositoryOptOut === "boolean") {
+    preference.defaultRepositoryOptOut = value.defaultRepositoryOptOut;
+  }
+  if (value.remoteProject === null) {
+    preference.remoteProject = null;
+  } else if (isRecord(value.remoteProject)) {
+    const identity = normalizeOptionalString(value.remoteProject.identity)?.slice(0, 200);
+    const cloneUrl = normalizeOptionalString(value.remoteProject.cloneUrl)?.slice(0, 2048);
+    const defaultBranch = normalizeOptionalString(value.remoteProject.defaultBranch)?.slice(0, 255);
+    if (identity && cloneUrl) {
+      preference.remoteProject = {
+        identity,
+        cloneUrl,
+        ...(defaultBranch ? { defaultBranch } : {}),
+      };
+    }
+  }
   const where = normalizeWhere(value.where);
   if (where) {
     preference.where = where;
   }
+  return Object.keys(preference).length ? preference : null;
+}
+
+/** Browser-origin fallback is shared by people; remote choices belong to authenticated users.prefs. */
+function normalizeBrowserPreference(value: unknown): NewSessionPreference | null {
+  const preference = normalizePreference(value);
+  if (!preference) {
+    return null;
+  }
+  delete preference.remoteProject;
+  delete preference.defaultRepositoryOptOut;
   return Object.keys(preference).length ? preference : null;
 }
 
@@ -142,7 +221,7 @@ export function loadNewSessionPreference(
   if (!storage || !gatewayUrl || !normalizedAgentId) {
     return null;
   }
-  return normalizePreference(readStore(storage, gatewayUrl).agents?.[normalizedAgentId]);
+  return normalizeBrowserPreference(readStore(storage, gatewayUrl).agents?.[normalizedAgentId]);
 }
 
 export function loadBrowserPreferences(gatewayUrl: string): Record<string, NewSessionPreference> {
@@ -153,7 +232,7 @@ export function loadBrowserPreferences(gatewayUrl: string): Record<string, NewSe
   const entries = Object.entries(readStore(storage, gatewayUrl).agents ?? {}).flatMap(
     ([agentId, value]) => {
       const normalizedAgentId = normalizeAgentId(agentId);
-      const preference = normalizePreference(value);
+      const preference = normalizeBrowserPreference(value);
       return normalizedAgentId && preference ? [[normalizedAgentId, preference] as const] : [];
     },
   );
@@ -196,8 +275,13 @@ export function replaceBrowserPreference(
     return false;
   }
   const store = readStore(storage, gatewayUrl);
-  const agents = { ...store.agents };
-  const normalized = normalizePreference(preference);
+  const agents = Object.fromEntries(
+    Object.entries(store.agents ?? {}).flatMap(([id, value]) => {
+      const safe = normalizeBrowserPreference(value);
+      return safe ? [[id, safe]] : [];
+    }),
+  );
+  const normalized = normalizeBrowserPreference(preference);
   if (normalized) {
     agents[normalizedAgentId] = normalized;
   } else {

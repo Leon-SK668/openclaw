@@ -6,7 +6,6 @@ import {
 } from "openclaw/plugin-sdk/realtime-voice";
 import { describe, expect, it, vi } from "vitest";
 import { withTimeout } from "../websocket-test-support.js";
-import { WebSocket } from "../websocket.js";
 import {
   connectCarrierStream,
   createBridge,
@@ -65,7 +64,7 @@ async function withConsultHarness(
     }
     return { text: `ANSWER FOR: ${question}` };
   });
-  const { server, ws } = await connectCarrierStream(handler);
+  const { ws } = await connectCarrierStream(handler);
   try {
     ws.send(
       JSON.stringify({
@@ -107,18 +106,8 @@ async function withConsultHarness(
   } finally {
     workingGate.resolve();
     gate.resolve();
-    try {
-      await withTimeout(Promise.allSettled(pending));
-    } finally {
-      if (ws.readyState !== WebSocket.CLOSED) {
-        ws.terminate();
-      }
-      try {
-        await handler.close();
-      } finally {
-        await server.close();
-      }
-    }
+    // The carrier fixture owns socket/handler/server teardown via onTestFinished.
+    await withTimeout(Promise.allSettled(pending));
   }
 }
 
@@ -218,6 +207,34 @@ describe("native consult invocation identity", () => {
         },
         { holdWorking: true },
       );
+    },
+  );
+
+  it.each([false, true])(
+    "retains an independently finalized repeated request (extended=%s)",
+    async (extended) => {
+      await withConsultHarness(async ({ transcript, consult, dispatched, results, release }) => {
+        const firstQuestion =
+          "Please inspect the first dataset and return its annual sales report.";
+        const nextQuestion = extended
+          ? `${firstQuestion} Include the revised figures in this separate request.`
+          : firstQuestion;
+        transcript(firstQuestion, true);
+        const first = consult("final-A", { question: "report" });
+        await vi.waitFor(() => expect(dispatched).toEqual([firstQuestion]));
+        transcript(nextQuestion, true);
+        await consult("final-B", { question: "report" });
+        expect(finalResults(results, "final-B")).toEqual([
+          expect.objectContaining({ status: "busy", started: false, retryable: true }),
+        ]);
+        release();
+        await first;
+        await consult("final-B-retry", { question: "report" });
+        expect(dispatched).toEqual([firstQuestion, nextQuestion]);
+        expect(finalResults(results, "final-B-retry")).toEqual([
+          { text: `ANSWER FOR: ${nextQuestion}` },
+        ]);
+      });
     },
   );
 

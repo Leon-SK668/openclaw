@@ -1,10 +1,15 @@
 import { initialState, Task, TaskStatus } from "@lit/task";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ReactiveControllerHost } from "lit";
+import { readOfflineStorageScope } from "../../app/boot-record.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { t } from "../../i18n/index.ts";
 import { registerNewSessionSetupEnglish } from "../../i18n/locales/en-new-session-setup.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
+import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
+import { canReadSystemInfo, readSystemInfo } from "../../lib/system-info.ts";
+import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import * as catalog from "./catalog-target.ts";
 import { CLOUD_PROFILE_RETRY_DELAYS_MS } from "./cloud-profile-discovery.ts";
 import { requestPlaceCatalog } from "./cloud-target.ts";
@@ -13,9 +18,12 @@ import {
   DraftPreferenceState,
   type SubmittedWorktreePreference,
 } from "./draft-preference-state.ts";
-import { discoverGatewayName } from "./gateway-name-discovery.ts";
 import type { NewSessionRouteData } from "./location.ts";
-import type { NewSessionPreference } from "./preferences.ts";
+import {
+  acquirePaletteIdentityPreferences,
+  type PaletteIdentityPreferences,
+} from "./palette-identity-preferences.ts";
+import type { NewSessionPreference, PaletteSessionPreference } from "./preferences.ts";
 import {
   resolveSubmissionOutcomeReason,
   type SubmissionOutcomeReason,
@@ -42,7 +50,12 @@ type DraftGatewaySnapshot = Readonly<{
   runtimeId: string;
 }>;
 
-type DraftGatewayCallbacks = {
+export type DraftPreferenceOptions = {
+  preferenceScope?: "palette";
+  readPalettePreference?: () => PaletteSessionPreference | null;
+};
+
+type DraftGatewayCallbacks = DraftPreferenceOptions & {
   requestUpdate: () => void;
   updateComplete: () => Promise<unknown>;
   onInvalidate: (resetHostSelection: boolean, outcome: SubmissionOutcomeReason) => void;
@@ -75,6 +88,8 @@ export class DraftGatewayState {
   private cloudProfileRefresh: Promise<void> | null = null;
   private cloudProfileRetryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private readonly preferences: DraftPreferenceState;
+  private identityPreferences: PaletteIdentityPreferences | undefined;
+  private stopPreferences: (() => void) | undefined;
 
   private readonly gatewayNameTask: Task<readonly unknown[], string>;
   private readonly cloudProfileTask: Task<
@@ -105,14 +120,35 @@ export class DraftGatewayState {
     this.gatewayNameTask = new Task(host, {
       args: () =>
         [
-          this.read().isConnected && this.gatewayConnectedValue ? this.gatewayClientValue : null,
-          isGatewayMethodAdvertised(this.read().context?.gateway.snapshot ?? {}, "system.info") ===
-            true,
+          this.read().isConnected && this.gatewayConnectedValue ? this.gatewaySource : null,
+          canReadSystemInfo(this.read().context?.gateway.snapshot) &&
+            document.visibilityState !== "hidden",
           this.gatewayConnectionEpochValue,
         ] as const,
-      task: ([client, advertised, _connectionEpoch], { signal }) =>
-        discoverGatewayName(client, advertised, signal),
+      task: async ([gateway, available, _connectionEpoch], { signal }) => {
+        if (!gateway || !available) {
+          return "";
+        }
+        try {
+          const { value: result } = await readSystemInfo(gateway, signal, { fresh: true });
+          return (
+            normalizeOptionalString(result.machineName) ??
+            normalizeOptionalString(result.hostname)?.split(".", 1)[0] ??
+            ""
+          );
+        } catch {
+          return "";
+        }
+      },
     });
+    // Shared system reads pause in background tabs; visibility must wake this one-shot task.
+    new SubscriptionsController(host).watch(
+      () => document,
+      (source, notify) => {
+        source.addEventListener("visibilitychange", notify);
+        return () => source.removeEventListener("visibilitychange", notify);
+      },
+    );
     this.cloudProfileTask = new Task(host, {
       args: () =>
         [
@@ -206,7 +242,7 @@ export class DraftGatewayState {
   }
 
   get preferenceLoading(): boolean {
-    return this.preferences.loading;
+    return this.preferences.loading || this.identityPreferences?.mode === "loading";
   }
 
   resolvedGroupCategory(): string | undefined {
@@ -265,7 +301,7 @@ export class DraftGatewayState {
     // Delaying this binding revokes live starts and lets reconnects replay under the old scope.
     const recoveryScope = connected
       ? (snapshot.hello?.auth?.recoveryScope ?? "")
-      : this.gatewayRecoveryScopeValue;
+      : (readOfflineStorageScope({ client: snapshot.client }) ?? "");
     const recoveryScopeChanged = !firstBind && this.gatewayRecoveryScopeValue !== recoveryScope;
     this.gatewaySource = gateway;
     this.gatewayClientValue = snapshot.client;
@@ -309,7 +345,7 @@ export class DraftGatewayState {
       ) {
         this.callbacks.onPendingPlacementReset();
       }
-      if (connected && snapshot.client?.recoveryScopeReady) {
+      if (recoveryScope && (!connected || snapshot.client?.recoveryScopeReady)) {
         this.callbacks.onRecoveryReady(this.gatewayUrlValue, this.gatewayRecoveryScopeValue);
       }
     }
@@ -322,6 +358,7 @@ export class DraftGatewayState {
       }
     }
     this.preferences.synchronize();
+    this.synchronizeIdentityPreferences(snapshot.selfUser?.id);
     this.callbacks.requestUpdate();
   }
 
@@ -432,8 +469,52 @@ export class DraftGatewayState {
       });
   };
 
-  readPreference(agentId: string) {
-    return this.preferences.readPreference(agentId);
+  get preferenceState(): PaletteIdentityPreferences | undefined {
+    return this.identityPreferences;
+  }
+
+  savePalettePreference(preference: PaletteSessionPreference | null): Promise<boolean> {
+    const state = this.identityPreferences;
+    const snapshot = this.read().context?.gateway.snapshot;
+    const client = snapshot?.client;
+    const hello = snapshot?.hello;
+    const profileId = snapshot?.selfUser?.id;
+    const gatewayUrl = this.gatewayUrlValue;
+    return (
+      state?.setPalettePreference(
+        preference,
+        () =>
+          this.identityPreferences === state &&
+          this.gatewayConnectedValue &&
+          this.read().context?.gateway.snapshot.client === client &&
+          this.read().context?.gateway.snapshot.hello === hello &&
+          this.read().context?.gateway.snapshot.selfUser?.id === profileId &&
+          this.read().context?.gateway.connection.gatewayUrl === gatewayUrl,
+      ) ?? Promise.resolve(false)
+    );
+  }
+
+  readPreference(agentId: string): NewSessionPreference | null {
+    const snapshot = this.read();
+    if (
+      catalog.isTarget(snapshot.data) ||
+      snapshot.data?.group ||
+      snapshot.pendingPlacement.sessionKey
+    ) {
+      return null;
+    }
+    const ordinary = this.preferences.readPreference(agentId);
+    if (this.callbacks.preferenceScope !== "palette") {
+      return ordinary;
+    }
+    const palette = this.callbacks.readPalettePreference?.();
+    // Name is one-use input belonging to the foreground draft, not a default
+    // the lightweight launcher can silently borrow or consume.
+    return {
+      ...ordinary,
+      ...(palette?.agentId === normalizeAgentId(agentId) ? palette.selection : {}),
+      worktreeName: "",
+    };
   }
 
   capturePreferenceConsumption(
@@ -441,15 +522,24 @@ export class DraftGatewayState {
     workspace: string,
     expected: SubmittedWorktreePreference,
   ) {
+    if (this.callbacks.preferenceScope === "palette") {
+      return undefined;
+    }
     return this.preferences.capturePreferenceConsumption(agentId, workspace, expected);
   }
 
   persistPreference(agentId: string, workspace: string, patch: NewSessionPreference) {
+    if (this.callbacks.preferenceScope === "palette") {
+      return;
+    }
     return this.preferences.persistPreference(agentId, workspace, patch);
   }
 
   disconnect() {
     this.preferences.disconnect();
+    this.stopPreferences?.();
+    this.stopPreferences = undefined;
+    this.identityPreferences = undefined;
     this.cloudProfileRefresh = null;
     this.gatewaySource = null;
     this.gatewayClientValue = null;
@@ -511,5 +601,51 @@ export class DraftGatewayState {
         void this.cloudProfileTask.run();
       }
     }, delayMs);
+  }
+
+  private synchronizeIdentityPreferences(profileId: string | undefined) {
+    const client = this.gatewayConnectedValue ? this.gatewayClientValue : null;
+    const context = this.read().context;
+    const hello = context?.gateway.snapshot.hello;
+    const advertised =
+      context &&
+      isGatewayMethodAdvertised(context.gateway.snapshot, "users.prefs.get") === true &&
+      isGatewayMethodAdvertised(context.gateway.snapshot, "users.prefs.set") === true;
+    const preferences =
+      this.callbacks.preferenceScope === "palette" && client && hello && profileId && advertised
+        ? acquirePaletteIdentityPreferences({
+            client,
+            hello,
+            profileId,
+            gatewayUrl: this.gatewayUrlValue,
+          })
+        : undefined;
+    if (preferences === this.identityPreferences) {
+      return;
+    }
+    this.stopPreferences?.();
+    this.stopPreferences = undefined;
+    this.identityPreferences = preferences;
+    if (!preferences) {
+      return;
+    }
+    const notify = () => {
+      if (this.identityPreferences !== preferences) {
+        return;
+      }
+      this.callbacks.requestUpdate();
+    };
+    this.stopPreferences = preferences.subscribe(
+      notify,
+      () =>
+        this.identityPreferences === preferences &&
+        this.gatewayConnectedValue &&
+        this.read().context?.gateway.snapshot.client === client &&
+        this.read().context?.gateway.snapshot.hello === hello &&
+        this.read().context?.gateway.connection.gatewayUrl === this.gatewayUrlValue,
+    );
+    if (preferences.mode !== "loading") {
+      notify();
+    }
   }
 }

@@ -21,6 +21,7 @@ import { createRequireRecord } from "../../../test/helpers/record.js";
 import { COMMUNITY_INVITE_KEY } from "../components/community-invite-state.ts";
 import { waitForControlUiGatewayReady } from "../test-helpers/control-ui-e2e-readiness.ts";
 import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
+import { enterControlUiSession } from "../test-helpers/control-ui-session-entry.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const requireRecord = createRequireRecord("record", "expected-object-value");
@@ -30,9 +31,9 @@ const commonMatchCount = 30;
 const commonQuery = "orchardglow";
 const uniqueQuery = "copperfinch";
 const targetKey = "agent:fifth:search-proof-12345678-0000-4000-8000-000000000001";
-const targetLabel = "Older fifth-agent conversation";
+const targetLabel = "Per-session communication controls in UI";
 const targetMessage =
-  "The copperfinch observatory has a violet lantern beside the northern window.";
+  "The copperfinch observatory uses cross-agent message routing beside the violet lantern.";
 const scope = {
   includeGlobal: false,
   includeUnknown: false,
@@ -40,6 +41,7 @@ const scope = {
   excludeSubagents: true,
   excludeCron: true,
   excludeSystem: true,
+  excludeDock: true,
 };
 const captureEnabled = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1";
 let instance: OpenClawTestInstance | undefined;
@@ -94,7 +96,11 @@ async function seedSessions(owner: OpenClawTestInstance, config: OpenClawConfig)
   ];
   // Prepare canonical SQLite entries and synchronously indexed message appends
   // before the child starts, so its resident projection sees the complete corpus.
-  for (const fixture of fixtures) {
+  // The database owner retains one idle writer; finish each agent before switching.
+  const fixturesByAgent = fixtures.toSorted(
+    (left, right) => agentIds.indexOf(left.agentId) - agentIds.indexOf(right.agentId),
+  );
+  for (const fixture of fixturesByAgent) {
     const sessionId = randomUUID();
     const target = { agentId: fixture.agentId, sessionKey: fixture.key, env: owner.env };
     const created = await createSessionEntryWithTranscript(
@@ -106,7 +112,21 @@ async function seedSessions(owner: OpenClawTestInstance, config: OpenClawConfig)
           updatedAt: fixture.updatedAt,
           label: fixture.label,
           visibility: "shared",
-          createdActor: { type: "human", source: "profile", id: profile.id },
+          ...(fixture.key === targetKey
+            ? {
+                category: "HOME ASSISTANT",
+                spawnedBy: "agent:main:search-roster-0",
+                parentSessionKey: "agent:main:search-roster-0",
+                createdVia: "spawn" as const,
+                createdActor: { type: "agent" as const, id: "main" },
+              }
+            : {
+                createdActor: {
+                  type: "human" as const,
+                  source: "profile" as const,
+                  id: profile.id,
+                },
+              }),
         },
       }),
       { cwd: owner.state.workspaceDir },
@@ -171,11 +191,14 @@ const suite = createControlUiE2eSuite({
           controlUi: { enabled: true },
         },
         cron: { enabled: false },
+        // Core search proof must not depend on external plugin catalog refreshes.
+        plugins: { enabled: false },
         agents: {
           ownership: "explicit",
           defaults: {
             workspace: owner.state.workspaceDir,
             model: "fixture/search-model",
+            modelPolicy: { allow: ["fixture/*"] },
             heartbeat: { every: "0m" },
           },
           entries: Object.fromEntries(
@@ -255,7 +278,16 @@ function observeSearchTraffic(page: Page, rpc: RpcObservation[]) {
         return;
       }
       // Never retain connect/auth frames or unrelated RPC payloads.
-      if (!["sessions.search", "sessions.list", "chat.send", "agent"].includes(frame.method)) {
+      if (
+        ![
+          "sessions.search",
+          "sessions.list",
+          "sessions.create",
+          "sessions.patch",
+          "chat.send",
+          "agent",
+        ].includes(frame.method)
+      ) {
         return;
       }
       const metric: RpcObservation = {
@@ -297,7 +329,7 @@ function observeSearchTraffic(page: Page, rpc: RpcObservation[]) {
 }
 
 suite.define(() => {
-  it("finds an older fifth-agent message beyond the roster and treats a full result page as success", async () => {
+  it("finds a grouped spawned conversation beyond the roster and treats a full result page as success", async () => {
     if (!instance) {
       throw new Error("Gateway fixture is not running");
     }
@@ -311,12 +343,12 @@ suite.define(() => {
     try {
       // Gateway readiness precedes background UI preparation. The JSON handoff
       // deliberately fails fast, so await its document prerequisite here.
-      const document = await waitForControlUiDocument({
+      const uiDocument = await waitForControlUiDocument({
         url: suite.server.baseUrl,
         timeoutMs: 60_000,
         onPending: () => console.log("[search-proof] waiting for the preparing UI document"),
       });
-      expect(document.ready, document.ready ? "ready" : document.reason).toBe(true);
+      expect(uiDocument.ready, uiDocument.ready ? "ready" : uiDocument.reason).toBe(true);
       const handoff = await owner.cli(["dashboard", "--json"]);
       const result = requireRecord(JSON.parse(handoff.stdout));
       expect(
@@ -336,7 +368,8 @@ suite.define(() => {
             localStorage.setItem(key, JSON.stringify({ dismissedAtMs: 1770000000000 }));
           }, COMMUNITY_INVITE_KEY);
           observeSearchTraffic(page, rpc);
-          expect((await page.goto(url.href))?.status()).toBe(200);
+          expect((await page.goto(url.href))?.status()).toBe(404);
+          await enterControlUiSession(page);
           await waitForControlUiGatewayReady(page);
           await page.locator(".shell").waitFor({ state: "visible" });
           await expect
@@ -355,7 +388,15 @@ suite.define(() => {
             .evaluateAll((elements) =>
               elements.map((element) => new URL((element as HTMLScriptElement).src).pathname),
             );
-          expect(scripts.some((script) => /\/assets\/index-[^/]+\.js$/u.test(script))).toBe(true);
+          const builtIndex = await readFile(
+            path.join(process.cwd(), "dist/control-ui/index.html"),
+            "utf8",
+          );
+          const builtScripts = [
+            ...builtIndex.matchAll(/<script[^>]+src="(?:\.\/|\/)?(assets\/[^"]+\.js)"/gu),
+          ].map((match) => `/${match[1]}`);
+          expect(builtScripts.length).toBeGreaterThan(0);
+          expect(scripts).toEqual(builtScripts);
           for (const script of scripts) {
             expect(script).toMatch(/^\/assets\/[^/]+\.js$/u);
             const served = await page.request.get(new URL(script, suite.server.baseUrl).href);
@@ -381,10 +422,20 @@ suite.define(() => {
           };
           await page.keyboard.press("ControlOrMeta+K");
           const palette = page.locator(".cmd-palette");
-          const input = palette.getByRole("combobox");
-          const results = palette.getByRole("listbox");
+          const input = palette.getByRole("textbox", {
+            name: "Search or start a task…",
+            exact: true,
+          });
+          const results = palette.locator(".cmd-palette__results");
+          const emptyState = palette.locator(".cmd-palette__no-results");
           await input.waitFor();
-          const search = async (query: string, expectedHits: number, filename: string) => {
+          const search = async (
+            query: string,
+            expectedHits: number,
+            filename: string,
+            metadataKeys: string[] = [],
+          ) => {
+            const noMatches = expectedHits === 0 && metadataKeys.length === 0;
             const start = rpc.length;
             const started = performance.now();
             await input.fill(query);
@@ -397,17 +448,21 @@ suite.define(() => {
               .poll(() => rpc.slice(start).every((entry) => entry.elapsedMs !== undefined))
               .toBe(true);
             await expect.poll(() => results.getAttribute("aria-busy")).toBe("false");
-            const notices = await palette.getByRole("status").allTextContents();
+            const notices = await palette
+              .locator(".cmd-palette__search")
+              .getByRole("status")
+              .allTextContents();
             const traffic = rpc.slice(start);
             const searches = traffic.filter((entry) => entry.method === "sessions.search");
             // The sidebar can fetch lineage concurrently; identify this query
             // by its metadata-search intent, not by arrival time alone.
             const listRequests = traffic.filter((entry) => entry.method === "sessions.list");
             const metadata = listRequests.filter((entry) => entry.params.search === query);
+            const visibleResults = await results.getByRole("option").count();
             queries.push({
               query,
               elapsedMs: performance.now() - started,
-              visibleResults: await results.getByRole("option").count(),
+              visibleResults,
               searchRequests: searches.length,
               metadataRequests: metadata.length,
               backgroundListRequests: listRequests.length - metadata.length,
@@ -415,7 +470,7 @@ suite.define(() => {
             });
             // Capture the settled state before assertions too, retaining useful
             // before-fix evidence when run against the original regression.
-            await capture(filename, palette, [input, results]);
+            await capture(filename, palette, [input, visibleResults === 0 ? emptyState : results]);
             expect(searches).toHaveLength(1);
             const response = searches[0]!;
             expect(response.params).toEqual({ query, limit: 25, scope });
@@ -428,10 +483,16 @@ suite.define(() => {
             // The query owns one bounded metadata lookup. The scoped transcript
             // request above cannot be limited by any background roster window.
             expect(metadata).toHaveLength(1);
-            expect(metadata[0]?.params).toEqual({ ...scope, search: query, limit: 10 });
+            expect(metadata[0]?.params).toEqual({
+              ...scope,
+              search: query,
+              limit: 10,
+              rowMode: "compact",
+              source: "command-palette",
+            });
             expect(metadata[0]?.ok).toBe(true);
-            expect(metadata[0]?.sessionKeys).toEqual([]);
-            expect(notices).toEqual([]);
+            expect(metadata[0]?.sessionKeys).toEqual(metadataKeys);
+            expect(notices).toEqual(noMatches ? [expect.stringContaining("No results found")] : []);
             expect(
               await palette
                 .getByText(/Search notices|incomplete|unavailable|indexing older/i)
@@ -439,6 +500,19 @@ suite.define(() => {
             ).toBe(0);
             return response;
           };
+
+          await search("per session communi", 0, "00-title-punctuation-prefix.png", [targetKey]);
+          await results.getByRole("option").filter({ hasText: targetLabel }).waitFor();
+          expect(await results.getByRole("option").count()).toBe(1);
+
+          const partial = await search(
+            "cross agent message rout",
+            1,
+            "00-message-punctuation-prefix.png",
+          );
+          expect(partial.resultKeys).toEqual([targetKey]);
+          await results.getByRole("option").filter({ hasText: targetLabel }).waitFor();
+          expect(await results.textContent()).toContain(targetMessage);
 
           const common = await search(commonQuery, 25, "01-common-limited-search.png");
           expect(common.truncated).toBe(true);
@@ -448,6 +522,33 @@ suite.define(() => {
               (key) => typeof key === "string" && key.includes(":search-roster-"),
             ),
           ).toBe(true);
+
+          await search(targetLabel, 0, "02-grouped-metadata-match.png", [targetKey]);
+          await results.getByRole("option").filter({ hasText: targetLabel }).click();
+          await input.waitFor({ state: "hidden" });
+          const activePane = () =>
+            page.locator("openclaw-chat-pane.chat-pane-cache__pane--active:not([inert])");
+          await expect
+            .poll(() =>
+              activePane().evaluate(
+                (element) => (element as HTMLElement & { sessionKey: string }).sessionKey,
+              ),
+            )
+            .toBe(targetKey);
+          await activePane()
+            .locator(".chat-thread")
+            .getByText(targetMessage, { exact: true })
+            .waitFor();
+          await page.goBack();
+          await expect
+            .poll(() =>
+              activePane().evaluate(
+                (element) => (element as HTMLElement & { sessionKey: string }).sessionKey,
+              ),
+            )
+            .toBe("agent:main:main");
+          await page.keyboard.press("ControlOrMeta+K");
+          await input.waitFor();
 
           const unique = await search(uniqueQuery, 1, "02-older-fifth-agent-match.png");
           expect(unique.resultKeys).toEqual([targetKey]);
@@ -466,7 +567,9 @@ suite.define(() => {
           const absent = await search("copperfinch absentconstellation", 0, "05-no-match.png");
           expect(absent.truncated).toBe(false);
           expect(await results.getByRole("option").count()).toBe(0);
-          await results.getByText("No results", { exact: true }).waitFor();
+          await emptyState
+            .getByRole("heading", { name: "No results found", exact: true })
+            .waitFor();
 
           await search("copperfinch observatory", 1, "06-selected-search-result.png");
           await results.getByRole("option").filter({ hasText: targetLabel }).click();
@@ -485,11 +588,141 @@ suite.define(() => {
           await capture("07-opened-fifth-agent-transcript.png", pane, [
             pane.locator(".chat-thread"),
           ]);
+
+          const otherKey = "agent:fifth:search-roster-4";
+          await page
+            .locator(
+              `.sidebar-recent-session[data-session-key="${otherKey}"] .sidebar-recent-session__link`,
+            )
+            .click();
+          await expect
+            .poll(() =>
+              activePane().evaluate(
+                (element) => (element as HTMLElement & { sessionKey: string }).sessionKey,
+              ),
+            )
+            .toBe(otherKey);
+          const call = async (method: string, params: Record<string, unknown>) => {
+            const rpcResult = await owner.cli([
+              "gateway",
+              "call",
+              method,
+              "--json",
+              "--params",
+              JSON.stringify(params),
+            ]);
+            expect(rpcResult.code, rpcResult.stderr).toBe(0);
+            return requireRecord(JSON.parse(rpcResult.stdout));
+          };
+          for (const category of ["Research", null, "HOME ASSISTANT"]) {
+            await call("sessions.patch", { key: targetKey, category });
+            const groupRows = page.locator(
+              `[data-session-section^="category:"] [data-session-key="${targetKey}"]`,
+            );
+            await expect.poll(() => groupRows.count()).toBe(category ? 1 : 0);
+            if (category) {
+              await page
+                .locator(
+                  `[data-session-section="category:${category}"] [data-session-key="${targetKey}"]`,
+                )
+                .waitFor({ state: "visible" });
+            }
+            const inventory = await call("sessions.list", {
+              ...scope,
+              search: targetLabel,
+              includePeople: true,
+            });
+            expect(inventory).toMatchObject({
+              totalCount: category ? 1 : 0,
+              peopleSessionCount: category ? 1 : 0,
+            });
+            expect(inventory.owners).toHaveLength(category ? 1 : 0);
+            await page.keyboard.press("ControlOrMeta+K");
+            await input.waitFor();
+            const stage = category?.replaceAll(" ", "-") ?? "ungrouped";
+            await search(
+              targetLabel,
+              0,
+              `category-${stage}-metadata.png`,
+              category ? [targetKey] : [],
+            );
+            await search(uniqueQuery, category ? 1 : 0, `category-${stage}-transcript.png`);
+            await page.keyboard.press("Escape");
+            await input.waitFor({ state: "hidden" });
+          }
           expect(rpc.filter((metric) => metric.method === "sessions.search")).toHaveLength(
             queries.length,
           );
           expect(
             rpc.filter((metric) => metric.method === "chat.send" || metric.method === "agent"),
+          ).toEqual([]);
+          // Cover the agreed direct shortcuts against the same isolated real Gateway.
+          // The existing capture gate exports these sanitized views on manual proof runs.
+          const currentPane = activePane();
+          await capture("direct-01-before.png", currentPane, [currentPane.locator(".chat-thread")]);
+          await page.keyboard.press("ControlOrMeta+/");
+          const helper = page.locator("openclaw-keyboard-shortcuts-dialog");
+          const newHint = helper.locator(".shortcut-row").filter({ hasText: "Open New Session" });
+          const archiveHint = helper
+            .locator(".shortcut-row")
+            .filter({ hasText: "Archive current session" });
+          await newHint.waitFor({ state: "visible" });
+          await archiveHint.waitFor({ state: "visible" });
+          expect((await newHint.locator("kbd").allTextContents()).at(-1)).toBe("O");
+          expect((await archiveHint.locator("kbd").allTextContents()).at(-1)).toBe("A");
+          // The host is display: contents; the native dialog owns the opening animation.
+          await capture("direct-02-keyboard-helper.png", helper.locator("dialog"), [
+            newHint,
+            archiveHint,
+          ]);
+          await page.keyboard.press("Escape");
+          await newHint.waitFor({ state: "hidden" });
+          await page.keyboard.press("ControlOrMeta+Shift+O");
+          const draft = page.locator("openclaw-new-session-page .new-session-page__message");
+          await draft.waitFor({ state: "visible" });
+          await expect
+            .poll(() => draft.evaluate((element) => element === document.activeElement))
+            .toBe(true);
+          expect(await draft.inputValue()).toBe("");
+          await capture("direct-03-new-session.png", page.locator("openclaw-new-session-page"), [
+            draft,
+          ]);
+          await page.goBack();
+          await expect
+            .poll(() =>
+              currentPane.evaluate(
+                (element) => (element as HTMLElement & { sessionKey: string }).sessionKey,
+              ),
+            )
+            .toBe(otherKey);
+          const composer = currentPane.locator(".agent-chat__composer-combobox > textarea");
+          await composer.fill("Keep this unsent shortcut draft");
+          await capture("direct-04-archive-before.png", currentPane, [composer]);
+          await page.keyboard.press("ControlOrMeta+Shift+A");
+          const archiveRequests = (archived: boolean) =>
+            rpc.filter(
+              (metric) =>
+                metric.method === "sessions.patch" &&
+                metric.params.key === otherKey &&
+                metric.params.archived === archived,
+            );
+          await expect
+            .poll(() => archiveRequests(true).filter((metric) => metric.ok === true).length)
+            .toBe(1);
+          const undo = page.getByRole("button", { name: "Undo", exact: true });
+          await undo.waitFor({ state: "visible" });
+          await capture("direct-05-archive-after.png", currentPane, [
+            currentPane.locator(".chat-thread"),
+          ]);
+          await undo.click();
+          await expect
+            .poll(() => archiveRequests(false).filter((metric) => metric.ok === true).length)
+            .toBe(1);
+          await expect.poll(() => composer.inputValue()).toBe("Keep this unsent shortcut draft");
+          expect(
+            rpc.filter((metric) =>
+              ["sessions.create", "chat.send", "agent"].includes(metric.method),
+            ),
           ).toEqual([]);
         },
       );

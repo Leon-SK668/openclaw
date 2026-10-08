@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { hasUnjoinedWork } from "../../scripts/lib/managed-child-process.mts";
+import { shouldEnableNodeDiagnosticReports } from "../../scripts/lib/node-diagnostic-report.mts";
 import { createVitestResourceOwner } from "../../scripts/lib/vitest-resource-ownership.mts";
 import { createFixtureLifetime } from "../../test/helpers/fixture-lifetime.js";
 import { waitForPidFile } from "../../test/helpers/process-wait.js";
@@ -92,7 +93,7 @@ describe("runCliProcessChild", () => {
       const result = await runCliProcessChild({
         nodeArgs: [
           "-e",
-          "process.stdout.write(JSON.stringify({ output: 'out', maglevDisabled: process.execArgv.includes('--no-maglev') })); process.stderr.write('err'); process.exit(3);",
+          "process.stdout.write(JSON.stringify({ output: 'out', maglevDisabled: process.execArgv.includes('--no-maglev'), concurrentSparkplugDisabled: process.execArgv.includes('--no-concurrent-sparkplug') })); process.stderr.write('err'); process.exit(3);",
         ],
         env: {
           ...process.env,
@@ -107,6 +108,7 @@ describe("runCliProcessChild", () => {
         stdout: JSON.stringify({
           output: "out",
           maglevDisabled: !process.versions.bun && !enableMaglev,
+          concurrentSparkplugDisabled: !process.versions.bun,
         }),
         stderr: "err",
       });
@@ -123,7 +125,7 @@ describe("runCliProcessChild", () => {
           "process.stdout.write('partial');",
           "globalThis.pending = new Promise(() => {});",
           "require('node:net').createServer().listen(0, '127.0.0.1');",
-          "process.on('SIGUSR2', () => process.stderr.write('x'.repeat(8_100) + '\\nlast-stderr-line\\n'));",
+          "process.on('SIGQUIT', () => process.stderr.write('x'.repeat(8_100) + '\\nlast-stderr-line\\n'));",
           "setInterval(() => {}, 1_000);",
         ].join("\n"),
       ],
@@ -135,10 +137,9 @@ describe("runCliProcessChild", () => {
         runningChild.stdin.end();
       },
     });
-    const reportCleanup =
-      process.platform !== "win32" && !process.versions.bun
-        ? (reportCleanupHooks.afterEach[0] ?? reportCleanupHooks.finished[firstFinishedHook]!)()
-        : undefined;
+    const reportCleanup = shouldEnableNodeDiagnosticReports()
+      ? (reportCleanupHooks.afterEach[0] ?? reportCleanupHooks.finished[firstFinishedHook]!)()
+      : undefined;
     const failure = await childRun.catch((error: unknown) => error);
     await reportCleanup;
 
@@ -148,7 +149,7 @@ describe("runCliProcessChild", () => {
     expect(child?.stderr.closed).toBe(true);
     expect(failure).toBeInstanceOf(Error);
     expect(String(failure)).toMatch(/500ms deadlock guard[\s\S]*partial/u);
-    if (process.platform !== "win32" && !process.versions.bun) {
+    if (shouldEnableNodeDiagnosticReports()) {
       expect(String(failure)).toContain('"Timeout":1');
       expect(String(failure)).toContain('"activeHandles"');
       expect(String(failure)).toMatch(/"pendingPromises":\{"tracked":[1-9]/u);
@@ -169,7 +170,7 @@ describe("runCliProcessChild", () => {
     }
   });
 
-  it.skipIf(process.platform === "win32" || Boolean(process.versions.bun))(
+  it.skipIf(!shouldEnableNodeDiagnosticReports())(
     "arms reports without producing one for a normally exiting child",
     async () => {
       const result = await runCliProcessChild({
@@ -187,32 +188,53 @@ describe("runCliProcessChild", () => {
     },
   );
 
-  it.skipIf(process.platform === "win32" || Boolean(process.versions.bun))(
+  it.skipIf(!shouldEnableNodeDiagnosticReports())(
     "keeps a timeout failure when the child exits during diagnostic grace",
     async () => {
       await expect(
         runCliProcessChild({
           nodeArgs: [
             "-e",
-            "process.on('SIGUSR2', () => process.exit(0)); setInterval(() => {}, 1_000);",
+            "process.on('SIGQUIT', () => process.exit(0)); setInterval(() => {}, 1_000);",
           ],
           env: process.env,
           timeoutMs: 500,
         }),
-      ).rejects.toThrow(/500ms deadlock guard[\s\S]*received/u);
+      ).rejects.toThrow(
+        /500ms deadlock guard[\s\S]*Child diagnostics: SIGQUIT requested;[^\n]*; received\./u,
+      );
     },
   );
 
-  it.skipIf(process.platform === "win32" || Boolean(process.versions.bun))(
-    "bounds diagnostics when the child's event loop cannot handle the signal",
-    async () => {
-      await expect(
-        runCliProcessChild({
-          nodeArgs: ["-e", "process.stdout.write('blocked'); while (true) {}"],
-          env: process.env,
-          timeoutMs: 500,
-        }),
-      ).rejects.toThrow(/500ms deadlock guard[\s\S]*no response[\s\S]*blocked/u);
+  it.skipIf(process.platform === "win32").each([
+    { label: "busy", block: "while (true) {}", state: "R" },
+    { label: "stopped", block: "process.kill(process.pid, 'SIGSTOP')", state: "T" },
+  ])(
+    "captures OS state when the child is $label and cannot answer signals",
+    async ({ block, state }) => {
+      let pid: number | undefined;
+      const failure = await runCliProcessChild({
+        nodeArgs: [
+          "-e",
+          `process.title = 'fixture-private-thread'; process.stdout.write('blocked'); ${block}`,
+        ],
+        env: process.env,
+        timeoutMs: 500,
+        interact: (child) => {
+          pid = child.pid;
+          child.stdin.end();
+        },
+      }).catch((error: unknown) => error);
+      expect(String(failure)).toMatch(/500ms deadlock guard[\s\S]*no response[\s\S]*blocked/u);
+      expect(String(failure)).toContain(`root pid=${pid}`);
+      expect(String(failure)).not.toContain("fixture-private");
+      expect(String(failure)).toMatch(new RegExp(`"pid":${pid},"ppid":\\d+,"state":"${state}`));
+      if (process.platform === "linux") {
+        expect(String(failure)).toContain(`"tid":${pid}`);
+        expect(String(failure)).toContain(`"tid":${pid},"role":"main"`);
+        expect(String(failure)).toContain('"stack":');
+        expect(String(failure)).toContain('"wchan":');
+      }
     },
   );
 
@@ -312,9 +334,9 @@ describe("runCliProcessChild", () => {
     expect(child?.stderr.closed).toBe(true);
   });
 
-  it.each(["launcher-alive", "launcher-exited", "finite", "identity-unavailable"])(
+  it.for(["launcher-alive", "launcher-exited", "finite", "identity-unavailable"])(
     "requires inherited output EOF before releasing a detached handoff (%s)",
-    async (shape) => {
+    async (shape, { signal }) => {
       const launcherShape = shape === "identity-unavailable" ? "launcher-alive" : shape;
       const fixture = createFixtureLifetime();
       const root = fixture.createTempDir("cli-inherited-output-");
@@ -344,7 +366,7 @@ describe("runCliProcessChild", () => {
               child = runningChild;
               runningChild.stdin.end();
               identityReady = (async () => {
-                descendantPid = await waitForPidFile(receipt, 5_000);
+                descendantPid = await waitForPidFile(receipt, signal);
                 descendantStart = getFileLockProcessStartTime(descendantPid);
                 if (descendantStart === null) {
                   throw identityFailure;
@@ -382,7 +404,7 @@ describe("runCliProcessChild", () => {
         for (const cleanup of reportCleanupHooks.finished.slice(firstFinishedHook)) {
           await cleanup();
         }
-        if (shape === "finite" || process.platform === "win32" || process.versions.bun) {
+        if (shape === "finite" || !shouldEnableNodeDiagnosticReports()) {
           expect(() => owner.assertReleased()).not.toThrow();
         } else {
           expect(() => owner.assertReleased()).toThrow("Unreleased Vitest resource claim");

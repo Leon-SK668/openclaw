@@ -142,6 +142,11 @@ hashing. Plugin lifecycle operations prepare fresh metadata in their own cache
 generation. Account health and authentication state are not part of the
 immutable package inventory.
 
+Native SDK alias resolution retains each importing file's canonical path, root
+membership, and alias targets in that same generation. Alias registration or
+replacement clears those results, as does metadata invalidation; repeated
+imports do not repeat filesystem canonicalization or containment checks.
+
 The same cache generation prepares installed-index scope lookups, compiled model
 matching patterns, parsed install-record projections, and manifest fingerprints
 once per immutable index. Mutable management indexes remain uncached. Lookup
@@ -171,6 +176,14 @@ registration. Both keys share the existing bounded cache and are removed when
 the registry retires or the load cache is cleared.
 Validation, full registration, and CLI metadata loads have separate cache entries;
 validating a module cannot satisfy a later request for its registrations.
+
+Outbound channel bootstrap remembers successful and unavailable senders within
+the selected plugin cache and metadata scope. Inventory replacement or metadata
+invalidation permits a fresh attempt; repeated deliveries within the same scope
+reuse the outcome without retrying failed registration. A request-scoped channel
+owner still takes precedence over process-root bootstrap outcomes.
+Payload preparation carries the selected sender's directive policy on its handler,
+so one batch resolves its plugin once before parsing and applying channel transforms.
 
 Provider lookup uses an explicit caller workspace first, then the workspace
 recorded by its metadata snapshot, including an explicitly shared-root scope.
@@ -224,6 +237,14 @@ changed artifacts cannot inherit approval for older capabilities. The plugin
 cache releases failed loads, but Node retains failed native ESM evaluations for
 the process lifetime; restarting an account cannot repair that module graph.
 A successful import is shared across consumers.
+
+Document and web-content extraction select callbacks from the current metadata
+scope on each request. A shared config object does not make two inventories
+interchangeable; the plugin cache still reuses their module exports. Public
+artifact adapters carry an explicit environment through both provider selection
+and module loading, including the selected profile's bundled-discovery policy.
+When selection supplies a manifest owner, artifacts resolve from that owner's
+root and entry, preserving source overlays and retained module instances.
 
 Bundled provider policy lookups retain their resolved surface, including absence,
 in the metadata cache. Repeated model-reference canonicalization reuses that
