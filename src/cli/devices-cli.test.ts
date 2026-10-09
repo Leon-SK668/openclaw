@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
 import { registerDevicesCli } from "./devices-cli.js";
+import { ExpectedCliError } from "./failure-output.js";
 
 const mocks = vi.hoisted(() => ({
   runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn(), writeJson: vi.fn() },
@@ -58,6 +59,11 @@ async function refusal(...argv: string[]): Promise<string> {
   if (!(failure instanceof Error)) {
     throw new Error("Expected a devices refusal");
   }
+  expect(failure).toBeInstanceOf(ExpectedCliError);
+  expect(failure).toMatchObject({
+    humanOutput: failure.message,
+    machineOutput: failure.message,
+  });
   expect(runtime.error).not.toHaveBeenCalled();
   expect(runtime.writeJson).not.toHaveBeenCalled();
   expect(runtime.exit).not.toHaveBeenCalled();

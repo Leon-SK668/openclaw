@@ -44,6 +44,7 @@ import {
   type PendingDeviceApprovalKind,
 } from "../shared/device-pairing-access.js";
 import { formatCliCommand } from "./command-format.js";
+import { ExpectedCliError } from "./failure-output.js";
 import { callGatewayFromCliWithTransport } from "./gateway-rpc.js";
 import { formatConnectionFlagReminder } from "./nodes-cli/cli-utils.js";
 import { formatPairingApproveCommand } from "./pairing-command-format.js";
@@ -676,7 +677,8 @@ function formatAuthFlagReminder(opts: DevicesRpcOpts): string {
 function failDevicesCommand(json: boolean | undefined, ...lines: string[]): void {
   // Throw JSON refusals to the root failure handler so stdout gets its one error document.
   if (json) {
-    throw new Error(lines.join("\n"));
+    const message = lines.join("\n");
+    throw new ExpectedCliError({ message, humanOutput: message, machineOutput: message });
   }
   for (const line of lines) {
     defaultRuntime.error(line);
