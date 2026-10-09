@@ -9,6 +9,7 @@ import {
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { createMemorySearchTool } from "../tools.js";
+import { runInMemoryTestBackgroundContext } from "./background-context.test-support.js";
 import { closeAllMemorySearchManagers, getMemorySearchManager } from "./index.js";
 import { hasTrigramTokenizerForTests } from "./unicode-query.test-support.js";
 import "./test-runtime-mocks.js";
@@ -49,7 +50,11 @@ describe("memory manager Unicode query round trip", () => {
         },
         agents: { defaults: { workspace }, entries: { main: {} } },
       } satisfies OpenClawConfig;
-      const result = await getMemorySearchManager({ cfg, agentId: "main" });
+      const result = await getMemorySearchManager({
+        cfg,
+        agentId: "main",
+        runInBackgroundContext: runInMemoryTestBackgroundContext,
+      });
       const manager = result.manager;
       if (!manager?.sync || !manager.close) {
         throw new Error(result.error ?? "Memory manager is unavailable");
@@ -60,6 +65,7 @@ describe("memory manager Unicode query round trip", () => {
           config: cfg,
           agentId: "main",
           agentSessionKey: "agent:main:main",
+          runInBackgroundContext: runInMemoryTestBackgroundContext,
         });
         if (!tool) {
           throw new Error("The configured memory_search tool is unavailable");

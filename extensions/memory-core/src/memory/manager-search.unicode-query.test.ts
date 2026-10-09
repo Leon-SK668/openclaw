@@ -106,7 +106,7 @@ describe("memory keyword query Unicode forms", () => {
 
   it.for(
     tokenizers.flatMap((tokenizer) =>
-      ["München", "ǽ", "ộ", "café東京", "한국어", "Μαΐου"].flatMap((word) =>
+      ["München", "ǽ", "ộ", "café東京", "한국어", "Μαΐου", "\u{11315}\u{1134b}"].flatMap((word) =>
         forms.map((stored) => ({ tokenizer, word, stored })),
       ),
     ),
