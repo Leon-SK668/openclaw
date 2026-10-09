@@ -36,7 +36,7 @@ import {
   type ExecPolicyToolAccess,
   type ExecPolicyShowOptions,
 } from "./exec-policy-diagnostics.js";
-import { rethrowExpectedCliError } from "./failure-output.js";
+import { ExpectedCliError, rethrowExpectedCliError } from "./failure-output.js";
 import { addGatewayClientOptions, resolveGatewayRpcOptionsWithLocalPort } from "./gateway-rpc.js";
 import { formatDocsHelp } from "./help-format.js";
 import { runWithLocalStateOwner } from "./local-state-owner.js";
@@ -100,7 +100,13 @@ async function runExecPolicyAction(
     // The root failure handler owns the JSON envelope; exiting here would leave stdout empty.
     if (opts.json) {
       rethrowExpectedCliError(err);
-      throw new Error(message, { cause: err });
+      const failure = new ExpectedCliError({
+        message,
+        humanOutput: message,
+        machineOutput: message,
+      });
+      failure.cause = err;
+      throw failure;
     }
     defaultRuntime.error(message);
     defaultRuntime.exit(1);

@@ -762,6 +762,8 @@ describe("exec-policy CLI", () => {
   ])("delegates JSON failure for $name to the root handler", async ({ args, message }) => {
     await expect(runExecPolicyCommand(["exec-policy", ...args, "--json"])).rejects.toMatchObject({
       message,
+      humanOutput: message,
+      machineOutput: message,
       cause: expect.any(Error),
     });
 
@@ -785,6 +787,10 @@ describe("exec-policy CLI", () => {
       throw new Error("Expected the command to propagate its failure");
     }
     expect(error.message).toBe("Config read failed\\nforged");
+    expect(error).toMatchObject({
+      humanOutput: error.message,
+      machineOutput: error.message,
+    });
     expect(error.cause).toBe(cause);
     expect(mocks.defaultRuntime.error).not.toHaveBeenCalled();
     expect(mocks.defaultRuntime.exit).not.toHaveBeenCalled();
