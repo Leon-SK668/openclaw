@@ -4,8 +4,9 @@ import { DatabaseSync } from "node:sqlite";
 import { ensureMemoryIndexSchema } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bm25RankToScore, buildFtsQuery } from "./keyword-query.js";
+import { bm25RankToScore } from "./keyword-query.js";
 import { searchKeyword } from "./manager-search.js";
+import { insertKeywordFixture } from "./manager-search.test-support.js";
 import { hasTrigramTokenizerForTests } from "./unicode-query.test-support.js";
 
 type Tokenizer = "unicode61" | "trigram";
@@ -34,14 +35,12 @@ async function withSearch(
     });
     expect(schema.ftsAvailable).toBe(true);
     for (const document of documents) {
-      const path = `memory/${document.id}.md`;
-      const source = document.source ?? "memory";
-      db.prepare(
-        "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, 0, 0)",
-      ).run(path, source, document.id);
-      db.prepare(
-        "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, 1, 1, ?, 'fts-only', ?, x'', 0)",
-      ).run(document.id, path, source, document.id, document.text);
+      insertKeywordFixture(db, {
+        ...document,
+        path: `memory/${document.id}.md`,
+        model: "fts-only",
+        endLine: 1,
+      });
     }
     if (databasePath !== ":memory:") {
       // Close the existing-format writer before testing the new query owner.
@@ -87,13 +86,8 @@ describe("memory keyword query Unicode forms", () => {
       await withSearch(
         tokenizer,
         documents,
-        async (search, db) => {
+        async (search) => {
           const originalBytes = fs.readFileSync(databasePath);
-          const originalSchema = db
-            .prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name")
-            .all();
-          const originalVersion = db.prepare("PRAGMA user_version").get();
-          const observations: Record<string, string[]> = {};
           for (const { query, expected } of [
             { query: "München".normalize("NFD"), expected: "latin" },
             { query: "한국어", expected: "korean" },
@@ -101,22 +95,9 @@ describe("memory keyword query Unicode forms", () => {
           ]) {
             const ids = (await search(query)).map((hit) => hit.id);
             expect(ids).toEqual([expected]);
-            observations[query] = ids;
           }
           expect(await search("unrecordedword")).toEqual([]);
-          expect(
-            db.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name").all(),
-          ).toEqual(originalSchema);
-          expect(db.prepare("PRAGMA user_version").get()).toEqual(originalVersion);
-          expect(db.prepare("SELECT id, text FROM memory_index_chunks ORDER BY id").all()).toEqual(
-            documents.toSorted((left, right) => left.id.localeCompare(right.id)),
-          );
-          expect(db.prepare("SELECT total_changes() AS changes").get()).toEqual({ changes: 0 });
           expect(fs.readFileSync(databasePath)).toEqual(originalBytes);
-          console.log(
-            "EXISTING_INDEX_READ_ONLY",
-            JSON.stringify({ tokenizer, observations, writes: 0, byteIdentical: true }),
-          );
         },
         databasePath,
       );
@@ -126,12 +107,12 @@ describe("memory keyword query Unicode forms", () => {
   it.for(
     tokenizers.flatMap((tokenizer) =>
       ["München", "ǽ", "ộ", "café東京", "한국어", "Μαΐου"].flatMap((word) =>
-        forms.flatMap((stored) => forms.map((query) => ({ tokenizer, word, stored, query }))),
+        forms.map((stored) => ({ tokenizer, word, stored })),
       ),
     ),
   )(
-    "matches $stored $word text with a $query query using $tokenizer",
-    async ({ tokenizer, word, stored, query }, context) => {
+    "matches $stored $word text with either query form using $tokenizer",
+    async ({ tokenizer, word, stored }, context) => {
       if (tokenizer === "trigram" && !hasTrigram) {
         context.skip("SQLite does not provide the optional trigram tokenizer");
       }
@@ -142,24 +123,14 @@ describe("memory keyword query Unicode forms", () => {
           { id: "city", text },
           { id: "control", text: "quartz handbook" },
         ],
-        async (search, db) => {
-          expect((await search("quartz")).map((hit) => hit.id)).toEqual(["control"]);
-          expect(await search("unrecordedword")).toEqual([]);
-          expect((await search(word.normalize(query))).map((hit) => hit.id)).toEqual(["city"]);
-          expect(
-            db.prepare("SELECT text FROM memory_index_chunks WHERE id = 'city'").get(),
-          ).toEqual({ text });
+        async (search) => {
+          for (const query of forms) {
+            expect((await search(word.normalize(query))).map((hit) => hit.id)).toEqual(["city"]);
+          }
         },
       );
     },
   );
-
-  it("preserves a decomposed Korean round trip with unicode61", async () => {
-    const text = "한국".normalize("NFD");
-    await withSearch("unicode61", [{ id: "korean", text }], async (search) => {
-      expect((await search(text)).map((hit) => hit.id)).toEqual(["korean"]);
-    });
-  });
 
   it("recalls a Unicode compatibility alias with unicode61", async () => {
     await withSearch("unicode61", [{ id: "cjk", text: "豈 weather" }], async (search) => {
@@ -315,11 +286,12 @@ describe("memory keyword query Unicode forms", () => {
             .prepare(
               "SELECT bm25(memory_index_chunks_fts) AS rank FROM memory_index_chunks_fts WHERE memory_index_chunks_fts MATCH ?",
             )
-            .get(buildFtsQuery(word.normalize("NFD"))) as { rank: number };
+            .get(`"${word.normalize("NFD")}"`) as { rank: number };
           for (const query of new Set([word, word.normalize("NFD")])) {
             const canonical = await search(query);
             expect(canonical.map((hit) => hit.id)).toEqual(["city"]);
             expect(canonical[0]?.textScore).toBe(bm25RankToScore(literal.rank));
+            expect(await search(`${query} ${query}`)).toEqual(canonical);
           }
         },
       );

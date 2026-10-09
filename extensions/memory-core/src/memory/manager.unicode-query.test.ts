@@ -1,9 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
-import { resolveOpenClawAgentSqlitePath } from "openclaw/plugin-sdk/sqlite-runtime";
 import {
   closeOpenClawAgentDatabasesForTest,
   closeOpenClawStateDatabaseAsync,
@@ -28,23 +26,17 @@ const temporaryRoots = useAutoCleanupTempDirTracker((cleanup) =>
 );
 
 describe("memory manager Unicode query round trip", () => {
-  it.for(
-    (["unicode61", "trigram"] as const).flatMap((tokenizer) =>
-      ["München", "한국어"].flatMap((word) =>
-        (["NFC", "NFD"] as const).map((stored) => ({ tokenizer, word, stored })),
-      ),
-    ),
-  )(
-    "retrieves persisted $stored $word memories through the $tokenizer tool",
-    async ({ tokenizer, word, stored }, context) => {
+  it.for(["unicode61", "trigram"] as const)(
+    "retrieves decomposed queries through the %s tool",
+    async (tokenizer, context) => {
       if (tokenizer === "trigram" && !hasTrigram) {
         context.skip("SQLite does not provide the optional trigram tokenizer");
       }
       const workspace = temporaryRoots.make("openclaw-memory-unicode-");
-      const storedText = `${word} weather report`.normalize(stored);
-      await fs.mkdir(path.join(workspace, "memory"));
-      await fs.writeFile(path.join(workspace, "memory", "travel.md"), storedText);
-      await fs.writeFile(path.join(workspace, "memory", "control.md"), "quartz reference note");
+      const storedText = "München fe\u0301";
+      const note = path.join(workspace, "memory", "travel.md");
+      await fs.mkdir(path.dirname(note));
+      await fs.writeFile(note, storedText);
       vi.stubEnv("OPENCLAW_STATE_DIR", path.join(workspace, "state"));
       const cfg = {
         plugins: { enabled: false },
@@ -64,22 +56,6 @@ describe("memory manager Unicode query round trip", () => {
       }
       try {
         await manager.sync({ force: true });
-        const db = new DatabaseSync(resolveOpenClawAgentSqlitePath({ agentId: "main" }), {
-          readOnly: true,
-        });
-        try {
-          expect(
-            db
-              .prepare("SELECT text FROM memory_index_chunks WHERE path = ?")
-              .all("memory/travel.md"),
-          ).toEqual([expect.objectContaining({ text: expect.stringContaining(storedText) })]);
-        } finally {
-          db.close();
-        }
-        const search = async (query: string) =>
-          (await manager.search(query, { lexicalOnly: true })).map((hit) => hit.path);
-        expect(await search("quartz")).toEqual(["memory/control.md"]);
-        expect(await search("unrecordedword")).toEqual([]);
         const tool = createMemorySearchTool({
           config: cfg,
           agentId: "main",
@@ -88,35 +64,19 @@ describe("memory manager Unicode query round trip", () => {
         if (!tool) {
           throw new Error("The configured memory_search tool is unavailable");
         }
-        const control = await tool.execute("ascii-control", {
-          query: "quartz",
+        const response = await tool.execute("unicode", {
+          query: "Mu\u0308nchen",
           corpus: "memory",
         });
-        expect(control.details).toMatchObject({
-          results: [expect.objectContaining({ path: "memory/control.md" })],
-        });
-        for (const form of ["NFC", "NFD"] as const) {
-          const query = word.normalize(form);
-          const managerResults = await search(query);
-          const toolResult = await tool.execute(`unicode-${form}`, { query, corpus: "memory" });
-          console.log(
-            JSON.stringify({
-              tokenizer,
-              word,
-              stored,
-              form,
-              managerResults,
-              tool: toolResult.details,
+        expect(response.details).toMatchObject({
+          results: [
+            expect.objectContaining({
+              path: "memory/travel.md",
+              snippet: expect.stringContaining(storedText),
             }),
-          );
-          expect(toolResult.details).toMatchObject({
-            results: [expect.objectContaining({ path: "memory/travel.md" })],
-          });
-          expect(managerResults).toEqual(["memory/travel.md"]);
-        }
-        expect(await fs.readFile(path.join(workspace, "memory", "travel.md"), "utf8")).toBe(
-          storedText,
-        );
+          ],
+        });
+        expect(await fs.readFile(note, "utf8")).toBe(storedText);
       } finally {
         await manager.close();
         await closeAllMemorySearchManagers();

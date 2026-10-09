@@ -1,7 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { MemorySource } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
-  normalizeStringEntries,
   normalizeStringEntriesLower,
   uniqueStrings,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -255,13 +254,13 @@ function planPathKeywordSearch(params: {
     const plan = planKeywordSearch({
       ...params,
       query,
-      includeCombiningMarks: true,
+      includeLeadingMarks: true,
     });
     addPlan(query, plan);
   }
   if (params.ftsTokenizer !== "trigram") {
     for (const query of new Set([params.query.normalize("NFC"), params.query.normalize("NFD")])) {
-      const tokens = normalizeStringEntries(query.match(/[\p{L}\p{M}\p{N}_]+/gu) ?? []);
+      const tokens = tokenizeFtsQuery(query, true);
       const substringTerms = tokens.filter((token) => !isAscii(token));
       if (substringTerms.length > 0) {
         const matchQuery = buildMatchQueryFromTerms(tokens.filter(isAscii));
@@ -547,7 +546,7 @@ export async function searchPathKeyword(params: {
     return loadKeywordRowsWithFallback(
       lexicalPlan,
       loadPartitions,
-      () => normalizeStringEntries(lexicalPlan.query.match(/[\p{L}\p{M}\p{N}_]+/gu) ?? []),
+      () => tokenizeFtsQuery(lexicalPlan.query, true),
       "memory search: path FTS5 MATCH failed, falling back to substring search",
     );
   };

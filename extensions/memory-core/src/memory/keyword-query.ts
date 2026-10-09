@@ -1,9 +1,12 @@
-import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { normalizeStringEntries, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 type FtsCanonicalTokenizer = "unicode61" | "trigram";
 
-export function tokenizeFtsQuery(raw: string): string[] {
-  return normalizeStringEntries(raw.match(/[\p{L}\p{N}_][\p{L}\p{M}\p{N}_]*/gu) ?? []);
+export function tokenizeFtsQuery(raw: string, includeLeadingMarks = false): string[] {
+  const pattern = includeLeadingMarks
+    ? /[\p{L}\p{M}\p{N}_]+/gu
+    : /[\p{L}\p{N}_][\p{L}\p{M}\p{N}_]*/gu;
+  return normalizeStringEntries(raw.match(pattern) ?? []);
 }
 
 export function buildFtsQuery(
@@ -79,7 +82,7 @@ export function buildMatchQueryFromTerms(
   if (terms.length === 0) {
     return null;
   }
-  const quoted = terms.map((term) => {
+  const quoted = uniqueStrings(terms).map((term) => {
     const forms = canonicalTermForms(term, canonicalTokenizer);
     const alternatives = forms.map((form) => `"${form.replaceAll('"', "")}"`);
     // Alternatives belong to each word: one document can mix NFC and NFD words.
@@ -91,7 +94,7 @@ export function buildMatchQueryFromTerms(
 export function planKeywordSearch(params: {
   query: string;
   ftsTokenizer?: "unicode61" | "trigram";
-  includeCombiningMarks?: boolean;
+  includeLeadingMarks?: boolean;
   canonicalVariants?: boolean;
 }): { matchQuery: string | null; substringTerms: string[] } {
   const canonicalTokenizer = params.canonicalVariants
@@ -101,9 +104,7 @@ export function planKeywordSearch(params: {
     const matchQuery = buildFtsQuery(params.query, canonicalTokenizer);
     return { matchQuery, substringTerms: [] };
   }
-  const tokens = params.includeCombiningMarks
-    ? normalizeStringEntries(params.query.match(/[\p{L}\p{M}\p{N}_]+/gu) ?? [])
-    : tokenizeFtsQuery(params.query);
+  const tokens = tokenizeFtsQuery(params.query, params.includeLeadingMarks);
   const matchTerms: string[] = [];
   const substringTerms: string[] = [];
   for (const token of tokens) {
