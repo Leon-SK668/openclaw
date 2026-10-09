@@ -59,12 +59,11 @@ async function fetchBrowserManagement<T>(
   parent: BrowserParentOpts,
   path: string,
   query?: Parameters<typeof callBrowserRequest>[1]["query"],
-  timeoutMs = BROWSER_MANAGE_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   return await callBrowserRequest<T>(
     parent,
     { method: "GET", path, query },
-    { timeoutMs: resolveBrowserManagementTimeout(command, timeoutMs) },
+    { timeoutMs: resolveBrowserManagementTimeout(command) },
   );
 }
 
@@ -239,15 +238,18 @@ async function runBrowserDoctor(
 
   if (deep && status.running) {
     await probe("live-snapshot", async () => {
-      const result = await fetchBrowserManagement<
+      // Keep the diagnostic snapshot bounded independently of management request budgets.
+      const result = await callBrowserRequest<
         | { ok: true; format: "aria"; nodes?: unknown[] }
         | { ok: true; format: "ai"; snapshot?: string }
       >(
-        command,
         parent,
-        "/snapshot",
-        resolveProfileQuery(profile, { format: "aria", limit: 25 }),
-        10_000,
+        {
+          method: "GET",
+          path: "/snapshot",
+          query: resolveProfileQuery(profile, { format: "aria", limit: 25 }),
+        },
+        { timeoutMs: 10_000 },
       );
       const count =
         result.format === "aria"

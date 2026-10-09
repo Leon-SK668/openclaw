@@ -118,9 +118,10 @@ describe("browser manage timeout option", () => {
   });
 
   it.each([
-    { args: [], managementTimeoutMs: 45000, snapshotTimeoutMs: 10000 },
-    { args: ["--timeout", "60000"], managementTimeoutMs: 60000, snapshotTimeoutMs: 60000 },
-  ])("uses the selected budgets across deep doctor probes for $args", async (scenario) => {
+    { args: [], managementTimeoutMs: 45000 },
+    { args: ["--timeout", "60000"], managementTimeoutMs: 60000 },
+    { args: ["--timeout", "30000"], managementTimeoutMs: 30000 },
+  ])("keeps the deep snapshot bounded with management timeout $args", async (scenario) => {
     getBrowserManageGatewayMock()
       .mockResolvedValueOnce({
         status: { enabled: true, running: true, profile: "work" },
@@ -136,8 +137,7 @@ describe("browser manage timeout option", () => {
 
     for (const route of ["/doctor", "/profiles", "/tabs", "/snapshot"]) {
       const request = findBrowserManageCall(route);
-      const timeoutMs =
-        route === "/snapshot" ? scenario.snapshotTimeoutMs : scenario.managementTimeoutMs;
+      const timeoutMs = route === "/snapshot" ? 10000 : scenario.managementTimeoutMs;
       expect(request?.[2].timeoutMs).toBe(timeoutMs);
       expect(request?.[1].timeout).toBe(String(timeoutMs + 10_000));
     }
