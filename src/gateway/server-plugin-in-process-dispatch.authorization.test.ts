@@ -7,11 +7,13 @@ import {
 import { callAgentToolGatewayRequest } from "../agents/tools/in-process-gateway.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
+import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { setUserProfileRole } from "../state/user-profile-writes.worker.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { createGatewayMethodRegistry } from "./methods/registry.js";
+import { GatewayConnectionWork } from "./server-connection-work.js";
 import { resolveNodeInvokeRuntimeAuthorityError } from "./server-methods/nodes.invoke-authority.js";
 import type {
   GatewayRequestContext,
@@ -28,6 +30,8 @@ import {
   createContext,
   createOperatorClient,
 } from "./server-plugin-in-process-dispatch.test-support.js";
+import { bindSessionRowProjection } from "./session-row-projection-access.js";
+import { createSessionRowProjection } from "./session-row-projection.js";
 
 const startTurn = vi.hoisted(() => vi.fn());
 const waitForTurn = vi.hoisted(() => vi.fn());
@@ -167,6 +171,69 @@ describe("typed in-process agent authorization", () => {
   );
 
   registerInProcessGatewayDispatchPreparationTests({ startTurn, waitForTurn });
+
+  it.each(["allowed", "denied", "canceled"] as const)(
+    "authorizes an agent handoff from drained foreground work (%s)",
+    async (outcome) => {
+      await withOpenClawTestState({ scenario: "minimal" }, async () => {
+        const sessionKey = "agent:main:continuation";
+        await upsertSessionEntryCore(
+          { agentId: "main", sessionKey },
+          { sessionId: "continuation-session", updatedAt: 1 },
+        );
+        const config = { agents: { entries: { main: {} } } };
+        const context = createContext();
+        context.getRuntimeConfig = () => config;
+        context.chatAbortControllers = new Map();
+        const gatewayWork = new GatewayConnectionWork();
+        context.trackExecution = (run) => gatewayWork.track(run);
+        const projection = await createSessionRowProjection({ cfg: config, context });
+        bindSessionRowProjection(context, () => projection);
+        const client = createOperatorClient({
+          profileName: "continuation-owner",
+          scopes: [outcome === "denied" ? "operator.read" : "operator.write"],
+        });
+        const result = { runId: "continuation-probe", status: "accepted" };
+        startTurn.mockImplementation(async ({ io }) => {
+          io.emitAcceptance([true, result, undefined]);
+        });
+        const canceled = new AbortController();
+        if (outcome === "canceled") {
+          canceled.abort(new Error("continuation canceled"));
+        }
+        try {
+          // Keep authorization and its SQLite-backed projection real; only model execution
+          // stops at the service boundary, after the formerly failing admission read.
+          await projection.ensureMaterialized();
+          const foreground = new AsyncWorkScope();
+          const completion = createDeferredCore();
+          const dispatch = foreground.run(async () => {
+            await completion.promise;
+            return dispatchScopedMethod({
+              client,
+              context,
+              method: "agent",
+              params: { message: "child result", sessionKey, idempotencyKey: result.runId },
+              signal: canceled.signal,
+            });
+          });
+          const expected =
+            outcome === "allowed"
+              ? expect(dispatch).resolves.toEqual(result)
+              : expect(dispatch).rejects.toThrow(
+                  outcome === "denied" ? "missing scope: operator.write" : "continuation canceled",
+                );
+          await foreground.drain();
+          completion.resolve();
+          await expected;
+          expect(startTurn).toHaveBeenCalledTimes(outcome === "allowed" ? 1 : 0);
+        } finally {
+          await gatewayWork.drain();
+          projection.dispose();
+        }
+      });
+    },
+  );
 
   it.each([
     { method: "sessions.patch", cleanup: false, scopedActor: false },
