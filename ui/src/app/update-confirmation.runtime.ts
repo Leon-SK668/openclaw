@@ -9,13 +9,15 @@
 // Gateway restart that tears down the connection cannot unmount it.
 import { html, nothing, render } from "lit";
 import type { UpdateRunRecord } from "../../../src/infra/update-run-record.ts";
+import { isReportableUpdateRun } from "../../../src/shared/update-outcome.ts";
 import type { UpdateAvailable, UpdateScheduleState } from "../api/types.ts";
+import { renderUpdateGitRevisions } from "../components/update-git-revisions.ts";
 import { t } from "../i18n/index.ts";
 import { registerUpdateActionsEnglish } from "../i18n/locales/en-update-actions.ts";
-import { formatUiError } from "../lib/format-error.ts";
 import "../components/modal-dialog.ts";
 import "../components/update-run-view.ts";
-import { postNativeUpdate } from "./native-link-routing.ts";
+import { formatUiError } from "../lib/format-error.ts";
+import { hasNativeUpdateBridge, postNativeUpdate } from "./native-link-routing.ts";
 import type { ConfirmAndStartUpdateParams, UpdateProgress } from "./update-confirmation.ts";
 import { formatUpdateTargetLabel } from "./update-schedule-projection.ts";
 
@@ -69,7 +71,7 @@ export async function confirmAndStartUpdateRuntime(
 ): Promise<void> {
   // Native confirms block reentrancy; refuse a second request rather than
   // stacking a dialog over an update that is already being reported.
-  if (updateDialogOpen) {
+  if (updateDialogOpen || (!params.existingRun && !params.isCurrentTarget())) {
     return;
   }
   const host = document.createElement("div");
@@ -77,18 +79,9 @@ export async function confirmAndStartUpdateRuntime(
   // One surface owns the outcome at a time: the ambient copy stays hidden while
   // the dialog that started this update is still reporting it.
   document.body.classList.add(UPDATE_DIALOG_OPEN_CLASS);
-  const route = params.viaNativeApp
-    ? {
-        confirmLabel: t("updates.confirm.macAction"),
-        message: t("updates.confirm.macMessage"),
-        title: t("chat.sidebar.updateMacAndGateway"),
-      }
-    : {
-        confirmLabel: t("updates.confirm.action"),
-        message: t("updates.confirm.message"),
-        title: t("chat.sidebar.updateGateway"),
-      };
-  const details = formatInstalledAndAvailable(params.updateAvailable, params.updateSchedule);
+  let viaNativeApp = params.viaNativeApp;
+  let prepareRetry = params.prepareRetry;
+  let { updateAvailable, updateSchedule } = params;
   await new Promise<void>((resolve) => {
     let phase: DialogPhase = params.existingRun
       ? { kind: "run", run: params.existingRun }
@@ -121,6 +114,13 @@ export async function confirmAndStartUpdateRuntime(
       }
       close();
     };
+    const retainTarget = () => {
+      if (params.isCurrentTarget()) {
+        return true;
+      }
+      close();
+      return false;
+    };
     const watchProgress = (
       watch: NonNullable<ConfirmAndStartUpdateParams["watchUpdateProgress"]>,
       listener: (progress: UpdateProgress) => void,
@@ -151,14 +151,28 @@ export async function confirmAndStartUpdateRuntime(
         return;
       }
       const current = phase;
+      const route = viaNativeApp
+        ? {
+            confirmLabel: t("updates.confirm.macAction"),
+            message: t("updates.confirm.macMessage"),
+            title: t("chat.sidebar.updateMacAndGateway"),
+          }
+        : {
+            confirmLabel: t("updates.confirm.action"),
+            message: t("updates.confirm.message"),
+            title: t("chat.sidebar.updateGateway"),
+          };
+
+      const details = formatInstalledAndAvailable(updateAvailable, updateSchedule);
       const run = current.kind === "run" ? current.run : null;
       const readError = current.kind === "run" ? latestProgress?.readError : null;
       const working = current.kind === "working" || run?.status === "running";
       const finished = run !== null && run.status !== "running";
-      const failed = current.kind === "failed" || (finished && run.status !== "succeeded");
+      const failed = current.kind === "failed" || (run !== null && isReportableUpdateRun(run));
       const checkingStatus = statusCheck === "pending";
       const statusCheckError = typeof statusCheck === "object" ? statusCheck.error : null;
-      const showRecovery = failed || Boolean(readError) || statusCheck !== "idle";
+      const showRecovery =
+        failed || Boolean(readError) || (current.kind !== "confirm" && statusCheck !== "idle");
       const disconnected = latestProgress?.connected === false;
       const body =
         current.kind === "run"
@@ -189,8 +203,11 @@ export async function confirmAndStartUpdateRuntime(
               </div>
               ${statusCheckError ? html`<div role="alert" class="exec-approval-sub">${statusCheckError}</div>` : nothing}
               ${
-                details && current.kind === "confirm"
-                  ? html`<div class="exec-approval-command mono">${details}</div>`
+                details && current.kind === "confirm" && !checkingStatus && !statusCheckError
+                  ? html`<div class="exec-approval-command mono update-confirmation-details">
+                      <div>${details}</div>
+                      ${renderUpdateGitRevisions(updateSchedule, updateAvailable)}
+                    </div>`
                   : nothing
               }
               ${
@@ -228,12 +245,7 @@ export async function confirmAndStartUpdateRuntime(
                                 type="button"
                                 class="btn primary"
                                 ?disabled=${checkingStatus || disconnected}
-                                @click=${() => {
-                                  phase = { kind: "confirm" };
-                                  statusCheck = "idle";
-                                  stopWatching?.();
-                                  draw();
-                                }}
+                                @click=${retry}
                               >
                                 ${t("updates.dialog.retryUpdate")}
                               </button>`
@@ -259,16 +271,18 @@ export async function confirmAndStartUpdateRuntime(
                     : html`
                         <button
                           type="button"
-                          class="btn danger ${working ? "btn--busy" : ""}"
-                          ?disabled=${working}
+                          class="btn danger ${working || checkingStatus ? "btn--busy" : ""}"
+                          ?disabled=${working || checkingStatus}
                           @click=${confirm}
                         >
                           ${
-                            working
-                              ? html`<span class="btn__spinner" aria-hidden="true"></span>${t(
-                                    "chat.updating",
-                                  )}`
-                              : route.confirmLabel
+                            checkingStatus
+                              ? t("updates.dialog.checkingStatus")
+                              : working
+                                ? html`<span class="btn__spinner" aria-hidden="true"></span>${t(
+                                      "chat.updating",
+                                    )}`
+                                : route.confirmLabel
                           }
                         </button>
                         <button type="button" class="btn" autofocus @click=${finish}>
@@ -284,11 +298,81 @@ export async function confirmAndStartUpdateRuntime(
       );
     };
 
+    async function refreshTarget(
+      prepare: NonNullable<ConfirmAndStartUpdateParams["prepareRetry"]>,
+    ) {
+      if (!retainTarget()) {
+        return false;
+      }
+      statusCheck = "pending";
+      draw();
+      try {
+        const target = await prepare();
+        if (settled || !retainTarget()) {
+          return false;
+        }
+        if (!target) {
+          statusCheck = { error: t("updates.dialog.statusNotRefreshed") };
+          draw();
+          return false;
+        }
+        ({ updateAvailable, updateSchedule } = target);
+        statusCheck = "idle";
+        return true;
+      } catch (error) {
+        statusCheck = { error: formatUiError(error) };
+        draw();
+        return false;
+      }
+    }
+
+    function checkNativePermission(): boolean {
+      if (params.canStartNativeUpdate?.() !== true) {
+        statusCheck = { error: t("updates.adminRequired") };
+        draw();
+        return false;
+      }
+      return true;
+    }
+
+    function restoreNativeOwner(): "unchanged" | "restored" | "denied" {
+      if (
+        (!params.viaNativeApp && !params.prepareGatewayFallback) ||
+        viaNativeApp ||
+        !hasNativeUpdateBridge()
+      ) {
+        return "unchanged";
+      }
+      if (!checkNativePermission()) {
+        return "denied";
+      }
+      viaNativeApp = true;
+      prepareRetry = undefined;
+      return "restored";
+    }
+
+    async function retry() {
+      if (statusCheck === "pending" || latestProgress?.connected === false || !retainTarget()) {
+        return;
+      }
+      if (restoreNativeOwner() === "denied") {
+        return;
+      }
+      if (prepareRetry && !(await refreshTarget(prepareRetry))) {
+        return;
+      }
+      phase = { kind: "confirm" };
+      statusCheck = "idle";
+      stopWatching?.();
+      draw();
+    }
+
     async function checkStatus() {
       if (
         statusCheck === "pending" ||
         latestProgress?.connected === false ||
-        !params.onCheckStatus
+        !params.onCheckStatus ||
+        !retainTarget()
       ) {
         return;
       }
@@ -307,16 +391,40 @@ export async function confirmAndStartUpdateRuntime(
       }
     }
 
-    function confirm() {
-      if (phase.kind !== "confirm") {
+    async function confirm() {
+      if (phase.kind !== "confirm" || statusCheck === "pending" || !retainTarget()) {
         return;
       }
-      if (params.viaNativeApp && postNativeUpdate()) {
-        finish();
+      const nativeOwner = restoreNativeOwner();
+      if (nativeOwner !== "unchanged") {
+        if (nativeOwner === "restored") {
+          statusCheck = "idle";
+          draw();
+        }
         return;
+      }
+      if (viaNativeApp) {
+        if (!checkNativePermission()) {
+          return;
+        }
+        if (postNativeUpdate()) {
+          finish();
+          return;
+        }
+        if (params.prepareGatewayFallback) {
+          if (await refreshTarget(params.prepareGatewayFallback)) {
+            viaNativeApp = false;
+            prepareRetry = params.prepareGatewayFallback;
+            draw();
+          }
+          return;
+        }
       }
       const watch = params.watchUpdateProgress;
       if (!watch) {
+        if (!retainTarget()) {
+          return;
+        }
         params.startGatewayUpdate();
         finish();
         return;
@@ -332,6 +440,9 @@ export async function confirmAndStartUpdateRuntime(
       // snapshot as the subscribe-time emit, so a failure still present on it
       // belongs to the previous attempt and is not this update's outcome —
       // a refused request is reported by the accept timer below instead.
+      if (!retainTarget()) {
+        return;
+      }
       params.startGatewayUpdate();
       let retainedEmit = true;
       watchProgress(watch, (progress) => {

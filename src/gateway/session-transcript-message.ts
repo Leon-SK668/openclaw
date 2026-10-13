@@ -1,15 +1,19 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { TranscriptDisplayPosition } from "../chat/transcript-display-position.js";
+import { readSessionTranscriptRunId } from "../sessions/transcript-events.js";
+import { isPendingAssistantError } from "./chat-display-projection.core.js";
 import {
   createCurrentUserProfileMessageProjector,
   projectChatDisplayMessage,
   projectChatDisplayMessagesWithState,
 } from "./chat-display-projection.js";
 import { resolveCurrentUserProfileDisplay } from "./current-user-profile-display.js";
+import { readChatHistoryReplyMessageId } from "./server-methods/chat-history-reply-messages.js";
 import {
   attachOpenClawTranscriptMeta,
   readTranscriptMessageIdempotencyKey,
 } from "./session-transcript-entry-message.js";
+import type { SubagentCoordinationDisplayResolver } from "./session-transcript-read.types.js";
 
 export type SessionMessageProjectionState = {
   assistantErrorPending: boolean;
@@ -26,19 +30,24 @@ function readTranscriptMessageSenderIsOwner(message: unknown): boolean | undefin
 export function projectSessionMessagePayload(params: {
   agentId?: string;
   historyDelta?: boolean;
+  isRunActive?: (runId: string) => boolean;
+  toolResultMaxChars?: number;
   message: unknown;
   messageId?: string;
   messageSeq?: number;
   transcriptPosition?: TranscriptDisplayPosition;
   projectionState?: SessionMessageProjectionState;
   projectCurrentUserProfile?: (message: Record<string, unknown>) => Record<string, unknown>;
+  resolveCronJobName?: (jobId: string) => string | undefined;
   runId?: string;
   sessionKey: string;
   sessionSnapshot?: Record<string, unknown>;
+  subagentCoordination?: SubagentCoordinationDisplayResolver;
 }): {
   payload?: Record<string, unknown>;
   projectionState: SessionMessageProjectionState;
   requiresHistoryReset?: true;
+  deferredAssistantError?: true;
 } {
   const idempotencyKey = readTranscriptMessageIdempotencyKey(params.message);
   const senderIsOwner = readTranscriptMessageSenderIsOwner(params.message);
@@ -49,10 +58,26 @@ export function projectSessionMessagePayload(params: {
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(params.messageSeq !== undefined ? { seq: params.messageSeq } : {}),
   });
+  const messageRunId = readSessionTranscriptRunId(rawMessage) ?? params.runId;
+  if (messageRunId && isPendingAssistantError(rawMessage) && params.isRunActive?.(messageRunId)) {
+    // A failed attempt is durable before recovery starts. Only defer its display;
+    // the terminal lifecycle refresh will expose it if this exact run really fails.
+    return {
+      deferredAssistantError: true,
+      projectionState: {
+        assistantErrorPending: true,
+        turnBoundaryPending: params.projectionState?.turnBoundaryPending ?? false,
+      },
+    };
+  }
   const historyProjection = params.historyDelta
     ? projectChatDisplayMessagesWithState([rawMessage], {
         ...params.projectionState,
+        subagentCoordination: params.subagentCoordination,
+        resolveCronJobName: params.resolveCronJobName,
         includeCommentaryFallbacks: true,
+        toolResultMaxChars: params.toolResultMaxChars,
+        activity: false,
       })
     : undefined;
   if (
@@ -79,9 +104,18 @@ export function projectSessionMessagePayload(params: {
         ? projectChatDisplayMessagesWithState([rawMessage], {
             assistantErrorPending: params.projectionState.assistantErrorPending,
             turnBoundaryPending: params.projectionState.turnBoundaryPending,
+            activity: false,
+            toolResultMaxChars: params.toolResultMaxChars,
+            subagentCoordination: params.subagentCoordination,
+            resolveCronJobName: params.resolveCronJobName,
           })
         : {
-            messages: [projectChatDisplayMessage(rawMessage)],
+            messages: [
+              projectChatDisplayMessage(rawMessage, {
+                subagentCoordination: params.subagentCoordination,
+                resolveCronJobName: params.resolveCronJobName,
+              }),
+            ],
             assistantErrorPending: false,
             turnBoundaryPending: false,
           };
@@ -93,15 +127,21 @@ export function projectSessionMessagePayload(params: {
   if (!message) {
     return { projectionState };
   }
+  if (readChatHistoryReplyMessageId(message)) {
+    // The page owner resolves quoted originals once, with visibility and payload bounds.
+    return { projectionState, requiresHistoryReset: true };
+  }
   const projectCurrentUserProfile =
     params.projectCurrentUserProfile ??
     createCurrentUserProfileMessageProjector(resolveCurrentUserProfileDisplay);
+  const projectedMessage = projectCurrentUserProfile(message);
+  params.subagentCoordination?.assertCurrent?.();
   return {
     payload: {
       sessionKey: params.sessionKey,
       ...(senderIsOwner === undefined ? {} : { senderIsOwner }),
       ...(params.agentId ? { agentId: params.agentId } : {}),
-      message: projectCurrentUserProfile(message),
+      message: projectedMessage,
       ...(params.messageId ? { messageId: params.messageId } : {}),
       ...(params.messageSeq !== undefined ? { messageSeq: params.messageSeq } : {}),
       ...params.sessionSnapshot,
