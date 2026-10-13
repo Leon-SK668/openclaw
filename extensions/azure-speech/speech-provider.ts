@@ -177,8 +177,7 @@ export function buildAzureSpeechProvider(): SpeechProviderPlugin {
       const region = trimToUndefined(talkProviderConfig.region);
       const endpoint = trimToUndefined(talkProviderConfig.endpoint ?? talkProviderConfig.baseUrl);
       const baseUrl = normalizeAzureSpeechBaseUrl({
-        // A voice-only Talk override must not replace an explicit TTS endpoint
-        // with the regional default. Explicit Talk routing still takes priority.
+        // Inherit the resolved route unless Talk explicitly selects another one.
         baseUrl:
           trimToUndefined(talkProviderConfig.baseUrl) ??
           (!region && !endpoint ? base.baseUrl : undefined),
