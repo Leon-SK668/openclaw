@@ -5,6 +5,7 @@ import {
   createOperationalRunInstanceRef,
 } from "../agents/admitted-run-context.js";
 import { callAgentToolGatewayRequest } from "../agents/tools/in-process-gateway.js";
+import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
@@ -177,11 +178,12 @@ describe("typed in-process agent authorization", () => {
     async (outcome) => {
       await withOpenClawTestState({ scenario: "minimal" }, async () => {
         const sessionKey = "agent:main:continuation";
+        const config = { agents: { entries: { main: {} } } };
+        setRuntimeConfigSnapshot(config);
         await upsertSessionEntryCore(
           { agentId: "main", sessionKey },
           { sessionId: "continuation-session", updatedAt: 1 },
         );
-        const config = { agents: { entries: { main: {} } } };
         const context = createContext();
         context.getRuntimeConfig = () => config;
         context.chatAbortControllers = new Map();
