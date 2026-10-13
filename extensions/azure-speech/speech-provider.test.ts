@@ -219,7 +219,7 @@ describe("buildAzureSpeechProvider", () => {
       rawConfig: { providers: { "azure-speech": resolved } },
       timeoutMs: 30_000,
     });
-    await provider.synthesize({ ...synthesisRequest, providerConfig });
+    await provider.synthesize({ ...synthesisRequest, providerConfig, target: "audio-file" });
     expect(azureSpeechTTSMock).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: expected }));
   });
 
