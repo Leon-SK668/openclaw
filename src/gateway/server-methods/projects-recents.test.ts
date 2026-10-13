@@ -6,6 +6,7 @@ import * as transcriptWorker from "../../config/sessions/session-transcript-work
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { requireNodeSqlite } from "../../infra/node-sqlite.js";
 import { registerProjectRegistry } from "../../projects/project-registry.js";
+import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
@@ -17,6 +18,7 @@ import {
   createSessionRowProjection,
   type SessionRowProjection,
 } from "../session-row-projection.js";
+import * as rowInputs from "../session-utils-row.js";
 import { projectsHandlers as registeredProjectsHandlers } from "./projects.js";
 import { initializeRepository, invokeProjectMethod } from "./projects.test-support.js";
 
@@ -33,7 +35,7 @@ test("projects.list returns only the caller's deterministic resolved recents", a
     const actor = { type: "human" as const, source: "profile" as const, id: sourceProfile.id };
     const repository = await getSessionRepositoryWorkspaceStore().create({
       agentId: "main",
-      sessionKey: "agent:main:cloud",
+      sessionKey: "global",
       url: "https://github.com/octocat/hello-world.git",
       assertCurrent: () => {},
     });
@@ -47,7 +49,12 @@ test("projects.list returns only the caller's deterministic resolved recents", a
     }> = [
       { key: "agent:main:a", updatedAt: 500, projectId: project.id },
       { key: "agent:main:b", updatedAt: 500, projectId: project.id },
-      { key: "agent:main:cloud", updatedAt: 450, repositoryWorkspaceId: repository.workspaceId },
+      { key: "global", updatedAt: 450, repositoryWorkspaceId: repository.workspaceId },
+      {
+        key: "agent:main:wrong-owner",
+        updatedAt: 449,
+        repositoryWorkspaceId: repository.workspaceId,
+      },
       {
         key: "agent:main:c",
         updatedAt: 400,
@@ -142,7 +149,11 @@ test("projects.list returns only the caller's deterministic resolved recents", a
       await projection.ensureMaterialized();
     } while (projection.needsMaterialization);
     const workerReads = vi.spyOn(transcriptWorker, "withSessionHistoryWorkerDatabases");
+    const display = vi.spyOn(rowInputs, "readSessionRowInputs").mockImplementation(() => {
+      throw new Error("Session display refresh is unavailable");
+    });
     try {
+      sessionChanges.emit({ all: true, scope: "catalog" });
       for (const [scope, expected] of [
         ["operator.read", readResult],
         ["operator.write", writeResult],
@@ -166,6 +177,7 @@ test("projects.list returns only the caller's deterministic resolved recents", a
         ).toEqual([]);
       }
       expect(workerReads).not.toHaveBeenCalled();
+      display.mockRestore();
       replaceSessionEntrySync(
         { agentId: "main", sessionKey: "agent:main:updated-recent" },
         {
@@ -192,6 +204,7 @@ test("projects.list returns only the caller's deterministic resolved recents", a
       });
       expect(workerReads).toHaveBeenCalled();
     } finally {
+      display.mockRestore();
       workerReads.mockRestore();
     }
     const tiedKeys = ["agent:main:e\u0301", "agent:main:é"] as const;
