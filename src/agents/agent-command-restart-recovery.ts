@@ -290,9 +290,24 @@ export function buildRestartRecoveryTerminalDeliveryEvidence(
 export function shouldPersistCurrentRunSessionCleanup(
   current: SessionEntry | undefined,
   sessionId: string,
+  runId: string,
 ): boolean {
+  if (!current || current.sessionId !== sessionId) {
+    return false;
+  }
+  if (current.abortedLastRun !== true) {
+    return true;
+  }
+  // Stop is terminal, while a restart keeps custody. Only the settled command
+  // may retire its own source claim after all execution and delivery owners leave.
   return (
-    current !== undefined && current.sessionId === sessionId && current.abortedLastRun !== true
+    current.status === "killed" &&
+    current.lastRunId === runId &&
+    current.restartRecoveryDeliveryRunId === runId &&
+    current.lifecycleRunId === undefined &&
+    !current.mainRestartRecovery &&
+    !current.restartRecoveryRuns?.length &&
+    !current.pendingFinalDelivery
   );
 }
 
@@ -457,7 +472,7 @@ export function bindCommandHarnessCompletionAssertion(params: {
   sessionKey: string;
   storePath?: string;
   opts: AgentCommandOpts;
-}): AgentCommandOpts {
+}): { opts: AgentCommandOpts } {
   const { claim, persisted, sessionKey, storePath, opts } = params;
   if (
     claim &&
@@ -468,7 +483,7 @@ export function bindCommandHarnessCompletionAssertion(params: {
     throw createSessionWorkStartChangedError(sessionKey);
   }
   if (!claim || !storePath) {
-    return opts;
+    return { opts };
   }
   const guarded = {
     ...opts,
@@ -481,6 +496,5 @@ export function bindCommandHarnessCompletionAssertion(params: {
       { recoveryReference: opts.assertSourceCurrent?.recoveryReference },
     ),
   };
-  guarded.assertSourceCurrent();
-  return guarded;
+  return { opts: guarded };
 }
