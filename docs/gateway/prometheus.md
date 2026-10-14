@@ -386,9 +386,11 @@ openclaw_gateway_active_work{kind="queuedTurns"}
 `openclaw_session_stalled_total` counts observations of blocked tool calls and
 agent runs without progress. Its `classification` label distinguishes
 `blocked_tool_call` from `stalled_agent_run`. `openclaw_session_long_running_total`
-counts long-running work that is still progressing. Both use the existing
-diagnostic classifications; `openclaw_session_stuck_total` remains the separate
-counter for stale bookkeeping with no active work.
+counts the existing long-running classification, including permitted model,
+provider retry, and tool execution waits. An increment does not guarantee recent
+progress. Both use the existing diagnostic classifications;
+`openclaw_session_stuck_total` remains the separate counter for stale bookkeeping
+with no active work.
 
 These counters count repeated observations, not unique sessions or current
 stalls. They reset when the exporter restarts. Session identifiers and tool names

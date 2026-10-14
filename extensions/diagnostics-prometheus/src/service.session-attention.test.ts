@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createMetricsHarness, untrusted } from "./service.test-helpers.js";
 
 describe("session attention observations", () => {
-  it("counts repeated stalls and progressing long runs without exposing identities", () => {
+  it("counts repeated stalls and long-running observations without exposing identities", () => {
     const metrics = createMetricsHarness();
     const base = {
       state: "processing" as const,
@@ -61,6 +61,29 @@ describe("session attention observations", () => {
       metrics.stop();
     }
     expect(metrics.render()).toBe("");
+  });
+
+  it.each([
+    ["model_call", "active_model_call_without_progress"],
+    ["model_call", "provider_retry_wait"],
+    ["tool_call", "tool_execution_wait"],
+  ] as const)("counts permitted %s waits without promising progress", (activeWorkKind, reason) => {
+    const metrics = createMetricsHarness();
+    try {
+      metrics.record({
+        type: "session.long_running",
+        classification: "long_running",
+        state: "processing",
+        ageMs: 900_000,
+        activeWorkKind,
+        reason,
+      });
+      expect(metrics.render()).toContain(
+        `openclaw_session_long_running_total{active_work_kind="${activeWorkKind}",reason="${reason}",state="processing"} 1\n`,
+      );
+    } finally {
+      metrics.stop();
+    }
   });
 
   it("normalizes optional diagnostic dimensions", () => {

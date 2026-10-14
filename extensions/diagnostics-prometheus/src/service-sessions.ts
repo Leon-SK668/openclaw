@@ -135,7 +135,7 @@ export function recordSessionDiagnosticEvent(
       } else {
         store.counter(
           "openclaw_session_long_running_total",
-          "Progressing long-running session observations by active work kind.",
+          "Long-running session observations, including permitted waits, by active work kind.",
           labels,
         );
       }
