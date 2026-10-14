@@ -443,6 +443,8 @@ function recordDiagnosticEvent(
       return;
     case "session.state":
     case "session.stuck":
+    case "session.stalled":
+    case "session.long_running":
     case "session.turn.created":
       recordSessionDiagnosticEvent(store, evt);
       return;
