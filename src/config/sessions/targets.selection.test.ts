@@ -7,7 +7,7 @@ import { resolveConfiguredAgentDatabaseTargets, resolveSessionStoreTargets } fro
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 describe("session store target selection", () => {
-  it.each(["default", "template", "fixed", "shared"])(
+  it.each(["default", "template", "fixed", "shared"] as const)(
     "selects one database owner without changing %s store ownership",
     (layout) => {
       const root = tempDirs.make("configured-database-selection-");
@@ -33,7 +33,7 @@ describe("session store target selection", () => {
       };
       const firstDatabase = path.join(root, "agents", "first", "agent", "openclaw-agent.sqlite");
       const secondDatabase = path.join(root, "agents", "second", "agent", "openclaw-agent.sqlite");
-      const expectedPaths: Record<string, Record<string, string[]>> = {
+      const expectedPaths = {
         default: {
           first: [firstDatabase],
           second: [secondDatabase],
