@@ -130,6 +130,34 @@ describe("agent directory registry", () => {
     }
   });
 
+  it("reuses all registered directory observations beyond 256 agents", () => {
+    const root = tempDirs.make("openclaw-agent-dir-fleet-");
+    const fleet = Array.from({ length: 257 }, (_, index) => ({
+      agentId: `fleet-${index}`,
+      agentDir: path.join(root, `fleet-${index}`, "agent"),
+    }));
+    for (const owner of fleet) {
+      fs.mkdirSync(owner.agentDir, { recursive: true });
+      registerResolvedAgentDir(owner);
+    }
+    const watch = vi.spyOn(fs, "watch");
+    const realpath = vi.spyOn(fs.realpathSync, "native");
+    try {
+      for (const owner of fleet) {
+        expect(registerResolvedAgentDir(owner)).toBe(false);
+        expect(resolveRegisteredAgentIdForDir(owner.agentDir)).toBe(owner.agentId);
+      }
+      expect(watch).not.toHaveBeenCalled();
+      expect(realpath).not.toHaveBeenCalled();
+    } finally {
+      watch.mockRestore();
+      realpath.mockRestore();
+      for (const owner of fleet) {
+        unregisterResolvedAgentDir(owner);
+      }
+    }
+  });
+
   it("retains ancestor watches when a named notification leaves directory identity unchanged", () => {
     const agentDir = tempDirs.make("openclaw-agent-dir-unchanged-");
     const watch = vi.spyOn(fs, "watch");

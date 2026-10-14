@@ -13,7 +13,13 @@ type Source = { path: string; watcher: fs.FSWatcher; directories: Set<Directory>
 
 const directories = new Map<string, Directory>();
 const sources = new Map<string, Source>();
-let fallback: ReturnType<typeof setTimeout> | undefined;
+let fallback:
+  | {
+      timer: ReturnType<typeof setTimeout>;
+      deadline: Directory["nextFallback"];
+      dueAtMs: number;
+    }
+  | undefined;
 const REPAIR_INTERVAL_MS = 30_000;
 const RECOVERY_INTERVAL_MS = 300_000;
 
@@ -44,33 +50,51 @@ function fallbackInterval(directory: Directory): number {
     : REPAIR_INTERVAL_MS;
 }
 
-function scheduleFallback() {
-  clearTimeout(fallback);
-  fallback = undefined;
+function scheduleFallback(changed?: Directory) {
   if (!directories.size) {
     return;
   }
-  const delayMs = Math.min(...Array.from(directories.values(), fallbackRemaining));
-  fallback = runInDetachedAsyncContext(() =>
-    setTimeout(
-      () => {
-        for (const entry of Array.from(directories.values())) {
-          if (fallbackRemaining(entry) > 0 || directories.get(entry.path) !== entry) {
-            continue;
-          }
-          if (!entry.source || (entry.source.path !== entry.path && fs.existsSync(entry.path))) {
-            detach(entry);
-            attach(entry);
-          }
-          // Native events are primary; recovery covers missed notifications.
-          entry.nextFallback = nextFallback(fallbackInterval(entry));
-          notify(entry);
-        }
-        scheduleFallback();
-      },
-      Math.max(0, Math.ceil(delayMs)),
-    ).unref(),
+  // New subscriptions need only advance the armed deadline, not rescan the fleet.
+  // A retired earliest subscriber may cause one harmless early recovery pass.
+  const deadlines = changed
+    ? [changed.nextFallback]
+    : Array.from(directories.values(), (entry) => entry.nextFallback);
+  if (fallback) {
+    deadlines.push(fallback.deadline);
+  }
+  const deadline = {
+    atMs: Math.min(...deadlines.map((entry) => entry.atMs)),
+    elapsedAtMs: Math.min(...deadlines.map((entry) => entry.elapsedAtMs)),
+  };
+  const elapsedNow = performance.now();
+  const delayMs = Math.max(
+    0,
+    Math.ceil(Math.min(deadline.atMs - Date.now(), deadline.elapsedAtMs - elapsedNow)),
   );
+  const dueAtMs = elapsedNow + delayMs;
+  if (fallback && fallback.dueAtMs <= dueAtMs) {
+    return;
+  }
+  clearTimeout(fallback?.timer);
+  const timer = runInDetachedAsyncContext(() =>
+    setTimeout(() => {
+      fallback = undefined;
+      for (const entry of Array.from(directories.values())) {
+        if (fallbackRemaining(entry) > 0 || directories.get(entry.path) !== entry) {
+          continue;
+        }
+        if (!entry.source || (entry.source.path !== entry.path && fs.existsSync(entry.path))) {
+          detach(entry);
+          attach(entry);
+        }
+        // Native events are primary; recovery covers missed notifications.
+        entry.nextFallback = nextFallback(fallbackInterval(entry));
+        notify(entry);
+      }
+      scheduleFallback();
+    }, delayMs).unref(),
+  );
+  fallback = { timer, deadline, dueAtMs };
 }
 
 function detach(directory: Directory) {
@@ -124,9 +148,9 @@ function attach(directory: Directory) {
               if (directories.get(entry.path) === entry) {
                 attach(entry);
                 retainEarlierFallback(entry, nextFallback(fallbackInterval(entry)));
+                scheduleFallback(entry);
               }
             }
-            scheduleFallback();
           }
         }),
       );
@@ -139,8 +163,8 @@ function attach(directory: Directory) {
           detach(entry);
           notify(entry);
           retainEarlierFallback(entry, nextFallback(REPAIR_INTERVAL_MS));
+          scheduleFallback(entry);
         }
-        scheduleFallback();
       });
       return;
     } catch {
@@ -174,7 +198,7 @@ export function observeOwnedDirectory(
   const listener: Listener = (filename) => onChange(filename);
   selected.listeners.set(listener, options?.recoveryIntervalMs ?? RECOVERY_INTERVAL_MS);
   retainEarlierFallback(selected, nextFallback(fallbackInterval(selected)));
-  scheduleFallback();
+  scheduleFallback(selected);
   return {
     close() {
       if (!selected.listeners.delete(listener) || selected.listeners.size) {
@@ -183,10 +207,8 @@ export function observeOwnedDirectory(
       directories.delete(key);
       detach(selected);
       if (!directories.size) {
-        clearTimeout(fallback);
+        clearTimeout(fallback?.timer);
         fallback = undefined;
-      } else {
-        scheduleFallback();
       }
     },
   };

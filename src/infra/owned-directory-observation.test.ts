@@ -23,6 +23,24 @@ afterEach(() => {
 });
 
 describe("process-owned directory observation", () => {
+  it("retains one recovery timer when a fleet subscribes at the same deadline", () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    const root = tempDirs.make("owned-directory-fleet-");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const listener = vi.fn();
+    for (let index = 0; index < 257; index++) {
+      const directory = path.join(root, `agent-${index}`);
+      fs.mkdirSync(directory);
+      subscriptions.push(observeOwnedDirectory(directory, listener));
+    }
+    expect(timeout).toHaveBeenCalledOnce();
+    subscriptions.pop()!.close();
+    expect(timeout).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(300_000);
+    expect(listener).toHaveBeenCalledTimes(256);
+  });
+
   it("recovers healthy watches every five minutes while authority subscribers keep 30 seconds", () => {
     vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(0);

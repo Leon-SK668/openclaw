@@ -66,8 +66,11 @@ function registryPath(agentDir: string, env?: NodeJS.ProcessEnv, registering = f
       ),
     );
   }
+  // Retain one prepared path per registered directory, including this pending registration.
+  // Keep extra alias spellings bounded without evicting every entry in a larger fleet walk.
+  const capacity = Math.max(256, agentIdsByDir.size + 1);
   for (const [oldestPath, oldest] of preparedPaths) {
-    if (preparedPaths.size <= 256) {
+    if (preparedPaths.size <= capacity) {
       break;
     }
     preparedPaths.delete(oldestPath);
