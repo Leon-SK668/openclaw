@@ -13,7 +13,11 @@ describe("session store target selection", () => {
       const root = tempDirs.make("configured-database-selection-");
       const env = { OPENCLAW_STATE_DIR: root };
       const cfg: OpenClawConfig = {
-        agents: { ownership: "explicit", entries: { first: {}, second: {} } },
+        agents: {
+          ownership: "explicit",
+          entries: { first: {}, second: {} },
+          defaults: { sessionStore: { agentId: "first" } },
+        },
         acp: { allowedAgents: ["acp-only"] },
         ...(layout === "default"
           ? {}
@@ -27,11 +31,40 @@ describe("session store target selection", () => {
               },
             }),
       };
+      const firstDatabase = path.join(root, "agents", "first", "agent", "openclaw-agent.sqlite");
+      const secondDatabase = path.join(root, "agents", "second", "agent", "openclaw-agent.sqlite");
+      const expectedPaths: Record<string, Record<string, string[]>> = {
+        default: {
+          first: [firstDatabase],
+          second: [secondDatabase],
+          "acp-only": [path.join(root, "agents", "acp-only", "agent", "openclaw-agent.sqlite")],
+        },
+        template: {
+          first: [path.join(root, "first", "openclaw-agent.sqlite"), firstDatabase],
+          second: [path.join(root, "second", "openclaw-agent.second.sqlite"), secondDatabase],
+          "acp-only": [path.join(root, "acp-only", "openclaw-agent.acp-only.sqlite")],
+        },
+        fixed: {
+          first: [path.join(root, "fixed", "openclaw-agent.sqlite"), firstDatabase],
+          second: [path.join(root, "fixed", "openclaw-agent.second.sqlite"), secondDatabase],
+          "acp-only": [path.join(root, "fixed", "openclaw-agent.acp-only.sqlite")],
+        },
+        shared: {
+          first: [path.join(root, "fixed", "shared.sqlite"), firstDatabase],
+          second: [secondDatabase],
+          "acp-only": [],
+        },
+      };
+      const expected = Object.entries(expectedPaths[layout]).flatMap(([agentId, paths]) =>
+        paths.map((pathname) => ({ agentId, path: pathname })),
+      );
       const all = resolveConfiguredAgentDatabaseTargets(cfg, { env, registeredDatabases: [] });
+      expect(all).toHaveLength(expected.length);
+      expect(all).toEqual(expect.arrayContaining(expected));
       for (const agentId of ["first", "second", "acp-only", "missing"]) {
         expect(
           resolveConfiguredAgentDatabaseTargets(cfg, { env, registeredDatabases: [], agentId }),
-        ).toEqual(all.filter((target) => target.agentId === agentId));
+        ).toEqual(expected.filter((target) => target.agentId === agentId));
       }
     },
   );
