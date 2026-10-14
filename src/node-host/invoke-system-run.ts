@@ -304,9 +304,30 @@ async function parseSystemRunPhase(opts: HandleSystemRunInvokeOptions) {
   ) {
     return invalid("executionContext invalid or unsupported");
   }
+  const inheritedEnv = withHostExecInheritedEnvOmitted(
+    [
+      // The node owns its service identity. Lending it to child CLI commands makes
+      // Gateway status/update select the node service; explicit overrides still apply.
+      "OPENCLAW_SERVICE_MARKER",
+      "OPENCLAW_SERVICE_KIND",
+      "OPENCLAW_LAUNCHD_LABEL",
+      "OPENCLAW_SYSTEMD_UNIT",
+      "OPENCLAW_WINDOWS_TASK_NAME",
+      "OPENCLAW_WINDOWS_TASK_HIDDEN_LAUNCHER",
+      "OPENCLAW_TASK_SCRIPT_NAME",
+      "OPENCLAW_LOG_PREFIX",
+      "OPENCLAW_GATEWAY_SERVICE_PID",
+    ],
+    () => sanitizeHostExecEnv(),
+  );
   const env = withHostExecInheritedEnvOmitted(
     opts.params.executionContext ? ["OPENCLAW_CHANNEL_CONTEXT", SUBAGENT_EXEC_ENV_VAR] : [],
-    () => sanitizeHostExecEnv({ overrides: envOverrides, blockPathOverrides: true }),
+    () =>
+      sanitizeHostExecEnv({
+        baseEnv: inheritedEnv,
+        overrides: envOverrides,
+        blockPathOverrides: true,
+      }),
   );
   const validatedApprovalSource: ExecHostRequest["approvalSource"] = approvalSource ?? undefined;
   const execution = { sessionKey, runId, commandText, suppressNotifyOnExit };

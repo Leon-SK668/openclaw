@@ -1265,6 +1265,42 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     },
   );
 
+  it.each([undefined, { chatId: "chat-1" }])(
+    "does not lend the node service identity to a child with routing context %j",
+    async (executionContext) => {
+      const serviceEnv = {
+        OPENCLAW_SERVICE_MARKER: "openclaw",
+        OPENCLAW_SERVICE_KIND: "node",
+        OPENCLAW_LAUNCHD_LABEL: "ai.openclaw.node",
+        OPENCLAW_SYSTEMD_UNIT: "openclaw-node",
+        OPENCLAW_WINDOWS_TASK_NAME: "OpenClaw Node",
+        OPENCLAW_WINDOWS_TASK_HIDDEN_LAUNCHER: "1",
+        OPENCLAW_TASK_SCRIPT_NAME: "node.cmd",
+        OPENCLAW_LOG_PREFIX: "node",
+        OPENCLAW_GATEWAY_SERVICE_PID: "12345",
+      };
+      await withEnvAsync(serviceEnv, async () => {
+        const { runCommand, sendInvokeResult } = await runLocal({ executionContext });
+        expectOk(sendInvokeResult);
+        const env = firstMockCall(runCommand)[2];
+        for (const key of Object.keys(serviceEnv)) {
+          expect(env).not.toHaveProperty(key);
+        }
+        expect(process.env).toMatchObject(serviceEnv);
+      });
+    },
+  );
+
+  it("keeps explicit service selectors in direct node-exec requests", async () => {
+    await withEnvAsync({ OPENCLAW_SYSTEMD_UNIT: "openclaw-node" }, async () => {
+      const overrides = { OPENCLAW_SYSTEMD_UNIT: "custom-gateway.service" };
+      const { runCommand, sendInvokeResult } = await runLocal({ env: overrides });
+      expectOk(sendInvokeResult);
+      expect(firstMockCall(runCommand)[2]).toMatchObject(overrides);
+      expect(process.env.OPENCLAW_SYSTEMD_UNIT).toBe("openclaw-node");
+    });
+  });
+
   it("applies shell-wrapper env allowlist for shell executable commands without inline payload", async () => {
     const { runCommand, sendInvokeResult } = await runLocal({
       command: ["/bin/sh", "./script.sh"],
