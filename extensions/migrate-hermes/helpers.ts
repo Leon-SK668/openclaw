@@ -61,7 +61,17 @@ export async function appendItem(item: MigrationItem): Promise<MigrationItem> {
     return markMigrationItemError(item, MIGRATION_REASON_MISSING_SOURCE_OR_TARGET);
   }
   try {
-    const content = await fs.readFile(item.source, "utf8");
+    const bytes = await fs.readFile(item.source);
+    let content: string;
+    try {
+      // Append only losslessly decoded text; preserve a valid BOM and literal replacement characters.
+      content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      return markMigrationItemError(
+        item,
+        "Source file is not valid UTF-8. Re-encode it as UTF-8 and retry migration.",
+      );
+    }
     const header = `\n\n<!-- Imported from Hermes: ${path.basename(item.source)} -->\n\n`;
     const body = content.trimEnd();
     if (!body) {
