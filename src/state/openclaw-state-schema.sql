@@ -295,7 +295,7 @@ CREATE TABLE IF NOT EXISTS session_state_heads (
   pruned_max_sequence INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (session_key, agent_id)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 -- Notifiable watcher identity is the bare session key, matching the process-local
 -- system-event queue it feeds. Provenance distinguishes explicit immediate-wake
@@ -1625,19 +1625,12 @@ CREATE TABLE IF NOT EXISTS task_runs (
   detail_json TEXT
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id);
-CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
-CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_status ON task_runs(runtime, status);
-CREATE INDEX IF NOT EXISTS idx_task_runs_cleanup_after ON task_runs(cleanup_after);
-CREATE INDEX IF NOT EXISTS idx_task_runs_last_event_at ON task_runs(last_event_at);
-CREATE INDEX IF NOT EXISTS idx_task_runs_owner_key ON task_runs(owner_key);
-CREATE INDEX IF NOT EXISTS idx_task_runs_parent_flow_id ON task_runs(parent_flow_id);
-CREATE INDEX IF NOT EXISTS idx_task_runs_child_session_key ON task_runs(child_session_key);
-CREATE INDEX IF NOT EXISTS idx_task_runs_requester_session_key ON task_runs(requester_session_key);
-CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_source_ended
-  ON task_runs(runtime, source_id, ended_at, created_at, task_id);
-CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_ended
-  ON task_runs(runtime, ended_at, created_at, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_run
+  ON task_runs(runtime, run_id, source_id, created_at, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_cron_runtime_order
+  ON task_runs(runtime, created_at, task_id) WHERE runtime = 'cron';
+CREATE INDEX IF NOT EXISTS idx_task_runs_cron_source_order
+  ON task_runs(source_id, created_at, task_id) WHERE runtime = 'cron';
 
 CREATE TABLE IF NOT EXISTS subagent_runs (
   run_id TEXT NOT NULL PRIMARY KEY,
@@ -2721,6 +2714,8 @@ CREATE TABLE IF NOT EXISTS user_profile_identities (
   subject TEXT NOT NULL,
   profile_id TEXT NOT NULL,
   canonical_login TEXT,
+  -- Host-scoped verified credit evidence; current profile bindings govern attribution.
+  verified_email_json TEXT,
   created_at INTEGER NOT NULL,
   authorization_id TEXT,
   authorization_basis_json TEXT,
