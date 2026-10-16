@@ -229,6 +229,7 @@ suite.define(() => {
           .count(),
       ).toBe(0);
       const fastMode = page.locator('.new-session-page__composer [data-chat-speed-option="on"]');
+      await page.locator('.new-session-page__composer [data-chat-thinking-select="true"]').click();
       expect(await fastMode.count()).toBe(1);
       expect(await fastMode.getAttribute("aria-checked")).toBe("false");
       expect(
@@ -236,6 +237,7 @@ suite.define(() => {
           element.classList.contains("chat-controls__speed-option"),
         ),
       ).toBe(true);
+      await page.keyboard.press("Escape");
       expect(await incognitoToggle.getAttribute("aria-checked")).toBe("false");
       await incognitoToggle.click();
       await expect.poll(() => incognitoToggle.getAttribute("aria-checked")).toBe("true");
@@ -361,7 +363,7 @@ suite.define(() => {
         .poll(() => page.locator(".chat-controls__permission-option").first().isVisible())
         .toBe(true);
       await captureProjectUiProof(suite, page, "mobile-new-session-permissions-open.png", {
-        surface: page.locator('.chat-controls__permission-picker [part="menu"]'),
+        surface: page.locator(".chat-controls__permission-menu"),
         content: [page.locator(".chat-controls__permission-option").first()],
       });
       await page.keyboard.press("Escape");
@@ -374,7 +376,7 @@ suite.define(() => {
         await revealChatModelOption(capturedModelOption);
       }
       await captureProjectUiProof(suite, page, "mobile-new-session-model-open.png", {
-        surface: page.locator('.chat-controls__model-picker wa-popup [part="popup"]'),
+        surface: page.locator(".chat-controls__model-picker > [data-anchored-overlay]"),
         content: [capturedModelOption],
       });
       expect(
@@ -387,7 +389,7 @@ suite.define(() => {
       await page.locator('[data-chat-thinking-select="true"]').click();
       await expect.poll(() => page.locator(".chat-controls__effort-menu").isVisible()).toBe(true);
       await captureProjectUiProof(suite, page, "mobile-new-session-effort-open.png", {
-        surface: page.locator('.chat-controls__effort-picker wa-popup [part="popup"]'),
+        surface: page.locator(".chat-controls__effort-picker > [data-anchored-overlay]"),
         content: [fastMode],
       });
       await page.keyboard.press("Escape");

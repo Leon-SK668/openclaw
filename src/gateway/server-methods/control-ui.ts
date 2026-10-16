@@ -1,22 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
-import { resolveConfiguredGitHubHost } from "../../agents/github-host.js";
-import {
-  GitHubIdentityError,
-  prepareGitHubReadIdentity,
-  resolveConfiguredGitHubToolIdentity,
-} from "../../agents/github-tool-identity.js";
+import { GitHubIdentityError } from "../../agents/github-tool-identity.js";
 import {
   getSubagentSessionListReadSnapshotIdentity,
   prepareSubagentSessionListReadCache,
 } from "../../agents/subagents/registry/subagent-registry-state.js";
 import { getRuntimeConfigSnapshotMetadata } from "../../config/runtime-snapshot.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
-import { getActiveSecretsRuntimeConfigSnapshot } from "../../secrets/runtime-state.js";
 import { getSessionRepositoryWorkspaceStore } from "../../state/session-repository-workspaces.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import type { ControlUiSessionPreview } from "../control-ui-contract.js";
+import { withControlUiSessionGitHubRead } from "../control-ui-session-github-read.js";
 import type {
   ControlUiSessionPullRequestChecksParams,
   loadControlUiSessionPullRequestChecks,
@@ -29,8 +24,12 @@ import {
 } from "../control-ui-session-pr-read.js";
 import { withControlUiSessionPrSource } from "../control-ui-session-pr-source.js";
 import { parseControlUiSessionPullRequestsSubscribeParams } from "../control-ui-session-pr-subscriptions.js";
-import { requestCurrentGitHubOAuthRefresh } from "../github-oauth-lifecycle.js";
-import { gitHubPublicApi, type ControlUiGitHubPreviewIdentity } from "../github-public-api.js";
+import {
+  gitHubPublicApi,
+  type ControlUiGitHubPreviewIdentity,
+  type ControlUiGitHubSessionIdentity,
+} from "../github-public-api.js";
+import { prepareGitHubReaderIdentity } from "../github-reader-identity.js";
 import { resolveRequestedSessionAgentId as resolveRequestedGlobalAgentId } from "../session-request-agent.js";
 import { withReadySessionRows } from "../session-row-prepared-read.js";
 import { getSessionRowProjection } from "../session-row-projection-access.js";
@@ -56,17 +55,6 @@ async function prepareControlUiGitHubIdentity(
   { context, client, signal, hasCurrentClientAuthority }: GatewayRequestHandlerOptions,
   agentId: string,
 ) {
-  const config = context.getRuntimeConfig();
-  const configuredIdentity = () => {
-    const current = context.getRuntimeConfig();
-    if (resolveConfiguredGitHubHost(current) !== "github.com") {
-      return undefined;
-    }
-    return (
-      resolveConfiguredGitHubToolIdentity({ config: current, agentId, scope: "agent" }) ??
-      resolveConfiguredGitHubToolIdentity({ config: current, agentId, scope: "system" })
-    );
-  };
   // Nested plugin requests may decorate the client; transport authority retains its owner.
   const assertActive = () => {
     if (
@@ -79,39 +67,23 @@ async function prepareControlUiGitHubIdentity(
       throw new GitHubReadRequestInactiveError();
     }
   };
-  assertActive();
-  // Without a managed selection, retain service/env/anonymous access without
-  // probing native gh. Both paths must still own the selection at delivery.
-  const identity = configuredIdentity()
-    ? await prepareGitHubReadIdentity({
-        config,
-        sourceConfig: getActiveSecretsRuntimeConfigSnapshot()?.sourceConfig ?? config,
-        agentId,
-        allowStale: true,
-        getCurrentConfig: () => context.getRuntimeConfig(),
-        assertActive,
-        refresh: () => requestCurrentGitHubOAuthRefresh(agentId),
-      })
-    : undefined;
-  return {
-    identity,
-    assertSelected:
-      identity?.assertSelected ??
-      (() => {
-        assertActive();
-        if (configuredIdentity()) {
-          throw new GitHubIdentityError("changed");
-        }
-      }),
-  };
+  return prepareGitHubReaderIdentity(context, agentId, assertActive);
 }
 
-function createGitHubReadHandler<T>(
+function createGitHubReadHandler<
+  T extends NonNullable<ReturnType<typeof gitHubPublicApi.parseGitHubTarget>>,
+>(
   method: string,
   parseTarget: (params: unknown) => T | null,
   load: (
     target: T,
     identity?: ControlUiGitHubPreviewIdentity,
+    fetchImpl?: typeof fetch,
+    refresh?: boolean,
+  ) => Promise<unknown>,
+  loadSession: (
+    target: T,
+    identity: ControlUiGitHubSessionIdentity,
     fetchImpl?: typeof fetch,
     refresh?: boolean,
   ) => Promise<unknown>,
@@ -134,6 +106,16 @@ function createGitHubReadHandler<T>(
     const startedAt = performance.now();
     let preparedAt: number | undefined;
     try {
+      if (params.sessionKey !== undefined || params.githubHost !== undefined) {
+        await withControlUiSessionGitHubRead(
+          options,
+          resolved.agentId,
+          target,
+          (identity) => loadSession(target, identity, undefined, params.refresh === true),
+          (result) => respond(true, result, undefined),
+        );
+        return;
+      }
       const { identity, assertSelected } = await prepareControlUiGitHubIdentity(
         options,
         resolved.agentId,
@@ -224,6 +206,18 @@ async function withControlUiSessionPreview(
   const projection = getSessionRowProjection(context);
   if (!projection) {
     consume(null);
+    return;
+  }
+  const previewConfig = context.getRuntimeConfig();
+  const previewOwner = resolveRequestedGlobalAgentId(previewConfig, sessionKey);
+  const preview = previewOwner.ok
+    ? projection.readPreview({ key: sessionKey, agentId: previewOwner.agentId })
+    : null;
+  if (preview !== undefined) {
+    const entryFilter = createSessionListEntryFilter({ client, cfg: previewConfig });
+    consume(
+      preview && (!entryFilter || entryFilter(preview.sessionKey, preview.entry)) ? preview : null,
+    );
     return;
   }
   await withReadySessionRows(
@@ -436,11 +430,14 @@ export function createControlUiHandlers(
       "controlUi.githubPreview",
       (params) => gitHubPublicApi.parseControlUiGitHubPreviewTarget(params),
       loadGitHubPreview,
+      (target, identity, fetchImpl) =>
+        gitHubPublicApi.loadSessionGitHubPreview(target, identity, fetchImpl),
     ),
     "controlUi.githubDetail": createGitHubReadHandler(
       "controlUi.githubDetail",
       (params) => gitHubPublicApi.parseGitHubTarget(params),
       (...args) => gitHubPublicApi.loadGitHubDetail(...args),
+      (...args) => gitHubPublicApi.loadSessionGitHubDetail(...args),
     ),
     "controlUi.sessionPreview": async ({
       params,
