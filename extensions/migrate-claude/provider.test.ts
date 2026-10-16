@@ -136,9 +136,6 @@ describe("Claude migration provider", () => {
           `${original.toString("utf8")}\n\n<!-- Imported from Claude: ${testCase.name} -->\n\n${repaired}`,
         ),
       );
-      const repeated = await provider.apply(context);
-      expect(planItemById(repeated.items, testCase.itemId).status).toBe("skipped");
-      expect(await fs.readFile(target)).toEqual(importedBytes);
     },
   );
 

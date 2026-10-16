@@ -61,10 +61,8 @@ export async function appendItem(item: MigrationItem): Promise<MigrationItem> {
   }
   try {
     const content = await fs.readFile(item.source);
-    // Replacement decoding would persist altered model-visible instructions.
     if (!isUtf8(content)) {
-      return markMigrationItemError(
-        item,
+      throw new Error(
         `Claude instruction file is not valid UTF-8: ${item.source}. Re-save or re-encode it as UTF-8, then rerun the migration.`,
       );
     }
