@@ -67,7 +67,7 @@ function emit(mode: OutputMode, value: unknown, humanFallback: () => string): vo
 function emitError(mode: OutputMode, message: string, code = "ERR"): void {
   const scrubbed = scrubSentinel(message);
   if (mode === "json") {
-    process.stderr.write(`${JSON.stringify({ error: { code, message: scrubbed } })}\n`);
+    process.stdout.write(`${JSON.stringify({ error: { code, message: scrubbed } })}\n`);
     return;
   }
   process.stderr.write(`${code}: ${scrubbed}\n`);
