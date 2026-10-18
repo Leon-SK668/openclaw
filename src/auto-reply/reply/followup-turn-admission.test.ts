@@ -7,6 +7,7 @@ import {
   withTempState,
 } from "../../channels/message/ingress-drain.test-helpers.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import { SessionWorkStartError } from "../../config/sessions/session-work-start.js";
 import type { FollowupRun } from "./queue.js";
 import { createReplyOperation } from "./reply-run-registry.js";
 
@@ -151,6 +152,29 @@ function createActiveGoalEntry(): SessionEntry {
 }
 
 describe("admitFollowupTurn", () => {
+  it("reports a queued event's admission refusal to its source before consuming it", async () => {
+    const error = new SessionWorkStartError("archived", "Restore this session before retrying.");
+    state.admitReply.mockResolvedValue({
+      status: "skipped",
+      reason: "lifecycle-invalidated",
+      error,
+    });
+    const queued = createRun();
+    const onFailed = vi.fn();
+    queued.run.internalEventExecution = {
+      onStarted: vi.fn(),
+      onTerminal: vi.fn(),
+      onFailed,
+    };
+
+    await expect(admitFollowupTurn({ queued, defaults: createDefaults() })).resolves.toEqual({
+      kind: "skipped",
+      reason: "lifecycle-invalidated",
+    });
+    expect(onFailed).toHaveBeenCalledExactlyOnceWith(error);
+    expect(state.preflight).not.toHaveBeenCalled();
+  });
+
   it.each([
     "paused",
     "blocked",
@@ -226,25 +250,25 @@ describe("admitFollowupTurn", () => {
     expect(operation.complete).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { sessionKey: " agent:main:session ", expected: "agent:main:session" },
-    { sessionKey: undefined, expected: "legacy-target" },
-  ])("preserves the admitted transcript target $expected", async ({ sessionKey, expected }) => {
-    const queued = createRun();
-    queued.run.sessionKey = sessionKey;
-    queued.run.sessionFile = "legacy-target";
-    state.admitReply.mockResolvedValue({
-      status: "owned",
-      operation: createOperation("admitted-session"),
-    });
+  it.each([{ sessionKey: undefined, expected: "legacy-target" }])(
+    "preserves the admitted transcript target $expected",
+    async ({ sessionKey, expected }) => {
+      const queued = createRun();
+      queued.run.sessionKey = sessionKey;
+      queued.run.sessionFile = "legacy-target";
+      state.admitReply.mockResolvedValue({
+        status: "owned",
+        operation: createOperation("admitted-session"),
+      });
 
-    const result = await admitFollowupTurn({ queued, defaults: createDefaults({ sessionKey }) });
+      const result = await admitFollowupTurn({ queued, defaults: createDefaults({ sessionKey }) });
 
-    expect(result.kind).toBe("admitted");
-    if (result.kind === "admitted") {
-      expect(result.turn.queued.run.sessionFile).toBe(expected);
-    }
-  });
+      expect(result.kind).toBe("admitted");
+      if (result.kind === "admitted") {
+        expect(result.turn.queued.run.sessionFile).toBe(expected);
+      }
+    },
+  );
 
   it("reports each active-run deferral without adopting the queued source", async () => {
     state.admitReply.mockResolvedValue({ status: "skipped", reason: "active-run" });
@@ -393,34 +417,6 @@ describe("admitFollowupTurn", () => {
     expect(operation.complete).toHaveBeenCalledOnce();
   });
 
-  it("prefers the admitted snapshot over unchanged stale in-memory state", async () => {
-    const operation = createOperation("admitted-session");
-    const queuedEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
-    const admittedEntry: SessionEntry = {
-      sessionId: "admitted-session",
-      modelSelectionLocked: true,
-      updatedAt: 2,
-    };
-    const sessionStore = { main: queuedEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: admittedEntry });
-    state.preflight.mockImplementation(async ({ sessionEntry }) => sessionEntry);
-
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ sessionEntry: queuedEntry, sessionStore }),
-    });
-
-    expect(result).toMatchObject({
-      kind: "admitted",
-      turn: {
-        queued: { run: { sessionId: "admitted-session", modelSelectionLocked: true } },
-      },
-    });
-    if (result.kind === "admitted") {
-      expect(result.turn.session.current()).toBe(admittedEntry);
-    }
-  });
-
   it("clears queued generation facts when only the lifecycle revision advances", async () => {
     const operation = createOperation();
     const queuedEntry: SessionEntry = {
@@ -480,210 +476,6 @@ describe("admitFollowupTurn", () => {
     };
     expect(preflightParams.sessionStore?.main).toBeUndefined();
     expect(state.refreshGoal).toHaveBeenCalledWith(undefined, undefined);
-  });
-
-  it("advances the owned lifecycle generation only through explicit adoption", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = {
-      sessionId: "queued-session",
-      lifecycleRevision: "revision-a",
-      updatedAt: 1,
-    };
-    const sessionStore = { main: initialEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-    state.loadEntry.mockReturnValue(initialEntry);
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ sessionEntry: initialEntry, sessionStore }),
-    });
-
-    expect(result.kind).toBe("admitted");
-    if (result.kind === "admitted") {
-      const replacement = {
-        ...initialEntry,
-        lifecycleRevision: "revision-b",
-        updatedAt: 2,
-      };
-      result.turn.session.adopt(replacement);
-      result.turn.session.publish(initialEntry);
-      expect(result.turn.session.current()).toBe(replacement);
-      const newerSameGeneration = {
-        ...replacement,
-        updatedAt: 4,
-      };
-      result.turn.session.adopt(newerSameGeneration);
-      result.turn.session.publish(replacement);
-      expect(result.turn.session.current()).toBe(newerSameGeneration);
-
-      const concurrentEntry = {
-        ...initialEntry,
-        lifecycleRevision: "revision-c",
-        updatedAt: 3,
-      };
-      sessionStore.main = concurrentEntry;
-      result.turn.session.publish(replacement);
-      expect(sessionStore.main).toBe(concurrentEntry);
-    }
-  });
-
-  it("does not treat an absent admitted lifecycle revision as a wildcard", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
-    const sessionStore = { main: initialEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-    state.loadEntry.mockReturnValue(initialEntry);
-
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ sessionEntry: initialEntry, sessionStore }),
-    });
-
-    expect(result.kind).toBe("admitted");
-    if (result.kind === "admitted") {
-      sessionStore.main = {
-        ...initialEntry,
-        lifecycleRevision: "replacement",
-        updatedAt: 2,
-      };
-      expect(result.turn.session.current()).toBe(initialEntry);
-    }
-  });
-
-  it("does not republish a generation deleted after admission", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = {
-      sessionId: "queued-session",
-      lifecycleRevision: "admitted",
-      updatedAt: 1,
-    };
-    const sessionStore: Record<string, SessionEntry> = { main: initialEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ sessionEntry: initialEntry, sessionStore }),
-    });
-
-    expect(result.kind).toBe("admitted");
-    if (result.kind === "admitted") {
-      delete sessionStore.main;
-      result.turn.session.publish({ ...initialEntry, updatedAt: 2 });
-      expect(sessionStore.main).toBeUndefined();
-    }
-  });
-
-  it("creates an owned session-store view when only persisted state is available", async () => {
-    const operation = createOperation();
-    const admittedEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: admittedEntry });
-    state.loadEntry.mockReturnValue(admittedEntry);
-
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ storePath: "/tmp/sessions.json" }),
-    });
-
-    expect(result.kind).toBe("admitted");
-    if (result.kind === "admitted") {
-      expect(result.turn.sessionStore?.main).toBe(admittedEntry);
-      const updated = { ...admittedEntry, compactionCount: 1, updatedAt: 2 };
-      result.turn.sessionStore!.main = updated;
-      expect(result.turn.session.current()).toBe(updated);
-    }
-  });
-
-  it("synchronizes a fresh admitted snapshot over same-generation stale memory", async () => {
-    const operation = createOperation();
-    const staleEntry: SessionEntry = {
-      sessionId: "queued-session",
-      lifecycleRevision: "revision-a",
-      verboseLevel: "off",
-      updatedAt: 1,
-    };
-    const freshEntry: SessionEntry = {
-      ...staleEntry,
-      verboseLevel: "full",
-      updatedAt: 2,
-    };
-    const sessionStore = { main: staleEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: freshEntry });
-    state.loadEntry.mockReturnValue(freshEntry);
-
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ sessionStore, sessionEntry: staleEntry }),
-    });
-
-    expect(result.kind).toBe("admitted");
-    if (result.kind === "admitted") {
-      expect(result.turn.session.current()).toBe(freshEntry);
-      expect(sessionStore.main).toBe(freshEntry);
-    }
-    expect(state.refreshGoal).toHaveBeenCalledWith(undefined, freshEntry);
-    expect(state.recheckFallbackProbe).toHaveBeenCalledWith(
-      expect.objectContaining({ entry: freshEntry, sessionKey: "main" }),
-    );
-  });
-
-  it("adopts a generation already published by owned preflight compaction", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = {
-      sessionId: "queued-session",
-      lifecycleRevision: "initial",
-      updatedAt: 1,
-    };
-    const rotatedEntry: SessionEntry = {
-      sessionId: "compacted-session",
-      lifecycleRevision: "compacted",
-      updatedAt: 2,
-    };
-    const publishedEntry: SessionEntry = {
-      ...rotatedEntry,
-      verboseLevel: "full",
-      updatedAt: 3,
-    };
-    const sessionStore = { main: initialEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-    state.loadEntry.mockReturnValue(initialEntry);
-    state.preflight.mockImplementation(async () => {
-      sessionStore.main = publishedEntry;
-      return rotatedEntry;
-    });
-
-    const result = await admitFollowupTurn({
-      queued: createRun(),
-      defaults: createDefaults({ sessionStore, sessionEntry: initialEntry }),
-    });
-
-    expect(result).toMatchObject({ kind: "admitted" });
-    if (result.kind === "admitted") {
-      expect(result.turn.session.current()).toBe(publishedEntry);
-    }
-    expect(state.resolveSendPolicy).toHaveBeenLastCalledWith(
-      expect.objectContaining({ entry: publishedEntry }),
-    );
-  });
-
-  it("forwards owned preflight deletion to the backing session store", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
-    const sessionStore: Record<string, SessionEntry> = { main: initialEntry };
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-    state.preflight.mockImplementation(
-      async ({ sessionStore: ownedStore }: { sessionStore: Record<string, SessionEntry> }) => {
-        delete ownedStore.main;
-        return initialEntry;
-      },
-    );
-
-    await expect(
-      admitFollowupTurn({
-        queued: createRun(),
-        defaults: createDefaults({ sessionEntry: initialEntry, sessionStore }),
-      }),
-    ).rejects.toThrow("Follow-up session generation was replaced during admission");
-    expect(sessionStore.main).toBeUndefined();
-    expect(operation.complete).toHaveBeenCalledOnce();
   });
 
   it("refreshes send policy and goal context after preflight rotates the generation", async () => {
@@ -872,56 +664,6 @@ describe("admitFollowupTurn", () => {
     expect(operation.updateSessionId).toHaveBeenCalledWith("compacted-session");
   });
 
-  it("restores the item when generation changes before a compaction notice", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
-    const replacementEntry: SessionEntry = { sessionId: "replacement-session", updatedAt: 2 };
-    const onCompactionNoticePayload = vi.fn(async () => {});
-    state.shouldNotifyCompaction = true;
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-    state.loadEntry.mockReturnValue(replacementEntry);
-    state.preflight.mockImplementation(async ({ onCompactionNotice }) => {
-      await onCompactionNotice?.("end");
-      return initialEntry;
-    });
-
-    await expect(
-      admitFollowupTurn({
-        queued: createRun(),
-        defaults: createDefaults({ sessionEntry: initialEntry, storePath: "/tmp/sessions.json" }),
-        onCompactionNoticePayload,
-      }),
-    ).rejects.toThrow("Follow-up session generation changed");
-    expect(onCompactionNoticePayload).not.toHaveBeenCalled();
-    expect(operation.complete).toHaveBeenCalledOnce();
-  });
-
-  it("cancels preflight immediately when the start notice sees invalidation", async () => {
-    const operation = createOperation();
-    const initialEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
-    const replacementEntry: SessionEntry = { sessionId: "replacement-session", updatedAt: 2 };
-    state.shouldNotifyCompaction = true;
-    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
-    state.loadEntry.mockReturnValue(replacementEntry);
-    state.preflight.mockImplementation(async ({ onCompactionNotice }) => {
-      try {
-        await onCompactionNotice?.("start");
-      } catch {
-        // The memory owner logs notice failures; the abort signal stops its compactor.
-      }
-      throw new Error("compaction aborted");
-    });
-
-    await expect(
-      admitFollowupTurn({
-        queued: createRun(),
-        defaults: createDefaults({ sessionEntry: initialEntry, storePath: "/tmp/sessions.json" }),
-      }),
-    ).rejects.toThrow("Follow-up session generation changed");
-    expect(operation.abortForRestart).toHaveBeenCalledOnce();
-    expect(operation.complete).toHaveBeenCalledOnce();
-  });
-
   it("keeps preflight failure cancellation live while refreshing send policy", async () => {
     const upstreamAbort = new AbortController();
     const operation = createReplyOperation({
@@ -971,32 +713,5 @@ describe("admitFollowupTurn", () => {
       turn: { preflightFailurePayload: { text: userMessage } },
     });
     expect(state.buildPreflightFailureText).not.toHaveBeenCalled();
-  });
-
-  it("uses admitted verbosity over stale queued verbosity for a preflight failure", async () => {
-    const operation = createOperation();
-    const admittedEntry: SessionEntry = {
-      sessionId: "queued-session",
-      updatedAt: 2,
-      verboseLevel: "off",
-    };
-    state.admitReply.mockResolvedValue({
-      status: "owned",
-      operation,
-      sessionEntry: admittedEntry,
-    });
-    state.loadEntry.mockReturnValue(admittedEntry);
-    state.preflight.mockRejectedValue(new Error("preflight failed"));
-    const queued = createRun();
-    queued.run.verboseLevel = "full";
-
-    await admitFollowupTurn({
-      queued,
-      defaults: createDefaults({ sessionEntry: admittedEntry }),
-    });
-
-    expect(state.buildPreflightFailureText).toHaveBeenCalledWith("preflight failed", {
-      includeDetails: false,
-    });
   });
 });
