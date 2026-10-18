@@ -1,17 +1,33 @@
 // Announce loop-guard tests prove deferred delivery retries through its time
 // window, then gives up instead of looping forever after repeated failures.
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import type { SessionEntry } from "../../../config/sessions.js";
 import {
   configureMockSubagentRegistryPersistence,
   type MockSubagentRegistryRows,
 } from "../../subagent-test-fixtures.test-helpers.js";
 import { createLifecycleWaits } from "./subagent-registry.lifecycle-waits.test-support.js";
+import { prepareSubagentRecoveryFixture } from "./subagent-registry.persistence.test-support.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
-const sessionStore = vi.hoisted(() => ({
+const sessionStore = vi.hoisted((): Record<string, SessionEntry> => ({
   "agent:main:subagent:child-1": { sessionId: "sess-child-1", updatedAt: 1 },
   "agent:main:subagent:expired-child": { sessionId: "sess-expired", updatedAt: 1 },
   "agent:main:subagent:retry-budget": { sessionId: "sess-retry", updatedAt: 1 },
+}));
+
+vi.mock("../../../config/sessions/session-entry-read-runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../../../config/sessions/session-entry-read-runtime.js")
+  >()),
+  readSessionEntryReadOnlyInWorker: vi.fn<
+    typeof import("../../../config/sessions/session-entry-read-runtime.js").readSessionEntryReadOnlyInWorker
+  >(async (scope, assertCurrent) => {
+    assertCurrent?.();
+    const entry = await Promise.resolve(sessionStore[scope.sessionKey]);
+    assertCurrent?.();
+    return entry;
+  }),
 }));
 
 const mocks = vi.hoisted(() => ({
@@ -82,7 +98,6 @@ vi.mock("../../../state/openclaw-state-db-readonly.js", () => ({
     options?.onChunk?.(
       [...runs.values()].map((entry) => ({
         entry,
-        version: "fixture-version",
         createdAt: entry.createdAt,
       })),
     );
@@ -175,6 +190,7 @@ describe("announce loop guard (#18264)", () => {
       // Ended 10 minutes ago (well past ANNOUNCE_EXPIRY_MS of 5 min).
       runId: "test-expired-loop",
       childSessionKey: "agent:main:subagent:expired-child",
+      childSessionIdentity: { sessionId: "sess-expired" },
       requesterSessionKey: "agent:main:main",
       requesterDisplayKey: "agent:main:main",
       task: "expired test task",
@@ -224,6 +240,7 @@ describe("announce loop guard (#18264)", () => {
     const entry: SubagentRunRecord = {
       runId: "test-retry-budget",
       childSessionKey: "agent:main:subagent:retry-budget",
+      childSessionIdentity: { sessionId: "sess-retry" },
       requesterSessionKey: "agent:main:main",
       requesterDisplayKey: "agent:main:main",
       task: "retry window test",
@@ -243,6 +260,7 @@ describe("announce loop guard (#18264)", () => {
         ...(restoreDelayMs ? { nextAttemptAt: now + restoreDelayMs } : {}),
       },
     };
+    await prepareSubagentRecoveryFixture(entry, { entries: sessionStore });
     mocks.loadSubagentRegistryFromSqlite.mockReturnValue(new Map([[entry.runId, entry]]));
 
     await hydrateAndActivateRegistry();
@@ -288,6 +306,7 @@ describe("announce loop guard (#18264)", () => {
           {
             runId,
             childSessionKey: "agent:main:subagent:child-1",
+            childSessionIdentity: { sessionId: "sess-child-1" },
             requesterSessionKey: "agent:main:main",
             requesterDisplayKey: "agent:main:main",
             task: "rejection test",
@@ -306,6 +325,9 @@ describe("announce loop guard (#18264)", () => {
       ]),
     );
 
+    const entry = mocks.loadSubagentRegistryFromSqlite().get(runId)!;
+    await prepareSubagentRecoveryFixture(entry, { entries: sessionStore });
+
     await hydrateAndActivateRegistry();
     await flushAsync();
 
@@ -313,6 +335,7 @@ describe("announce loop guard (#18264)", () => {
       runId,
       (run) => run.cleanupHandled === false && run.delivery?.attemptCount === 1,
     );
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledOnce();
     expect(stored.cleanupCompletedAt).toBeUndefined();
     expect(stored.delivery?.lastAttemptAt).toBeTypeOf("number");
   });

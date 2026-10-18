@@ -15,6 +15,8 @@ export type AgentRunContext = {
   providerReviewTerminal?: import("../sessions/provider-review-terminal.js").ProviderReviewTerminalFact;
   /** Queued reply delivery, rather than runtime execution, owns chat completion. */
   completionSource?: "reply-dispatch";
+  /** Retained background work cannot add automatic delivery to a private run. */
+  sessionEventDelivery?: false;
   sessionKey?: string;
   /** Resolved agent owner, including for unscoped session keys. */
   agentId?: string;
@@ -26,6 +28,10 @@ export type AgentRunContext = {
   lifecycleStartedAt?: number;
   /** Shared with captured routing so terminal publication survives execution cleanup. */
   eventState?: AgentRunEventState;
+  /** Model request numbering survives provider fallback within this registered run. */
+  modelCallSequence?: { value: number };
+  /** Active provider-owned local wait; cleared on first response or call settlement. */
+  localModelWait?: { requestId: string };
   activeModel?: AgentRunModel;
   verboseLevel?: VerboseLevel;
   isHeartbeat?: boolean;

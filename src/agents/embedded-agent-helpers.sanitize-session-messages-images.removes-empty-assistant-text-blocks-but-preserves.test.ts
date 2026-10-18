@@ -1,9 +1,8 @@
 import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
-import {
-  sanitizeGoogleTurnOrdering,
-  sanitizeSessionMessagesImages,
-} from "./embedded-agent-helpers.js";
+import { createNoisyPngBuffer } from "../../test/helpers/image-fixtures.js";
+import { sanitizeGoogleTurnOrdering } from "./embedded-agent-helpers/google.js";
+import { sanitizeSessionMessagesImages } from "./embedded-agent-helpers/images.js";
 import {
   castAgentMessages,
   makeAgentAssistantMessage,
@@ -65,16 +64,6 @@ describe("sanitizeSessionMessagesImages", () => {
     const message = assistant([text("")], { providerReplay: { ...replay, replayIndex: 0 } });
     expect(await sanitizeSessionMessagesImages([message], "test")).toEqual([
       { ...message, content: [], providerReplay: undefined },
-    ]);
-  });
-
-  it.each(["error"] as const)("preserves an opaque replay owner after %s", async (stopReason) => {
-    const message = assistant([text("")], {
-      stopReason,
-      providerReplay: { ...replay, type: "opaque-checkpoint", replayIndex: undefined },
-    });
-    expect(await sanitizeSessionMessagesImages([message], "test")).toEqual([
-      { ...message, content: [] },
     ]);
   });
 
@@ -143,17 +132,51 @@ describe("sanitizeSessionMessagesImages", () => {
       { role: "assistant", content: [{ type: "thinking", thinking: "internal" }, text("visible")] },
     ]);
   });
+  it.each(["error"] as const)(
+    "keeps corrupt history images omitted after %s and a recovered reply",
+    async (stopReason) => {
+      const png = createNoisyPngBuffer(64, 64);
+      const truncated = png.subarray(0, Math.floor(png.length / 2)).toString("base64");
+      const valid = png.toString("base64");
+      const image = (data: string) => ({ type: "image" as const, data, mimeType: "image/png" });
+      const omitted = {
+        type: "text",
+        text: expect.stringMatching(/^\[session:history\] omitted image payload: .*decode/i),
+      };
+      const stored = castAgentMessages([
+        {
+          role: "user",
+          content: [text("inspect these"), image(truncated), image(valid)],
+          timestamp: 1,
+        },
+        assistant([call("t1")], { stopReason: "toolUse" }),
+        {
+          role: "toolResult",
+          toolCallId: "t1",
+          toolName: "read",
+          content: [text("permission denied"), image(truncated)],
+          isError: true,
+          timestamp: 3,
+        },
+        assistant([text("interrupted")], { stopReason }),
+      ]);
+      const original = structuredClone(stored);
+      const expected = castAgentMessages([
+        { ...stored[0], content: [text("inspect these"), omitted, image(valid)] },
+        stored[1],
+        { ...stored[2], content: [text("permission denied"), omitted] },
+        stored[3],
+      ]);
+      expect(await sanitizeSessionMessagesImages(stored, "session:history")).toEqual(expected);
+      expect(stored).toEqual(original);
 
-  it("preserves signed thinking order when removing empty text", async () => {
-    const first = { type: "thinking", thinking: "first", thought_signature: "sig-1" };
-    const redacted = { type: "redacted_thinking", data: "opaque", thought_signature: "sig-2" };
-    const input = castAgentMessages([
-      { role: "assistant", content: [first, text(""), text("visible"), redacted, text("tail")] },
-    ]);
-    expect(
-      await sanitizeSessionMessagesImages(input, "test", { preserveSignatures: true }),
-    ).toEqual([{ role: "assistant", content: [first, text("visible"), redacted, text("tail")] }]);
-  });
+      // Reload starts with the original stored bytes plus the recovered reply.
+      const recovered = assistant([text("recovered")]);
+      expect(
+        await sanitizeSessionMessagesImages([...stored, recovered], "session:history"),
+      ).toEqual([...expected, recovered]);
+    },
+  );
 });
 
 describe("sanitizeGoogleTurnOrdering", () => {
