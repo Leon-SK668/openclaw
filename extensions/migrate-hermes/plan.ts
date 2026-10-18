@@ -1,3 +1,5 @@
+import { isUtf8 } from "node:buffer";
+import fs from "node:fs/promises";
 import path from "node:path";
 import {
   createMigrationItem,
@@ -44,7 +46,16 @@ export async function buildHermesPlan(ctx: MigrationProviderContext): Promise<Mi
   const targets = resolvePlannedMigrationTargets(ctx);
   let config: Record<string, unknown>;
   try {
-    config = parseHermesConfig(await readText(source.configPath));
+    const content = source.configPath
+      ? await fs.readFile(source.configPath).catch(() => undefined)
+      : undefined;
+    // YAML accepts replacement characters, so validate before decoding config values.
+    if (content && !isUtf8(content)) {
+      throw new Error(
+        "File is not valid UTF-8. Re-save or re-encode it as UTF-8, then rerun the migration.",
+      );
+    }
+    config = parseHermesConfig(content?.toString("utf8"));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to parse Hermes config at ${source.configPath}: ${reason}`, {
