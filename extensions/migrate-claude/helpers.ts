@@ -44,8 +44,18 @@ export async function readJsonObject(
   if (!filePath) {
     return {};
   }
+  const content = await fs.readFile(filePath).catch(() => undefined);
+  if (!content) {
+    return {};
+  }
+  // Replacement decoding can turn damaged paths or arguments into valid JSON.
+  if (!isUtf8(content)) {
+    throw new Error(
+      `Claude configuration file is not valid UTF-8: ${filePath}. Re-save or re-encode it as UTF-8, then rerun the migration.`,
+    );
+  }
   try {
-    const parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
+    const parsed = JSON.parse(content.toString("utf8")) as unknown;
     return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
