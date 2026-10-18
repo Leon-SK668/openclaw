@@ -201,32 +201,28 @@ describe("browser cli snapshot defaults", () => {
     expect(params?.query?.urls).toBe(true);
   });
 
-  it("rejects non-integer snapshot numeric options before dispatch", async () => {
-    await expect(runSnapshot(["--limit", "1e3"])).rejects.toThrow("__exit__:1");
-    expect(runtime.error.mock.calls.at(-1)?.[0]).toContain(
-      "Invalid --limit: must be an integer >= 1",
-    );
-
-    resetRuntimeCapture();
-    await expect(runSnapshot(["--depth", "-1"])).rejects.toThrow("__exit__:1");
-    expect(runtime.error.mock.calls.at(-1)?.[0]).toContain(
-      "Invalid --depth: must be an integer >= 0",
-    );
-
-    expect(sharedMocks.callBrowserRequest).not.toHaveBeenCalled();
-  });
+  it.each([false, true])(
+    "lets the CLI render invalid inspect options (json: %s)",
+    async (withJson) => {
+      for (const [args, message] of [
+        [["snapshot", "--limit", "1e3"], "Invalid --limit: must be an integer >= 1"],
+        [["snapshot", "--depth", "-1"], "Invalid --depth: must be an integer >= 0"],
+        [["snapshot", "--format", "full"], "Invalid --format: expected aria or ai"],
+        [["snapshot", "--mode", "full"], "Invalid --mode: expected efficient"],
+        [["screenshot", "--type", "gif"], "Invalid --type: expected png or jpeg"],
+      ] as const) {
+        await expect(runBrowserInspect([...args], withJson)).rejects.toThrow(message);
+      }
+      expect(sharedMocks.callBrowserRequest).not.toHaveBeenCalled();
+      expect(runtime.error).not.toHaveBeenCalled();
+      expect(runtime.exit).not.toHaveBeenCalled();
+    },
+  );
 
   it("accepts signed decimal snapshot numeric options", async () => {
     const params = await runSnapshot(["--limit", "+10", "--depth", "+0"]);
     expect(params?.query?.limit).toBe(10);
     expect(params?.query?.depth).toBe(0);
-  });
-
-  it("rejects unsupported snapshot mode before dispatch", async () => {
-    await expect(runBrowserInspect(["snapshot", "--mode", "full"])).rejects.toThrow("__exit__:1");
-
-    expect(runtime.error.mock.calls.at(-1)?.[0]).toContain("Invalid --mode: expected efficient");
-    expect(sharedMocks.callBrowserRequest).not.toHaveBeenCalled();
   });
 
   it("sends screenshot request with trimmed target id and jpeg type", async () => {
