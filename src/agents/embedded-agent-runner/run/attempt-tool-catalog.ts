@@ -1,11 +1,11 @@
+import { emitTrustedDiagnosticEvent } from "../../../infra/diagnostic-events.js";
 import {
   isCodeModeDiagnosticEnabled,
   logCodeModeDiagnostic,
 } from "../../../logging/code-mode-diagnostic.js";
 import {
-  copyAgentToolAvailability,
   finalizeAgentToolAvailability,
-  markAgentToolExecutionUnavailable,
+  gateAgentToolExecution,
 } from "../../agent-tool-availability.js";
 import { wrapToolWithAbortSignal } from "../../agent-tools.abort.js";
 import { CODE_MODE_EXEC_TOOL_NAME, CODE_MODE_WAIT_TOOL_NAME } from "../../code-mode.js";
@@ -16,7 +16,7 @@ import {
 } from "../../tool-allowlist-guard.js";
 import {
   createToolExecutionMatcher,
-  TOOL_EXECUTION_GATED_MESSAGE,
+  formatToolExecutionGatedMessage,
 } from "../../tool-policy-shared.js";
 import {
   withRuntimeToolSchemaQuarantine,
@@ -64,7 +64,7 @@ export async function prepareEmbeddedAttemptToolCatalog(input: {
     const abortSignal = preparedToolBase.toolAbortSignal ?? input.abortSignal;
     // Detached skill review keeps every foreground schema for prompt-cache reuse
     // but executes only the allowed tools. Wrap before catalog compaction so a
-    // tool hidden behind tool_call/exec is gated too; the catalog controls stay
+    // tool hidden behind dispatch_action/exec is gated too; the catalog controls stay
     // callable because they only dispatch into the gated tools.
     let effectiveTools = attempt.toolExecutionAllow
       ? gateToolExecution(uncompactedEffectiveTools, attempt.toolExecutionAllow)
@@ -105,13 +105,12 @@ export async function prepareEmbeddedAttemptToolCatalog(input: {
       });
     }
     if (toolSearch.compacted && !toolSearch.catalogReused) {
-      log.info(
-        codeModeControlsEnabledForRun
-          ? `code-mode: cataloged ${toolSearch.catalogToolCount} tools behind exec/wait`
-          : toolSearchConfig.mode === "directory"
-            ? `tool-search: cataloged ${toolSearch.catalogToolCount} tools behind compact directory surface`
-            : `tool-search: cataloged ${toolSearch.catalogToolCount} tools behind compact prompt surface`,
-      );
+      emitTrustedDiagnosticEvent({
+        type: "tool.catalog",
+        source: "builtin",
+        mode: codeModeControlsEnabledForRun ? "code-mode" : "tool-search",
+        toolCount: toolSearch.catalogToolCount,
+      });
     }
     const deferredDirectoryToolsCallable =
       toolSearchControlsEnabledForRun &&
@@ -129,19 +128,12 @@ export async function prepareEmbeddedAttemptToolCatalog(input: {
       subagentPolicy,
       inheritedToolPolicy,
     } = runtimeCapabilityProfile.policy;
+    const agentToolLabel = agentId ? `agents.${agentId}.tools` : "agent tools";
     const explicitToolAllowlistSources = collectExplicitToolAllowlistSources([
       { label: "tools.allow", allow: globalPolicy?.allow },
       { label: "tools.byProvider.allow", allow: globalProviderPolicy?.allow },
-      {
-        label: agentId ? `agents.${agentId}.tools.allow` : "agent tools.allow",
-        allow: agentPolicy?.allow,
-      },
-      {
-        label: agentId
-          ? `agents.${agentId}.tools.byProvider.allow`
-          : "agent tools.byProvider.allow",
-        allow: agentProviderPolicy?.allow,
-      },
+      { label: `${agentToolLabel}.allow`, allow: agentPolicy?.allow },
+      { label: `${agentToolLabel}.byProvider.allow`, allow: agentProviderPolicy?.allow },
       { label: "group tools.allow", allow: groupPolicy?.allow },
       { label: "sandbox tools.allow", allow: sandboxPolicy?.allow },
       { label: "subagent tools.allow", allow: subagentPolicy?.allow },
@@ -260,17 +252,6 @@ function gateToolExecution(
   return tools.map((tool) =>
     executionAllowed(tool.name) || TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name)
       ? tool
-      : markAgentToolExecutionUnavailable(
-          copyAgentToolAvailability(tool, {
-            ...tool,
-            // Preparation can perform work too; a denied call must not enter the source path.
-            prepareArguments: undefined,
-            prepareBeforeToolCallParams: undefined,
-            finalizeBeforeToolCallParams: undefined,
-            execute: async () => {
-              throw new Error(TOOL_EXECUTION_GATED_MESSAGE);
-            },
-          }),
-        ),
+      : gateAgentToolExecution(tool, formatToolExecutionGatedMessage(tool.name, allowNames)),
   );
 }

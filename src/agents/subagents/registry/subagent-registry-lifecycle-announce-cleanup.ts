@@ -5,7 +5,12 @@ import { defaultRuntime } from "../../../runtime.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
 import { loadSessionEntryByKey } from "../announce/subagent-announce-delivery.runtime.js";
-import { matchesSubagentChildSessionOwner } from "./subagent-child-owner-match.js";
+import {
+  matchesSubagentChildSessionOwner,
+  resolveRecordedRequester,
+  resolveSubagentChildAgentId,
+  resolveSubagentChildAuthority,
+} from "./subagent-child-owner-match.js";
 import {
   ensureDeliveryState,
   getDeliveryLastError,
@@ -39,11 +44,9 @@ import {
   finalizeResumedAnnounceGiveUp,
   finalizeSubagentCleanup,
 } from "./subagent-registry-lifecycle-finalize-cleanup.js";
-import {
-  buildSafeLifecycleErrorMeta,
-  maskLifecycleIdentifier,
-} from "./subagent-registry-lifecycle-log.js";
+import { buildSafeLifecycleErrorMeta } from "./subagent-registry-lifecycle-log.js";
 import { commitSubagentLifecycleMutation } from "./subagent-registry-lifecycle-persistence.js";
+import { scheduleRequesterSettleWake } from "./subagent-registry-lifecycle-wake.js";
 import { getCurrentSubagentRunOwner, subagentRuns } from "./subagent-registry-memory.js";
 import {
   assertSubagentRegistryWriteSourceCurrent,
@@ -65,6 +68,21 @@ export const resumeAncestorCleanup = (
   const params = context.options;
   const now = Date.now();
   const visited = [settledEntry];
+  const wakeSiblings = (settled: SubagentRunRecord) => {
+    const requesterAgent = resolveRecordedRequester(settled);
+    for (const entry of params.runs.values()) {
+      if (
+        entry.runId !== settled.runId &&
+        entry.requesterSettleWake &&
+        entry.requesterSessionKey === settled.requesterSessionKey &&
+        resolveRecordedRequester(entry) === requesterAgent &&
+        (entry.requesterStorePath ?? null) === (settled.requesterStorePath ?? null)
+      ) {
+        scheduleRequesterSettleWake(context, entry.runId, entry, undefined, true);
+      }
+    }
+  };
+  wakeSiblings(settledEntry);
   let requesterSessionKey = settledEntry.requesterSessionKey;
   let requesterAgentId = settledEntry.requesterAgentId;
   while (
@@ -85,6 +103,8 @@ export const resumeAncestorCleanup = (
     requesterSessionKey = entry.requesterSessionKey;
     requesterAgentId = entry.requesterAgentId;
     const { runId } = entry;
+    scheduleRequesterSettleWake(context, runId, entry, undefined, true);
+    wakeSiblings(entry);
     // A failed cleanup belongs to its retry timer or exhausted process-local
     // budget; even descendant settlement must not reopen that attempt early.
     if (
@@ -119,7 +139,7 @@ export const startSubagentAnnounceCleanupFlow = (
 ): boolean => {
   const params = context.options;
   const publishedEntry = getCurrentSubagentRunOwner(params.runs, observedEntry);
-  if (!publishedEntry) {
+  if (!publishedEntry || resolveSubagentChildAuthority(publishedEntry).status === "mismatch") {
     return false;
   }
   let entry = publishedEntry;
@@ -253,20 +273,22 @@ export const startSubagentAnnounceCleanupFlow = (
         return;
       }
       if (cleanup === "delete" && (await prepareChildSessionEffects())) {
-        const cleanupSessionEntry = await loadSessionEntryByKey(entry.childSessionKey);
-        const cleanupSessionIdentity =
-          cleanupSessionEntry?.sessionId && cleanupSessionEntry.lifecycleRevision
-            ? {
-                sessionId: cleanupSessionEntry.sessionId,
-                lifecycleRevision: cleanupSessionEntry.lifecycleRevision,
-              }
-            : undefined;
+        const { sessionId, lifecycleRevision } = entry.childSessionIdentity ?? {};
+        const currentSession = await loadSessionEntryByKey(
+          entry.childSessionKey,
+          resolveSubagentChildAgentId(entry),
+        );
         const canDelete = await prepareChildSessionEffects();
-        if (canDelete && !cleanupSessionIdentity) {
+        if (canDelete && !currentSession) {
+          await suppressChildSessionEffects();
+        } else if (
+          canDelete &&
+          resolveSubagentChildAuthority(entry, currentSession).status !== "verified"
+        ) {
           // Without both lifecycle identities, key-only deletion could remove
           // a successor that reused this child session after cleanup yielded.
           await suppressChildSessionEffects();
-        } else if (canDelete && cleanupSessionIdentity) {
+        } else if (canDelete && sessionId && lifecycleRevision) {
           // This durable boundary prevents a late yield from reviving a run
           // after deletion may already have reached the gateway.
           await commit((draft) => {
@@ -278,14 +300,15 @@ export const startSubagentAnnounceCleanupFlow = (
             isCurrent: childSessionEffectsAllowed,
             prepareCurrent: prepareChildSessionEffects,
             childSessionKey: entry.childSessionKey,
+            childAgentId: resolveSubagentChildAgentId(entry),
             spawnMode: entry.spawnMode,
-            expectedSessionId: cleanupSessionIdentity.sessionId,
-            expectedLifecycleRevision: cleanupSessionIdentity.lifecycleRevision,
+            expectedSessionId: sessionId,
+            expectedLifecycleRevision: lifecycleRevision,
             onError: (error) =>
               params.warn("sessions.delete failed during subagent cleanup", {
                 error: buildSafeLifecycleErrorMeta(error),
-                runId: maskLifecycleIdentifier(runId, "run"),
-                childSessionKey: maskLifecycleIdentifier(entry.childSessionKey, "session"),
+                runId,
+                childSessionKey: entry.childSessionKey,
               }),
           });
           if (sessionCleanup === "failed") {
@@ -547,6 +570,7 @@ export const startSubagentAnnounceCleanupFlow = (
         params.runSubagentAnnounceFlow({
           ...announceParams,
           childAgentId: entry.childAgentId,
+          childSessionIdentity: entry.childSessionIdentity,
           signal: deadline.signal,
           // Delivery expiry bounds admission; the requester owns its execution budget.
           onExecutionStarted: () => clearTimeout(deadlineTimer),

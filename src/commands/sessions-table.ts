@@ -1,5 +1,4 @@
 /**
- * Shared table formatting helpers for session commands.
  *
  * Cleanup and listing share display labels; terminal-core owns column layout.
  */
@@ -47,6 +46,7 @@ export function toSessionDisplayRow(key: string, entry: SessionEntry) {
     responseUsage: entry?.responseUsage,
     groupActivation: entry?.groupActivation,
     inputTokens: entry?.inputTokens,
+    usageReport: entry?.usageReport,
     outputTokens: entry?.outputTokens,
     totalTokens: entry?.totalTokens,
     totalTokensFresh: entry?.totalTokensFresh,

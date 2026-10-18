@@ -1,7 +1,12 @@
+import { expectDefined } from "@openclaw/normalization-core/expect";
+import { Value } from "typebox/value";
 // Chat abort tests protect in-flight run tracking, stop-command parsing, provider
 // abort fanout, history snapshots, and cleanup of buffered streaming state.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatEvent } from "../../packages/gateway-protocol/src/schema/logs-chat.js";
+import {
+  ChatEventSchema,
+  type ChatEvent,
+} from "../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { createOperationalRunInstanceRef } from "../agents/admitted-run-context.js";
 import {
   isAgentRunDirectAbortReason,
@@ -11,6 +16,7 @@ import { onAgentEvent } from "../infra/agent-events.js";
 import {
   claimAgentRunDelegatedAuthority,
   clearAgentRunContext,
+  getAgentRunContext,
   registerAgentRunContext,
   releaseAgentRunDelegatedAuthority,
   resetAgentRunRegistryForTest,
@@ -133,6 +139,32 @@ function expectRunAborted(params: {
   expect(params.ops.chatAbortControllers.has(params.runId)).toBe(false);
 }
 
+it.each([true, false])(
+  "captures the live local wait before abort listeners clear it (%s)",
+  (waiting) => {
+    const { runId, sessionKey, entry, ops } = createAbortRunFixture({});
+    const context = waiting ? { localModelWait: { requestId: "call-1" } } : {};
+    registerAgentRunContext(runId, {});
+    Object.assign(expectDefined(getAgentRunContext(runId), "registered run"), context);
+    entry.controller.signal.addEventListener("abort", () => {
+      clearAgentRunContext(runId);
+    });
+    try {
+      const result = abortChatRunById(ops, { runId, sessionKey });
+      expectRunAborted({ result, entry, ops, runId });
+      expect(firstBroadcastPayload(ops)).toMatchObject({ state: "aborted" });
+      expect(Value.Check(ChatEventSchema, firstBroadcastPayload(ops))).toBe(true);
+      if (waiting) {
+        expect(firstBroadcastPayload(ops)).toHaveProperty("localModelMayStillBeFinishing", true);
+      } else {
+        expect(firstBroadcastPayload(ops)).not.toHaveProperty("localModelMayStillBeFinishing");
+      }
+    } finally {
+      clearAgentRunContext(runId);
+    }
+  },
+);
+
 describe("registerChatAbortController", () => {
   it.each([
     [Number.NaN, undefined, 0],
@@ -192,6 +224,78 @@ describe("registerChatAbortController", () => {
     expect(registration.entry?.expiresAtMs).toBe(executionExpiresAtMs);
   });
 
+  it.each([
+    "queued",
+    "late",
+    "started",
+    "cleaned",
+    "replaced",
+    "restart",
+    "restart-admission",
+    "terminal",
+    "terminal-admission",
+    "observed",
+    "observed-admission",
+  ] as const)("owns the queued deadline until execution or release: %s", (state) => {
+    vi.useFakeTimers();
+    const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
+    const onQueueTimeout = vi.fn((entry: ChatAbortControllerEntry) => {
+      const ops = createOps({ runId: "queued", entry });
+      ops.chatAbortControllers = chatAbortControllers;
+      abortChatRunById(ops, {
+        runId: "queued",
+        sessionKey: "main",
+        stopReason: "timeout",
+      });
+    });
+    const registration = registerChatAbortController({
+      chatAbortControllers,
+      runId: "queued",
+      sessionId: "sess-1",
+      sessionKey: "main",
+      timeoutMs: 2_000,
+      kind: "agent",
+      onQueueTimeout,
+    });
+    vi.advanceTimersByTime(1_999);
+    expect(onQueueTimeout).not.toHaveBeenCalled();
+    if (state === "started") {
+      registration.markExecutionStarted();
+    } else if (state === "cleaned") {
+      registration.cleanup();
+    } else if (state === "replaced") {
+      chatAbortControllers.set("queued", createActiveEntry("main"));
+    } else if (state === "late") {
+      vi.setSystemTime(Date.now() + 1);
+      expect(registration.markExecutionStarted()).toBe(false);
+    } else if (state === "restart" || state === "restart-admission") {
+      expectDefined(registration.entry, "registered run").abortStopReason = "restart";
+    } else if (state === "terminal" || state === "terminal-admission") {
+      expectDefined(registration.entry, "registered run").projectSessionTerminalPending = true;
+    } else if (state === "observed" || state === "observed-admission") {
+      expectDefined(registration.entry, "registered run").projectSessionTerminalObservedAt =
+        Date.now();
+    }
+    if (
+      state === "restart-admission" ||
+      state === "terminal-admission" ||
+      state === "observed-admission"
+    ) {
+      expect(registration.markExecutionStarted()).toBe(false);
+    }
+    vi.advanceTimersByTime(1);
+    const expired = state === "queued" || state === "late";
+    expect(onQueueTimeout).toHaveBeenCalledTimes(expired ? 1 : 0);
+    expect(registration.controller.signal.aborted).toBe(expired);
+    if (expired) {
+      expect(registration.controller.signal.reason).toMatchObject({ name: "TimeoutError" });
+    }
+    if (state === "restart" || state === "restart-admission") {
+      expect(registration.entry?.abortStopReason).toBe("restart");
+    }
+    registration.cleanup();
+  });
+
   it("does not re-arm an agent after its unswept queue deadline", () => {
     vi.useFakeTimers();
     for (const [runId, offsetMs] of [
@@ -222,7 +326,7 @@ describe("registerChatAbortController", () => {
     }
   });
 
-  it.each(["stale", "aborted", "chat-send"] as const)(
+  it.each(["stale", "aborted", "chat-send", "hidden-chat-send"] as const)(
     "does not re-arm %s registrations",
     (state) => {
       vi.useFakeTimers();
@@ -234,7 +338,8 @@ describe("registerChatAbortController", () => {
         sessionId: "sess-1",
         sessionKey: "main",
         timeoutMs: 60_000,
-        kind: state === "chat-send" ? state : "agent",
+        kind: state === "chat-send" || state === "hidden-chat-send" ? "chat-send" : "agent",
+        projectSessionActive: state !== "hidden-chat-send",
       });
       const expiry = registration.entry?.expiresAtMs;
       if (state === "stale") {
@@ -243,7 +348,9 @@ describe("registerChatAbortController", () => {
         registration.controller.abort();
       }
       vi.advanceTimersByTime(30_000);
-      registration.markExecutionStarted();
+      expect(registration.markExecutionStarted()).toBe(
+        state === "chat-send" || state === "hidden-chat-send",
+      );
       expect(registration.entry?.expiresAtMs).toBe(expiry);
     },
   );
@@ -457,7 +564,7 @@ describe("abortChatRunById", () => {
   it.each([
     ["streamed text", true, true],
     ["", true, true],
-    ["NO_REPLY", true, false],
+    ["NO_REPLY", true, true],
     ["stale text", false, false],
   ] as const)(
     "snapshots completed widgets before synchronous abort cleanup (%j, current=%j)",
