@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,6 +9,7 @@ import {
   closeOpenClawStateDatabaseAsync,
 } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { describe, expect, it, vi } from "vitest";
+import { appendItem, readText, readUtf8Text } from "./helpers.js";
 import { discoverHermesSource } from "./source.js";
 import { hermesCase, item } from "./test/hermes-case.js";
 import { configRuntime, useHermesFixture } from "./test/migration-fixture.js";
@@ -22,6 +24,25 @@ const fixture = useHermesFixture(async (root) => {
 const makeCase = () => hermesCase(fixture.paths.root);
 const read = (...parts: string[]) => fs.readFile(path.join(...parts), "utf8");
 const missing = (file: string) => expect(fs.access(file)).rejects.toMatchObject({ code: "ENOENT" });
+
+async function withoutFifoWriter(file: string, readSource: () => Promise<void>) {
+  execFileSync("mkfifo", [file]);
+  let writerNeeded = false;
+  let writer = Promise.resolve();
+  // Release a blocking baseline read before asserting; never leave a test worker
+  // or cleanup waiting for a FIFO peer after the regression fails.
+  const backstop = setTimeout(() => {
+    writerNeeded = true;
+    writer = fs.writeFile(file, "backstop input\n");
+  }, 1500);
+  try {
+    await readSource();
+    expect(writerNeeded).toBe(false);
+  } finally {
+    clearTimeout(backstop);
+    await writer;
+  }
+}
 async function discover(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = "darwin") {
   for (const key of [
     "HERMES_HOME",
@@ -39,6 +60,53 @@ async function discover(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = "dar
 }
 
 describe("Hermes files and skills", () => {
+  it.skipIf(process.platform === "win32").each([false, true])(
+    "rejects a FIFO read without a writer (required input: %s)",
+    async (required) => {
+      const file = path.join(fixture.paths.root, "input.pipe");
+      await withoutFifoWriter(file, async () => {
+        if (required) {
+          await expect(readUtf8Text(file)).rejects.toThrow(/regular file/i);
+        } else {
+          await expect(readText(file)).resolves.toBeUndefined();
+        }
+      });
+      expect((await fs.lstat(file)).isFIFO()).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "rejects a FIFO memory target before dedupe reads",
+    async () => {
+      const h = makeCase();
+      await h.write("memories/MEMORY.md", "Imported memory\n");
+      const planned = item(await h.plan(), "memory:MEMORY.md");
+      if (!planned?.target) {
+        throw new Error("expected memory append target");
+      }
+      await fs.mkdir(h.workspaceDir, { recursive: true });
+
+      await withoutFifoWriter(planned.target, async () => {
+        expect((await appendItem(planned)).status).toBe("error");
+      });
+      expect((await fs.lstat(planned.target)).isFIFO()).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps symlinked text inputs and exact Unicode",
+    async () => {
+      const h = makeCase();
+      const body = "Café 会议 �\n";
+      await h.write("input.txt", body);
+      const link = path.join(h.source, "linked-input.txt");
+      await fs.symlink(path.join(h.source, "input.txt"), link);
+
+      await expect(readUtf8Text(link)).resolves.toBe(body);
+      await expect(readText(link)).resolves.toBe(body);
+    },
+  );
+
   it.each(["stat", "readdir"] as const)(
     "rejects incomplete source %s and recovers",
     async (operation) => {
