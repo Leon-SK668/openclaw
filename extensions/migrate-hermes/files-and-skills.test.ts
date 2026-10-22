@@ -66,7 +66,12 @@ describe("Hermes files and skills", () => {
       const file = path.join(fixture.paths.root, "input.pipe");
       await withoutFifoWriter(file, async () => {
         if (required) {
-          await expect(readUtf8Text(file)).rejects.toThrow(/regular file/i);
+          const pending = readUtf8Text(file);
+          await expect(pending).rejects.toThrow(/regular file/i);
+          await expect(pending).rejects.toThrow(file);
+          await expect(pending).rejects.toThrow(
+            "Use an ordinary readable file and retry migration.",
+          );
         } else {
           await expect(readText(file)).resolves.toBeUndefined();
         }

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parse as parseDotenv } from "dotenv";
-import { extractErrorCode } from "openclaw/plugin-sdk/error-runtime";
+import { extractErrorCode, formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   markMigrationItemError,
   markMigrationItemSkipped,
@@ -44,9 +44,16 @@ export function sanitizeName(name: string): string {
 async function readFileBytes(filePath: string): Promise<Buffer> {
   // Source symlinks remain supported. The shared reader admits only a regular
   // target and uses nonblocking open so a raced FIFO cannot wait for a writer.
-  const resolvedPath = await fs.realpath(filePath);
-  const { buffer } = await readRegularFile({ filePath: resolvedPath });
-  return buffer;
+  try {
+    const resolvedPath = await fs.realpath(filePath);
+    const { buffer } = await readRegularFile({ filePath: resolvedPath });
+    return buffer;
+  } catch (error) {
+    throw new Error(
+      `Failed reading text file ${filePath}: ${formatErrorMessage(error)}. Use an ordinary readable file and retry migration.`,
+      { cause: error },
+    );
+  }
 }
 
 export async function readText(filePath: string | undefined): Promise<string | undefined> {
