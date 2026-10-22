@@ -118,6 +118,12 @@ follow its candidate-Doctor recovery guidance before restarting or downgrading.
 
 `openclaw doctor --fix` owns general persistent file-to-SQLite migrations. It validates and claims each recognized source, writes and verifies current-format rows, records a migration receipt, then removes the retired source. Gateway, node-host, and local CLI startup leave general legacy repair to Doctor. Normal versioned database opening, native initialization, and recovery of valid current config remain available.
 
+Legacy meeting transcript imports require valid UTF-8 in `metadata.json`,
+`transcript.jsonl`, `summary.json`, and `summary.md`. If validation fails, Doctor
+leaves the source files in place without importing or archiving the batch. Preserve
+the original bytes, correct the encoding in a copy, then rerun `openclaw doctor --fix`
+against the same state directory.
+
 The container image entrypoint automatically runs `openclaw doctor --fix --non-interactive`
 against the mounted state and config before starting the Gateway. If you override
 that entrypoint, run Doctor explicitly against the same mounts. Doctor performs

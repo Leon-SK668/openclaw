@@ -320,6 +320,59 @@ describe("meeting transcript Doctor migration", () => {
     },
   );
 
+  it.each([
+    ["metadata.json", false],
+    ["transcript.jsonl", false],
+    ["summary.json", false],
+    ["summary.md", false],
+    ["summary.md", true],
+  ] as const)(
+    "preserves malformed UTF-8 in %s (truncated: %s) until corrected",
+    async (name, truncated) => {
+      const healthy = await h.seed("healthy");
+      const source = await h.seed("encoding-retry");
+      const file = path.join(source, name);
+      const valid = (await fs.readFile(file, "utf8")).replace(/Design review|First line/, "Café");
+      const malformed = truncated
+        ? Buffer.concat([Buffer.from(valid), Buffer.from([0xe2])])
+        : Buffer.from(valid, "latin1");
+      await fs.writeFile(file, malformed);
+
+      const refused = await h.migrate();
+
+      expect(refused.warnings.join("\n")).toContain("valid UTF-8");
+      expect(refused.warnings.join("\n")).toContain(file);
+      expect(refused.changes).toEqual([]);
+      h.expectEmpty("meeting_transcript_sessions");
+      h.expectEmpty("migration_sources");
+      await expect(fs.readFile(file)).resolves.toEqual(malformed);
+      await expectExists(healthy);
+      expect(
+        (await fs.readdir(h.stateDir)).filter((entry) => entry.startsWith("transcripts.migrated-")),
+      ).toEqual([]);
+
+      await fs.writeFile(file, valid);
+      const retried = await h.migrate();
+
+      expect(retried.warnings).toEqual([]);
+      expect(h.snapshot().sessions).toHaveLength(2);
+      expect(h.snapshot().sources).toHaveLength(2);
+      await expectMissing(source);
+    },
+  );
+
+  it("keeps valid UTF-8 split across snapshot chunks and literal replacement characters", async () => {
+    const source = await h.seed("unicode-chunks");
+    const markdown = "a".repeat(256 * 1024 - 1) + "é 会议 �\n";
+    await fs.writeFile(path.join(source, "summary.md"), markdown);
+
+    const result = await h.migrate();
+
+    expect(result.warnings).toEqual([]);
+    const session = (await h.store.readSession("unicode-chunks"))!;
+    await expect(h.store.readSummary(session)).resolves.toMatchObject({ markdown });
+  });
+
   it("resumes durable imported receipts after a native archive rename failure", async () => {
     const source = await h.seed("archive-retry");
     const archiveRoot = path.join(h.stateDir, "transcripts.migrated-2026-07-02T00-00-00-000Z");

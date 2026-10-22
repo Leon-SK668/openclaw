@@ -1,4 +1,5 @@
 // Filesystem preflight and archive helpers for legacy meeting transcripts.
+import { createHash } from "node:crypto";
 import fsSync, { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -13,7 +14,7 @@ import type {
 import { TRANSCRIPT_EXPORT_FILE_NAMES } from "../transcripts/store-artifacts.js";
 import type { TranscriptsSummary } from "../transcripts/summary.js";
 import { renderTranscriptsMarkdown } from "../transcripts/summary.js";
-import { sha256File, sha256FileSync, sha256Hex } from "./crypto-digest.js";
+import { sha256FileSync, sha256Hex } from "./crypto-digest.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
 
 export const LEGACY_UTTERANCE_INSERT_CHUNK_SIZE = 64;
@@ -302,7 +303,10 @@ export function readStagedMeetingTranscriptUtterances(params: {
     .map((row) => JSON.parse(String(row.utterance_json)) as TranscriptUtterance);
 }
 
-async function snapshotFile(filePath: string): Promise<{
+async function snapshotFile(
+  filePath: string,
+  validateUtf8 = false,
+): Promise<{
   hash?: string;
   sizeBytes: number;
 }> {
@@ -310,7 +314,24 @@ async function snapshotFile(filePath: string): Promise<{
     return { sizeBytes: 0 };
   }
   const stat = await fs.stat(filePath);
-  return { hash: await sha256File(filePath), sizeBytes: stat.size };
+  const hash = createHash("sha256");
+  const decoder = validateUtf8 ? new TextDecoder("utf-8", { fatal: true }) : undefined;
+  try {
+    for await (const chunk of createReadStream(filePath, { highWaterMark: 256 * 1024 })) {
+      hash.update(chunk);
+      decoder?.decode(chunk, { stream: true });
+    }
+    decoder?.decode();
+  } catch (error) {
+    if (error instanceof TypeError && /encoded data was not valid/i.test(error.message)) {
+      throw new Error(
+        `Legacy meeting transcript file must be valid UTF-8: ${filePath}. Preserve its bytes and convert a copy before rerunning doctor --fix.`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  return { hash: hash.digest("hex"), sizeBytes: stat.size };
 }
 
 function sourceFilesHash(
@@ -339,7 +360,9 @@ export async function snapshotLegacyMeetingTranscriptSession(params: {
   const summaryJsonPath = path.join(sourceDir, "summary.json");
   const summaryMarkdownPath = path.join(sourceDir, "summary.md");
   const files = [metadataPath, transcriptPath, summaryJsonPath, summaryMarkdownPath];
-  const beforeSnapshots = await Promise.all(files.map(snapshotFile));
+  // Validate new imports before replacement decoding can reach SQLite. Receipt
+  // recovery still hashes original bytes without re-admitting already imported text.
+  const beforeSnapshots = await Promise.all(files.map((file) => snapshotFile(file, true)));
   if (!beforeSnapshots[0]?.hash) {
     throw new Error(`legacy transcript session is missing metadata.json: ${sourceDir}`);
   }
@@ -369,7 +392,7 @@ export async function snapshotLegacyMeetingTranscriptSession(params: {
     throw new Error(`legacy transcript summary session mismatch at ${summaryJsonPath}`);
   }
 
-  const fileSnapshots = await Promise.all(files.map(snapshotFile));
+  const fileSnapshots = await Promise.all(files.map((file) => snapshotFile(file)));
   if (
     fileSnapshots.some(
       (snapshot, index) =>
@@ -541,7 +564,7 @@ export async function rehashLegacyMeetingTranscriptSnapshots(
     const files = ["metadata.json", "transcript.jsonl", "summary.json", "summary.md"].map(
       (fileName) => path.join(snapshot.sourceDir, fileName),
     );
-    const fileSnapshots = await Promise.all(files.map(snapshotFile));
+    const fileSnapshots = await Promise.all(files.map((file) => snapshotFile(file)));
     const currentHash = sourceFilesHash(files, fileSnapshots);
     if (currentHash !== snapshot.sourceHash) {
       return false;
