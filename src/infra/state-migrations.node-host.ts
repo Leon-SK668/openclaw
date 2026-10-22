@@ -329,7 +329,14 @@ export async function migrateLegacyNodeHostConfig(params: {
           });
           // Recovery compares and can remove claims before domain parsing. Validate
           // every snapshot first so replacement decoding cannot collapse distinct bytes.
-          return { ...snapshot, raw: decodeUtf8Input(snapshot.buffer, "Legacy node-host state") };
+          try {
+            return { ...snapshot, raw: decodeUtf8Input(snapshot.buffer, "Legacy node-host state") };
+          } catch (error) {
+            throw new Error(
+              `Legacy node-host state at ${snapshotPath} must be valid UTF-8. Keep a backup, correct the encoding in a copy, replace this file with the corrected copy, then retry openclaw doctor --fix.`,
+              { cause: error },
+            );
+          }
         },
       });
 

@@ -146,6 +146,10 @@ describe("legacy node-host Doctor migration", () => {
     const refused = await migrate();
 
     expect(refused.warnings.join("\n")).toContain("valid UTF-8");
+    expect(refused.warnings.join("\n")).toContain(activeSource);
+    expect(refused.warnings.join("\n")).toContain(
+      "Keep a backup, correct the encoding in a copy, replace this file with the corrected copy, then retry openclaw doctor --fix.",
+    );
     expect(refused.changes).toEqual([]);
     expect(readCanonicalRow(env)).toBeUndefined();
     await expect(fsp.readFile(activeSource)).resolves.toEqual(malformed);
