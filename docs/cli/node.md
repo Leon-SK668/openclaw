@@ -428,6 +428,11 @@ repair described in the diagnostic. Keep `client/credentials.sqlite` private;
 it contains the device keypair and auth tokens. Other retired node state remains
 part of `openclaw doctor --fix`.
 
+Doctor leaves a retired `node.json` or interrupted `node.json.doctor-importing`
+claim unchanged when it contains invalid UTF-8. Keep a backup, correct the
+encoding in a copy, replace the affected source with that valid UTF-8 copy,
+then rerun `openclaw doctor --fix` before starting the node host.
+
 ## Exec approvals
 
 `system.run` is gated by local exec approvals:

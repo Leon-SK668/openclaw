@@ -26,6 +26,7 @@ import {
   type LegacyMigrationSourceSnapshot as LegacySourceSnapshot,
 } from "./state-migrations.source-snapshot.js";
 import type { LegacyStateDetection, MigrationMessages } from "./state-migrations.types.js";
+import { decodeUtf8Input } from "./utf8-input.js";
 
 const LEGACY_NODE_HOST_MAX_BYTES = 64 * 1024;
 const CONFIG_KEYS = new Set(["version", "nodeId", "token", "displayName", "gateway"]);
@@ -317,15 +318,19 @@ export async function migrateLegacyNodeHostConfig(params: {
         sourcePath,
         label: "node-host",
         claimSuffix: LEGACY_NODE_HOST_CONFIG_CLAIM_SUFFIX,
-        readSnapshot: (snapshotPath) =>
-          readLegacyMigrationSourceSnapshot({
+        readSnapshot: async (snapshotPath) => {
+          const snapshot = await readLegacyMigrationSourceSnapshot({
             stateRoot,
             stateDir: params.stateDir,
             sourcePath: snapshotPath,
             maxBytes: LEGACY_NODE_HOST_MAX_BYTES,
             label: "node-host",
             hashDecodedText: true,
-          }),
+          });
+          // Recovery compares and can remove claims before domain parsing. Validate
+          // every snapshot first so replacement decoding cannot collapse distinct bytes.
+          return { ...snapshot, raw: decodeUtf8Input(snapshot.buffer, "Legacy node-host state") };
+        },
       });
 
       await source.recover("interrupted node-host Doctor claim conflicts with its source");

@@ -133,6 +133,51 @@ describe("legacy node-host Doctor migration", () => {
     expect((await loadNodeHostConfig(env))?.gateway?.contextPath).toBeUndefined();
   });
 
+  it.each([false, true])("preserves malformed UTF-8 before import (claim: %s)", async (claim) => {
+    const { env, sourcePath, migrate } = await legacyFixture({ displayName: "Café" });
+    const valid = await fsp.readFile(sourcePath, "utf8");
+    const malformed = Buffer.from(valid, "latin1");
+    const activeSource = sourcePath + (claim ? ".doctor-importing" : "");
+    await fsp.writeFile(sourcePath, malformed);
+    if (claim) {
+      await fsp.rename(sourcePath, activeSource);
+    }
+
+    const refused = await migrate();
+
+    expect(refused.warnings.join("\n")).toContain("valid UTF-8");
+    expect(refused.changes).toEqual([]);
+    expect(readCanonicalRow(env)).toBeUndefined();
+    await expect(fsp.readFile(activeSource)).resolves.toEqual(malformed);
+
+    await fsp.writeFile(activeSource, valid);
+    expect((await migrate()).warnings).toEqual([]);
+    await expect(loadNodeHostConfig(env)).resolves.toMatchObject({ displayName: "Café" });
+    expect(fs.existsSync(activeSource)).toBe(false);
+  });
+
+  it("retains distinct malformed source and claim bytes before claim recovery", async () => {
+    const { env, sourcePath, migrate } = await legacyFixture({ displayName: "Café" });
+    const source = Buffer.from(await fsp.readFile(sourcePath, "utf8"), "latin1");
+    const claim = Buffer.from(source);
+    claim[claim.indexOf(0xe9)] = 0xea;
+    await fsp.writeFile(sourcePath, source);
+    await fsp.writeFile(`${sourcePath}.doctor-importing`, claim);
+
+    expect((await migrate()).warnings.join("\n")).toContain("valid UTF-8");
+    expect(readCanonicalRow(env)).toBeUndefined();
+    await expect(fsp.readFile(sourcePath)).resolves.toEqual(source);
+    await expect(fsp.readFile(`${sourcePath}.doctor-importing`)).resolves.toEqual(claim);
+  });
+
+  it("preserves valid Unicode and literal replacement characters in legacy node state", async () => {
+    const displayName = "Café 会议 �";
+    const { env, migrate } = await legacyFixture({ displayName });
+
+    expect((await migrate()).warnings).toEqual([]);
+    await expect(loadNodeHostConfig(env)).resolves.toMatchObject({ displayName });
+  });
+
   it("requires exclusive state ownership", async () => {
     const { env, sourcePath, migrate } = await legacyFixture();
     const gatewayLock = await acquireGatewayLock({
