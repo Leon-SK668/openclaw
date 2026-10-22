@@ -462,16 +462,29 @@ describe("update-cli", () => {
   );
 
   it.each([
-    { name: "update channel", run: () => update.invokeUpdateCli({ channel: "" }) },
-    { name: "finalization channel", run: () => update.updateFinalizeCommand({ channel: "" }) },
-  ])("rejects an explicitly empty $name before mutation", async ({ run }) => {
+    {
+      name: "update channel",
+      run: () => update.invokeUpdateCli({ channel: "" }),
+      propagatesFailure: false,
+    },
+    {
+      name: "finalization channel",
+      run: () => update.updateFinalizeCommand({ channel: "" }),
+      propagatesFailure: true,
+    },
+  ])("rejects an explicitly empty $name before mutation", async ({ run, propagatesFailure }) => {
     const runsBefore = update.listUpdateRuns();
-    await run();
+    const message = '--channel must be "stable", "extended-stable", "beta", or "dev" (got "")';
 
-    expect(update.defaultRuntime.error).toHaveBeenCalledWith(
-      '--channel must be "stable", "extended-stable", "beta", or "dev" (got "")',
-    );
-    expect(update.defaultRuntime.exit).toHaveBeenCalledWith(1);
+    if (propagatesFailure) {
+      await expect(run()).rejects.toThrow(message);
+      expectNoSideEffects(update.defaultRuntime.error, update.defaultRuntime.exit);
+    } else {
+      await run();
+      expect(update.defaultRuntime.error).toHaveBeenCalledWith(message);
+      expect(update.defaultRuntime.exit).toHaveBeenCalledWith(1);
+    }
+
     expect(update.listUpdateRuns()).toEqual(runsBefore);
     expectNoSideEffects(
       cleanupStaleManagedServiceUpdateHandoffs,
