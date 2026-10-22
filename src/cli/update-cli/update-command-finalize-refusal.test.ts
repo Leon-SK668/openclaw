@@ -260,6 +260,17 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+it("preserves an invalid channel diagnostic for the root CLI renderer without starting repair", async () => {
+  await expect(
+    updateFinalizeCommand({ channel: "unrecognized-channel", json: true }),
+  ).rejects.toThrow('--channel must be "stable", "extended-stable", "beta", or "dev"');
+
+  expect(defaultRuntime.error).not.toHaveBeenCalled();
+  expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
+  expect(listUpdateRuns()).toEqual([]);
+  expect(readDeferredPluginMigrations()).toEqual([pending]);
+});
+
 it("keeps repair pending with a real state owner and unavailable systemd inspection", async () => {
   native.realOwner = true;
   const createdAt = "2026-10-19T12:00:00.000Z";
