@@ -35,6 +35,8 @@ describe("browser action observe commands", () => {
     { command: "console", path: "/console", timeout: "60000" },
     { command: "pdf", path: "/pdf", timeout: "30000" },
     { command: "pdf", path: "/pdf", timeout: "60000" },
+    { command: "archive", path: "/archive", timeout: "30000" },
+    { command: "archive", path: "/archive", timeout: "60000" },
   ])("inherits parent $timeout ms timeout for $command", async ({ command, path, timeout }) => {
     const parentArgs = timeout === "30000" ? ["--json"] : ["--json", "--timeout", timeout];
     await run(...parentArgs, command);
