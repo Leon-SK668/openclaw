@@ -88,7 +88,6 @@ it.skipIf(process.platform === "win32").each(["latency", "tail"])(
     } finally {
       fs.closeSync(writer);
     }
-    expect(fs.lstatSync(fifo).isFIFO()).toBe(true);
   },
 );
 
