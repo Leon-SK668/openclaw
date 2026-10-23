@@ -54,6 +54,8 @@ itself in the middle of a Gateway run. Update Muse with its own installer.
 1. Open **Model Setup** (`/models`) in the Control UI.
 2. In **AI Setup**, choose **Connect provider**, then **Meta → Muse Code**.
 3. Start sign-in, confirm the displayed device code in the browser, and approve it.
+4. Accept **Use Muse Code’s native permissions?** to finish setup for the selected
+   OpenClaw agent.
 
 OpenClaw enables the Muse plugin and selects `meta/muse-spark-1.3` with the
 `muse` runtime by default. If you choose another Meta model during setup,
@@ -87,8 +89,11 @@ For manual configuration, route one Meta model through the Muse runtime:
 ```
 
 Set `agentRuntime.id` on one model entry to route only that model, or on the
-`meta` provider to route every Meta model. Models without this routing use the
-built-in OpenClaw runtime through the [Meta provider](/providers/meta).
+`meta` provider to route every Meta model. Without explicit routing, a model
+discovered by exactly one native runtime can use that runtime when no authored
+API binding or host credential takes precedence. An API catalog row alone is
+not an API credential. Explicit runtime choices and required cloud workers
+keep their existing runtime policy.
 
 Choosing **Muse Code** in Model Setup routes the selected model through Muse
 for the agent being set up. It writes that agent's model entry, replacing any
@@ -99,6 +104,32 @@ The harness accepts only the standard `meta` provider route on Meta's official
 endpoint (`https://api.meta.ai/v1`). A `meta` provider entry with another
 `baseUrl` or with request transport overrides is refused, because Muse Code
 calls Meta itself.
+
+### Model identities and names
+
+Muse's `model/list` response owns account availability and executable
+`modelId` values. OpenClaw sends the selected ID unchanged to Muse. Display
+names are metadata, never routing aliases. Exact same-provider API metadata
+can supply a readable name without transferring API capabilities or credentials
+to the native offering. The Muse adapter corrects known raw or incorrect labels
+for native-only Wonder variants; meaningful upstream labels remain authoritative.
+
+[Meta distinguishes](https://dev.meta.ai/docs/models#muse-wonder-availability)
+Wonder from the higher-capability Wonder Full, and Standard from Contributor
+mode. These are separate offerings: selecting Wonder, changing reasoning effort,
+or recommending Wonder does not select or recommend Full or Contributor variants.
+
+Provider slugs remain scoped to their provider and runtime. For example,
+`openrouter/meta/muse-wonder` executes OpenRouter's `meta/muse-wonder`, while
+`meta/muse-wonder-1.0` with Muse executes `muse-wonder-1.0`. Similar branding
+does not establish equivalence. When provider evidence establishes that two rows
+serve the same upstream model, the existing manifest
+[`upstreamModel` authoring field](/plugins/manifest/models#modelcatalog-reference)
+can record that relationship. It is not a runtime alias and must not rewrite
+executable IDs or transfer account readiness. Recommendations
+target the intended provider-local IDs independently. Unknown future IDs retain
+their supplied label (or raw ID) and remain selectable when discovered, without
+guessed relationships or inherited recommendations.
 
 ## Auth
 
@@ -112,6 +143,10 @@ Keep the sign-in dialog open while it shows **Waiting for approval in your
 browser…**. The device code and **Open sign-in** link remain available during
 the wait. After approval, OpenClaw checks access before showing **Muse Code is
 connected**; you can then start a new chat or close the dialog.
+
+Setup shows **Testing your AI connection…** while checking model access, then
+**Turning on your AI connection…** while enabling the runtime and applying the
+Gateway configuration. The connection is ready when that application completes.
 
 For Muse-owned sign-ins, OpenClaw checks that Muse can fetch the candidate model
 from Meta's live catalog. It does not run a model turn or expose native tools
@@ -222,6 +257,19 @@ A conversation tool policy (for example `tools.deny`) does not block Muse once
 you accept the native-runtime prompt. Muse does not receive OpenClaw's agent
 tools, so the policy has nothing to filter, and its own tools follow the
 approval mode above. Without that consent, OpenClaw refuses the turn.
+
+**Provider Access** and **AI Setup** ask for this permission once, after browser
+sign-in and before verification. Successful setup remembers your choice for the
+selected OpenClaw agent, including when you connect Muse without changing the
+active model. New chats using Muse then start with **Full access** and optional
+sandboxing off, without repeating the prompt.
+
+If you set up Muse through the CLI or manual configuration instead, the Control
+UI may still offer **Continue for this chat** when consent is needed. Setup
+outside these flows does not grant permission automatically. That fallback
+changes only the current chat. Remove `muse` from
+`agents.entries.<agentId>.nativeRuntimeConsent` to revoke the remembered choice.
+Required sandbox and workspace boundaries still apply.
 
 A refused attempt fails before any `muse` process starts, with an error that
 names the setting.

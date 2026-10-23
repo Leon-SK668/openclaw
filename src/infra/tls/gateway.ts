@@ -77,7 +77,6 @@ async function publishGeneratedTlsOutput(
 // fingerprint advertised to clients.
 export type GatewayTlsRuntime = {
   enabled: boolean;
-  required: boolean;
   certPath?: string;
   keyPath?: string;
   caPath?: string;
@@ -219,7 +218,7 @@ export async function loadGatewayTlsServerRuntime(
   log?: GatewayTlsLog,
 ): Promise<GatewayTlsRuntime> {
   if (!cfg || cfg.enabled !== true) {
-    return { enabled: false, required: false };
+    return { enabled: false };
   }
 
   const autoGenerate = cfg.autoGenerate !== false;
@@ -235,7 +234,7 @@ export async function loadGatewayTlsServerRuntime(
       : path.join(baseDir, "gateway-key.pem"),
   );
   const caPath = cfg.caPath ? resolveUserPath(cfg.caPath) : undefined;
-  const runtime = { enabled: false, required: true, certPath, keyPath };
+  const runtime = { enabled: false, certPath, keyPath };
 
   const hasCert = await pathExists(certPath);
   const hasKey = await pathExists(keyPath);
