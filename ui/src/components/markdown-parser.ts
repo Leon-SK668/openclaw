@@ -5,10 +5,12 @@ import { fileKindForPath, shortestFileLabels } from "./file-kind.ts";
 import { isGitHubHost } from "./github-link-eligibility.ts";
 import {
   decodeGitHubPathSegment,
+  formatGitHubItemReference,
   parseGitHubItemPath,
   parseGitHubLinkTarget,
 } from "./github-link-target.ts";
 import { installAssistantTranscriptRoleMarkdown } from "./markdown-assistant-transcript.ts";
+import { installMarkdownAudioTranscript } from "./markdown-audio-transcript.ts";
 import { markdownCodeBlockCopyText, renderMarkdownCodeBlock } from "./markdown-code-blocks.ts";
 import { installMarkdownDetails } from "./markdown-details.ts";
 import {
@@ -18,12 +20,16 @@ import {
   splitMarkdownFileLineSuffix,
 } from "./markdown-file-links.ts";
 import { installMarkdownGitHubRefs } from "./markdown-github-refs.ts";
+import { installMarkdownHexColors } from "./markdown-hex-colors.ts";
 import { installMarkdownHumanMentions } from "./markdown-human-mentions.ts";
 import { hasMarkdownLinkBoundaries } from "./markdown-link-boundary.ts";
 import type { MarkdownRenderEnv } from "./markdown-render-options.ts";
 import { installMarkdownSessionLinks } from "./markdown-session-links.ts";
 import { installMarkdownTables } from "./markdown-tables.ts";
-import { replaceMarkdownTextMatches } from "./markdown-text-replacements.ts";
+import {
+  markdownInlineChildren,
+  replaceMarkdownTextMatches,
+} from "./markdown-text-replacements.ts";
 
 const DISALLOWED_LINK_SCHEME_RE = /^(?!(?:https?|mailto):)[a-z][a-z0-9+.-]*:/i;
 // Raw CJK suffixes delimit autolinks; percent-encoded URL content stays intact.
@@ -130,12 +136,26 @@ export function createMarkdownParser(): MarkdownItParser {
   });
   markdownParser.use(markdownItCjkFriendly);
   markdownParser.enable("strikethrough");
+  installMarkdownAudioTranscript(markdownParser);
   installAssistantTranscriptRoleMarkdown(markdownParser);
   installMarkdownDetails(markdownParser);
   installMarkdownTables(markdownParser);
 
   // Bare filenames such as README.md are not web destinations.
   markdownParser.linkify.set({ fuzzyLink: false });
+
+  // A raw quote ends an HTTP URL in prose/JSON; encoded quotes remain URL data.
+  // Bound the input before matching so native path and punctuation rules still apply.
+  for (const schema of ["http:", "https:"]) {
+    markdownParser.linkify.add(schema, {
+      validate(text, pos, self) {
+        const pattern = self.re.get_http_validator();
+        const quote = text.indexOf('"', pos);
+        pattern.lastIndex = pos;
+        return pattern.exec(quote < 0 ? text : text.slice(0, quote))?.[0].length ?? 0;
+      },
+    });
+  }
 
   // Keep GFM's www. autolinks without fuzzy filename detection.
   markdownParser.linkify.add("www", {
@@ -225,11 +245,7 @@ export function createMarkdownParser(): MarkdownItParser {
   markdownParser.validateLink = () => true;
 
   markdownParser.core.ruler.after("linkify", "disallowed-link-schemes", (state) => {
-    for (const blockToken of state.tokens) {
-      const children = blockToken.children;
-      if (blockToken.type !== "inline" || !children) {
-        continue;
-      }
+    for (const children of markdownInlineChildren(state.tokens)) {
       let hideClose = false;
       for (const token of children) {
         if (
@@ -248,11 +264,7 @@ export function createMarkdownParser(): MarkdownItParser {
 
   // Linkify can swallow adjacent CJK prose; return only its suffix to plain text.
   markdownParser.core.ruler.after("linkify", "linkify-cjk-trim", (state) => {
-    for (const blockToken of state.tokens) {
-      if (blockToken.type !== "inline" || !blockToken.children) {
-        continue;
-      }
-      const children = blockToken.children;
+    for (const children of markdownInlineChildren(state.tokens)) {
       for (let index = children.length - 1; index >= 0; index--) {
         const token = children[index];
         if (!token || token.type !== "link_open") {
@@ -325,11 +337,7 @@ export function createMarkdownParser(): MarkdownItParser {
       });
       return [open, label, close];
     };
-    for (const blockToken of state.tokens) {
-      if (blockToken.type !== "inline" || !blockToken.children) {
-        continue;
-      }
-      const children = blockToken.children;
+    for (const children of markdownInlineChildren(state.tokens)) {
       let linkDepth = 0;
       for (let index = 0; index < children.length; index++) {
         const token = children[index];
@@ -420,11 +428,7 @@ export function createMarkdownParser(): MarkdownItParser {
 
   // Give bare and code-span GitHub URLs the same label; image-only links get no mark.
   markdownParser.core.ruler.after("linkify", "web-link-classes", (state) => {
-    for (const blockToken of state.tokens) {
-      if (blockToken.type !== "inline" || !blockToken.children) {
-        continue;
-      }
-      const children = blockToken.children;
+    for (const children of markdownInlineChildren(state.tokens)) {
       let linkDepth = 0;
       for (let index = 0; index < children.length; index++) {
         let open = children[index];
@@ -497,9 +501,9 @@ export function createMarkdownParser(): MarkdownItParser {
           if (itemChip) {
             open.attrJoin("class", "markdown-github-item");
             open.attrSet("data-github-kind", item.kind);
-          }
-          if (generatedUrlLabel) {
-            labelToken.content = item ? `#${item.number}` : formatGitHubLinkLabel(url);
+            labelToken.content = formatGitHubItemReference(item);
+          } else if (generatedUrlLabel) {
+            labelToken.content = formatGitHubLinkLabel(url);
           }
           if (!githubPreview && (generatedUrlLabel || itemChip)) {
             open.attrSet("title", href);
@@ -599,5 +603,6 @@ export function createMarkdownParser(): MarkdownItParser {
       : code;
   };
   installMarkdownHumanMentions(markdownParser);
+  installMarkdownHexColors(markdownParser);
   return markdownParser;
 }

@@ -149,16 +149,16 @@ export function extractPlannedTool(events: StreamEvent[]) {
   };
 }
 
-export function splitMockStreamingText(text: string, parts = 3) {
+export function splitMockStreamingText(text: string) {
   if (text.length <= 1) {
     return [text];
   }
-  const chunkSize = Math.max(1, Math.ceil(text.length / parts));
+  const chunkSize = Math.ceil(text.length / 3);
   const chunks: string[] = [];
   for (let index = 0; index < text.length; index += chunkSize) {
     chunks.push(text.slice(index, index + chunkSize));
   }
-  return chunks.length > 1 ? chunks : [text.slice(0, 1), text.slice(1)];
+  return chunks;
 }
 
 function buildQaLongFinalText({
@@ -346,7 +346,6 @@ export function buildReasoningOnlyEvents(summaryText: string, id: string): Strea
 export function buildReasoningAndAssistantEvents(params: {
   reasoningId: string;
   answerText: string;
-  answerId?: string;
 }): StreamEvent[] {
   const reasoningItem = {
     type: "reasoning",
@@ -356,7 +355,7 @@ export function buildReasoningAndAssistantEvents(params: {
   const stream = new MockResponseStream(`resp_${params.reasoningId}`);
   stream.item(reasoningItem);
   stream.message({
-    id: params.answerId ?? "msg_mock_reasoned_answer",
+    id: "msg_mock_reasoned_answer",
     phase: "final_answer",
     streamDeltas: [params.answerText],
     text: params.answerText,
