@@ -13,7 +13,7 @@ import { backupMigrationItemTarget } from "openclaw/plugin-sdk/migration-runtime
 import type { PlannedMigrationTargets } from "openclaw/plugin-sdk/migration-runtime";
 import type { MigrationItem } from "openclaw/plugin-sdk/plugin-entry";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
-import { exists, sanitizeName } from "./helpers.js";
+import { exists, readSourceFile, sanitizeName } from "./helpers.js";
 import type { ClaudeSource } from "./source.js";
 
 type PlannedSkill = {
@@ -148,7 +148,7 @@ export async function applyGeneratedSkillItem(
         : path.basename(item.source);
     const skillName =
       typeof item.details?.skillName === "string" ? item.details.skillName : sanitizeName(item.id);
-    const bytes = await fs.readFile(item.source);
+    const bytes = await readSourceFile(item.source);
     if (!isUtf8(bytes)) {
       throw new Error(
         `Claude command file is not valid UTF-8: ${item.source}. Re-save or re-encode the file as UTF-8, then rerun the migration.`,

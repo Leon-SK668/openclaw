@@ -1,7 +1,9 @@
 import { isUtf8 } from "node:buffer";
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { readFileHandleBounded } from "openclaw/plugin-sdk/file-access-runtime";
 import {
   markMigrationItemError,
   markMigrationItemSkipped,
@@ -38,10 +40,27 @@ export function sanitizeName(name: string): string {
     .replaceAll(/^-+|-+$/g, "");
 }
 
+export async function readSourceFile(filePath: string): Promise<Buffer> {
+  // Follow source symlinks, but do not wait for a FIFO writer before checking its type.
+  const flags = process.platform === "win32" ? "r" : constants.O_RDONLY | constants.O_NONBLOCK;
+  const handle = await fs.open(filePath, flags);
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(
+        `Claude migration source must be a regular file: ${filePath}. Choose or restore a regular source file, then rerun the migration.`,
+      );
+    }
+    // Nonblocking reads may be short before EOF (for example, on 9p).
+    return await readFileHandleBounded(handle, Infinity);
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readJsonObject(
   filePath: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const content = filePath ? await fs.readFile(filePath).catch(() => undefined) : undefined;
+  const content = filePath ? await readSourceFile(filePath).catch(() => undefined) : undefined;
   if (!content) {
     return {};
   }
@@ -64,7 +83,7 @@ export async function appendItem(item: MigrationItem): Promise<MigrationItem> {
     return markMigrationItemError(item, MIGRATION_REASON_MISSING_SOURCE_OR_TARGET);
   }
   try {
-    const content = await fs.readFile(item.source);
+    const content = await readSourceFile(item.source);
     if (!isUtf8(content)) {
       throw new Error(
         `Claude instruction file is not valid UTF-8: ${item.source}. Re-save or re-encode it as UTF-8, then rerun the migration.`,
