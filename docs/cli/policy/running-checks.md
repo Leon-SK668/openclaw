@@ -30,7 +30,7 @@ workspace. A sole-agent or retained legacy-owner configuration still resolves
 without the flag; OpenClaw never selects an arbitrary first agent.
 
 `policy check`, `policy compare`, and `policy watch` emit JSON when `--json` is
-set or stdout is piped. Failures after option parsing emit `ok: false` and
+set or stdout is piped. Command-owned failures after option parsing emit `ok: false` and
 `error: { type: "cli_error", message: "..." }` on stdout, preserve the diagnostic
 on stderr, and exit with `2`. `watch` emits one JSON object per line, including
 failures after any earlier reports.

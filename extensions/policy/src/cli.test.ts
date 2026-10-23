@@ -37,7 +37,6 @@ async function runPolicyCli(args: readonly string[]) {
     return {
       exitCode: process.exitCode ?? 0,
       parsed,
-      output: [...stdout, ...stderr],
       stdout: stdout.join(""),
       stderr: stderr.join(""),
     };
@@ -222,7 +221,7 @@ describe("policy commands", () => {
       },
     });
 
-    const { exitCode, parsed, output } = await runPolicyCheckJson();
+    const { exitCode, parsed, stdout, stderr } = await runPolicyCheckJson();
     expect(exitCode).toBe(1);
     expect(parsed.findings.map((finding: { checkId: string }) => finding.checkId)).toEqual([
       "policy/routing-bindings-required",
@@ -232,7 +231,8 @@ describe("policy commands", () => {
     expect(parsed.evidence.routing.probes).toEqual([
       expect.objectContaining({ id: "family-dm", agentId: "main", matchedBy: "default" }),
     ]);
-    expect(output.join("\n")).not.toContain(peerId);
+    expect(stdout).not.toContain(peerId);
+    expect(stderr).not.toContain(peerId);
   });
 
   it.each([
@@ -323,9 +323,9 @@ describe("policy commands", () => {
   });
 
   it("rejects partial policy watch intervals before evaluating policy", async () => {
-    const { exitCode, output } = await runPolicyWatchJson("--interval-ms", "500ms");
+    const { exitCode, stderr } = await runPolicyWatchJson("--interval-ms", "500ms");
     expect(exitCode).toBe(2);
-    expect(output.join("\n")).toContain("--interval-ms must be an integer >= 250.");
+    expect(stderr).toContain("--interval-ms must be an integer >= 250.");
   });
 
   it("reports findings before stale when accepted attestation exists", async () => {
@@ -670,10 +670,10 @@ describe("policy commands", () => {
     await writeExplicitFleetConfig();
     await writeFixture(join(workspaceDir, "baseline.policy.jsonc"), {});
 
-    const { exitCode, output } = await runPolicyCli(args);
+    const { exitCode, stderr } = await runPolicyCli(args);
     expect(exitCode).toBe(2);
-    expect(output.join("\n")).toContain(expected);
-    expect(output.join("\n")).toContain("Pass --agent <id>.");
+    expect(stderr).toContain(expected);
+    expect(stderr).toContain("Pass --agent <id>.");
   });
 
   it("rejects an unknown explicit owner with profile-aware guidance", async () => {
@@ -681,9 +681,9 @@ describe("policy commands", () => {
     vi.stubEnv("OPENCLAW_PROFILE", "testprof");
     vi.stubEnv("OPENCLAW_CONTAINER_HINT", "");
 
-    const { exitCode, output } = await runPolicyCli(["check", "--agent", "ghost", "--json"]);
+    const { exitCode, stderr } = await runPolicyCli(["check", "--agent", "ghost", "--json"]);
     expect(exitCode).toBe(2);
-    expect(output.join("\n")).toContain(
+    expect(stderr).toContain(
       'Unknown agent id "ghost". Run openclaw --profile testprof agents list to see configured agents.',
     );
   });
