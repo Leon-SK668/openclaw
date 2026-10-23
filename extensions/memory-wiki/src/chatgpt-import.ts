@@ -1,7 +1,9 @@
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readFileHandleBounded } from "openclaw/plugin-sdk/file-access-runtime";
 import {
   replaceManagedMarkdownBlock,
   withTrailingNewline,
@@ -105,6 +107,23 @@ function normalizeWhitespace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
 
+async function readChatGptImportFile(filePath: string): Promise<Buffer> {
+  // Preserve ordinary-file symlinks, but never wait for a FIFO writer while
+  // holding the vault mutation lease. Check the opened target before reading.
+  const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK);
+  const handle = await fs.open(filePath, flags);
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(
+        `ChatGPT import requires a regular file: ${filePath}. Replace the special file with a regular file and retry.`,
+      );
+    }
+    return await readFileHandleBounded(handle, Infinity);
+  } finally {
+    await handle.close();
+  }
+}
+
 async function loadConversations(exportInputPath: string): Promise<{
   exportPath: string;
   conversationsPath: string;
@@ -114,7 +133,7 @@ async function loadConversations(exportInputPath: string): Promise<{
   const conversationsPath = exportPath.endsWith(".json")
     ? exportPath
     : path.join(exportPath, "conversations.json");
-  const raw = await fs.readFile(conversationsPath);
+  const raw = await readChatGptImportFile(conversationsPath);
   if (!isUtf8(raw)) {
     throw new Error(
       `ChatGPT conversations export must be valid UTF-8: ${conversationsPath}. Download a fresh ChatGPT export and retry the import.`,
@@ -591,7 +610,7 @@ export async function importChatGptConversations(params: {
       const rendered = renderConversationPage(record);
       const absolutePath = path.join(params.config.vault.path, record.pagePath);
       const existing = await readExistingWikiPage(
-        async () => decodeWikiPageUtf8(await fs.readFile(absolutePath), absolutePath),
+        async () => decodeWikiPageUtf8(await readChatGptImportFile(absolutePath), absolutePath),
         (error) => asNullableRecord(error)?.code === "ENOENT",
       );
       const stabilized = preserveExistingPageBlocks(rendered, existing);
