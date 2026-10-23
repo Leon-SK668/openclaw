@@ -96,13 +96,27 @@ data class GatewayLoadedImage(
   val mimeType: String,
 )
 
+enum class TalkSessionCloseDisposition(
+  val wireValue: String,
+) {
+  Abort("abort"),
+  Detach("detach"),
+}
+
 enum class GatewayMediaKind(
   val wireValue: String,
   val maximumBufferedBytes: Long,
+  val acceptHeader: String = "$wireValue/*",
 ) {
   Image("image", 12L * 1024L * 1024L),
   Audio("audio", 16L * 1024L * 1024L),
   Video("video", 0L),
+  File("file", 100L * 1024L * 1024L, "*/*"), // Gateway document limit (media-core/constants).
+  ;
+
+  fun acceptsMimeType(mimeType: String): Boolean =
+    // Files are exported, not rendered; the Gateway owns document admission.
+    if (this == File) mimeType.isNotBlank() else mimeType.startsWith("$wireValue/")
 }
 
 sealed interface GatewayLoadedMedia {
@@ -399,11 +413,35 @@ class GatewaySession(
     private val commitIfCurrentImpl: ((block: () -> Unit) -> Boolean)? = null,
     private val advertisedMethods: Set<String> = emptySet(),
     val controlUiCredential: NativeControlUiCredential? = null,
+    private val advertisedCapabilities: Set<String> = emptySet(),
+    private val reconnectIfCurrentImpl: () -> Unit = {},
     private val requestImpl: suspend (method: String, paramsJson: String?, timeoutMs: Long, withEnqueue: (() -> Unit) -> Unit) -> String,
   ) {
     fun isCurrent(): Boolean = isCurrentImpl()
 
     fun supportsMethod(method: String): Boolean = method in advertisedMethods
+
+    suspend fun closeTalkSession(
+      sessionId: String,
+      disposition: TalkSessionCloseDisposition,
+      withEnqueue: (() -> Unit) -> Unit = { it() },
+    ): String =
+      try {
+        request(
+          "talk.session.close",
+          buildJsonObject {
+            put("sessionId", JsonPrimitive(sessionId))
+            // Older Gateways reject unknown fields and retain the legacy aborting close.
+            if ("talk-session-close-disposition" in advertisedCapabilities) put("disposition", JsonPrimitive(disposition.wireValue))
+          }.toString(),
+          timeoutMs = 5_000,
+          withEnqueue = withEnqueue,
+        )
+      } catch (error: Throwable) {
+        // Disconnect also detaches accepted work if the close could not be confirmed.
+        if (disposition == TalkSessionCloseDisposition.Detach) reconnectIfCurrentImpl()
+        throw error
+      }
 
     fun commitIfCurrent(block: () -> Unit): Boolean {
       commitIfCurrentImpl?.let { return it(block) }
@@ -768,7 +806,7 @@ class GatewaySession(
   suspend fun request(
     method: String,
     paramsJson: String?,
-    timeoutMs: Long = 15_000,
+    timeoutMs: Long? = null,
   ): String = requestDetailed(method = method, paramsJson = paramsJson, timeoutMs = timeoutMs).payloadOrThrow()
 
   suspend fun loadImageArtifact(
@@ -821,7 +859,7 @@ class GatewaySession(
     }
     val payload = response.payloadJson?.let(::parseJsonOrNull).asObjectOrNull() ?: return null
     val artifact = payload["artifact"].asObjectOrNull()
-    // Older gateways returned only the managed-image URL. Audio/video shipped with the typed
+    // Older gateways returned only the managed-image URL. Other media require the typed
     // artifact envelope, so keep the narrow image fallback without weakening their type gate.
     if (artifact == null && kind != GatewayMediaKind.Image) return null
     if (artifact != null && artifact["type"].asStringOrNull()?.trim()?.lowercase(Locale.ROOT) != kind.wireValue) return null
@@ -831,7 +869,7 @@ class GatewaySession(
         .asStringOrNull()
         ?.trim()
         ?.lowercase(Locale.ROOT)
-    if (mimeType != null && !mimeType.startsWith("${kind.wireValue}/")) return null
+    if (mimeType != null && !kind.acceptsMimeType(mimeType)) return null
     val loaded =
       payload["data"].asStringOrNull()?.let { encoded ->
         if (kind == GatewayMediaKind.Video) return@let null
@@ -857,7 +895,7 @@ class GatewaySession(
     expectedEndpointStableId: String,
     method: String,
     paramsJson: String?,
-    timeoutMs: Long = 15_000,
+    timeoutMs: Long? = null,
   ): String = requestDetailed(expectedEndpointStableId, method, paramsJson, timeoutMs).payloadOrThrow()
 
   private fun RpcResult.payloadOrThrow(): String {
@@ -873,6 +911,12 @@ class GatewaySession(
         endpointStableId = conn.target.endpoint.stableId,
         advertisedMethods = conn.advertisedMethods,
         controlUiCredential = conn.controlUiCredential,
+        advertisedCapabilities = conn.advertisedCapabilities,
+        reconnectIfCurrentImpl = {
+          synchronized(lifecycleLock) {
+            if (currentConnection === conn && conn.isReady()) reconnect()
+          }
+        },
         isCurrentImpl = { currentConnection === conn && conn.isReady() },
         commitIfCurrentImpl = { block ->
           synchronized(lifecycleLock) {
@@ -893,7 +937,7 @@ class GatewaySession(
   suspend fun requestDetailed(
     method: String,
     paramsJson: String?,
-    timeoutMs: Long = 15_000,
+    timeoutMs: Long? = null,
   ): RpcResult =
     requestDetailed(
       expectedEndpointStableId = null,
@@ -906,7 +950,7 @@ class GatewaySession(
     expectedEndpointStableId: String?,
     method: String,
     paramsJson: String?,
-    timeoutMs: Long,
+    timeoutMs: Long?,
   ): RpcResult {
     val conn = readyConnection(expectedEndpointStableId) ?: throw GatewayRequestNotEnqueued("not connected")
     return requestDetailed(conn, method, paramsJson, timeoutMs)
@@ -916,13 +960,27 @@ class GatewaySession(
     conn: Connection,
     method: String,
     paramsJson: String?,
-    timeoutMs: Long,
+    timeoutMs: Long?,
     withEnqueue: (() -> Unit) -> Unit = { it() },
   ): RpcResult {
     val params = parseRequestParams(paramsJson)
+    val hasAudio =
+      method == "chat.send" &&
+        params.asObjectOrNull()?.get("attachments").asArrayOrNull()?.any { attachment ->
+          attachment
+            .asObjectOrNull()
+            ?.get("mimeType")
+            .asStringOrNull()
+            ?.lowercase()
+            ?.startsWith("audio/") == true
+        } == true
+    // Audio transcription precedes durable admission. Disconnect and caller
+    // cancellation still settle the request while it waits for that ACK.
+    val requestTimeoutMs = timeoutMs ?: if (hasAudio) 0L else 15_000L
     val enqueue = guardRequestEnqueue(conn, withEnqueue)
-    if (method != "talk.catalog") return conn.request(method, params, timeoutMs, enqueue)
-    var remainingMs = minOf(timeoutMs, 10_000)
+    if (method != "talk.catalog") return conn.request(method, params, requestTimeoutMs, enqueue)
+    // A disabled RPC deadline must not disable the catalog's bounded warm-up budget.
+    var remainingMs = if (requestTimeoutMs == 0L) 10_000L else minOf(requestTimeoutMs, 10_000)
     val deadline = SystemClock.elapsedRealtime() + remainingMs
     while (true) {
       val result = conn.request(method, params, remainingMs, enqueue)
@@ -997,6 +1055,9 @@ class GatewaySession(
     val target: DesiredConnection,
   ) {
     var advertisedMethods: Set<String> = emptySet()
+      private set
+
+    var advertisedCapabilities: Set<String> = emptySet()
       private set
 
     var controlUiCredential: NativeControlUiCredential? = null
@@ -1146,7 +1207,7 @@ class GatewaySession(
       val deferred = registerPending(id)
       try {
         sendJson(buildRequestFrame(id = id, method = method, params = params), withEnqueue)
-        return withTimeout(timeoutMs) { deferred.await() }
+        return if (timeoutMs == 0L) deferred.await() else withTimeout(timeoutMs) { deferred.await() }
       } catch (err: TimeoutCancellationException) {
         if (method == GatewayMethod.Connect.rawValue) {
           throw GatewayConnectFailure(gatewayNetworkConnectError(timedOut = true))
@@ -1205,14 +1266,25 @@ class GatewaySession(
     ): GatewayLoadedMedia.Buffered? =
       withContext(Dispatchers.IO) {
         val resolved = resolveTicketedMediaRequest(ticketedPath, playbackRendition) ?: return@withContext null
-        val request = Request.Builder().url(resolved.url).header("Accept", "${kind.wireValue}/*")
+        val request = Request.Builder().url(resolved.url).header("Accept", kind.acceptHeader)
         for ((name, value) in resolved.headers) {
           request.header(name, value)
         }
+        // Exported documents must not follow a redirect outside the ticketed Gateway route.
+        val downloadClient =
+          if (kind == GatewayMediaKind.File) {
+            client
+              .newBuilder()
+              .followRedirects(false)
+              .followSslRedirects(false)
+              .build()
+          } else {
+            client
+          }
         val retry = GatewayPlaybackRetryState()
         repeat(Int.MAX_VALUE) {
           if (!retry.canAttempt()) return@withContext null
-          val call = client.newCall(request.build())
+          val call = downloadClient.newCall(request.build())
           call.timeout().timeout(20, java.util.concurrent.TimeUnit.SECONDS)
           var retryDelayMs: Long? = null
           call.execute().use { response ->
@@ -1222,7 +1294,7 @@ class GatewaySession(
               if (!response.isSuccessful) return@withContext null
               val body = response.body
               val mimeType = body.contentType()?.toString()?.lowercase(Locale.ROOT) ?: return@withContext null
-              if (!mimeType.startsWith("${kind.wireValue}/")) return@withContext null
+              if (!kind.acceptsMimeType(mimeType)) return@withContext null
               val maximumBytes = kind.maximumBufferedBytes
               val declaredLength = body.contentLength()
               if (declaredLength > maximumBytes) return@withContext null
@@ -1384,9 +1456,10 @@ class GatewaySession(
 
     fun hasOpenTransport(): Boolean = state.get() != ConnectionState.CLOSED && connectHandshakeJob != null
 
-    fun markReady(methods: Set<String>?): Boolean {
+    fun markReady(hello: GatewayHelloSummary): Boolean {
       if (!state.compareAndSet(ConnectionState.CONNECTING, ConnectionState.READY)) return false
-      advertisedMethods = methods.orEmpty().toSet()
+      advertisedMethods = hello.methods.orEmpty()
+      advertisedCapabilities = hello.capabilities.orEmpty()
       return true
     }
 
@@ -2206,7 +2279,7 @@ class GatewaySession(
       val connected = conn.connect()
       synchronized(notificationLock) {
         synchronized(lifecycleLock) {
-          if (currentConnection !== conn || desired !== target || job?.isActive != true || !conn.markReady(connected.hello.methods)) return@withContext
+          if (currentConnection !== conn || desired !== target || job?.isActive != true || !conn.markReady(connected.hello)) return@withContext
           // Ready metadata precedes callbacks; retries requested by a callback remain queued.
           pluginSurfaceUrls = connected.pluginSurfaceUrls
           sessionRouting = connected.sessionRouting
