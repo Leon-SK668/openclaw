@@ -1,8 +1,8 @@
-import { existsSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { resolvePathPrefixSync } from "@openclaw/fs-safe/advanced";
+import { readFileHandleBounded, resolvePathPrefixSync } from "@openclaw/fs-safe/advanced";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -21,7 +21,21 @@ export const COMPLETION_SKIP_PLUGIN_COMMANDS_ENV = "OPENCLAW_COMPLETION_SKIP_PLU
 type CompletionProfileEncoding = "utf8" | "utf8bom" | "utf16le" | "utf16be";
 
 async function readCompletionProfile(profilePath: string, shell: CompletionShell) {
-  const buffer = await fs.readFile(profilePath);
+  // Follow managed dotfile links, but inspect the descriptor before reading:
+  // a blocking open can strand completion, Doctor, and setup on a FIFO.
+  const flags = process.platform === "win32" ? "r" : constants.O_RDONLY | constants.O_NONBLOCK;
+  const handle = await fs.open(profilePath, flags);
+  let buffer: Buffer;
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(
+        `Shell profile must be a regular file: ${profilePath}. Choose a regular profile file before retrying.`,
+      );
+    }
+    buffer = await readFileHandleBounded(handle, Infinity);
+  } finally {
+    await handle.close();
+  }
   let encoding: CompletionProfileEncoding = "utf8";
   if (shell === "powershell" && process.platform === "win32") {
     const [first, second, third] = buffer;
