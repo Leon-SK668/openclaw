@@ -26,7 +26,7 @@ import {
   type LegacyMigrationSourceSnapshot as LegacySourceSnapshot,
 } from "./state-migrations.source-snapshot.js";
 import type { LegacyStateDetection, MigrationMessages } from "./state-migrations.types.js";
-import { decodeUtf8Input } from "./utf8-input.js";
+import { decodeUtf8Input, Utf8InputError } from "./utf8-input.js";
 
 const LEGACY_NODE_HOST_MAX_BYTES = 64 * 1024;
 const CONFIG_KEYS = new Set(["version", "nodeId", "token", "displayName", "gateway"]);
@@ -332,7 +332,7 @@ export async function migrateLegacyNodeHostConfig(params: {
           try {
             return { ...snapshot, raw: decodeUtf8Input(snapshot.buffer, "Legacy node-host state") };
           } catch (error) {
-            throw new Error(
+            throw new Utf8InputError(
               `Legacy node-host state at ${snapshotPath} must be valid UTF-8. Keep a backup, correct the encoding in a copy, replace this file with the corrected copy, then retry openclaw doctor --fix.`,
               { cause: error },
             );

@@ -145,6 +145,7 @@ describe("legacy node-host Doctor migration", () => {
 
     const refused = await migrate();
 
+    expect(refused.warningDisposition).toBe("recoverable");
     expect(refused.warnings.join("\n")).toContain("valid UTF-8");
     expect(refused.warnings.join("\n")).toContain(activeSource);
     expect(refused.warnings.join("\n")).toContain(
@@ -168,7 +169,9 @@ describe("legacy node-host Doctor migration", () => {
     await fsp.writeFile(sourcePath, source);
     await fsp.writeFile(`${sourcePath}.doctor-importing`, claim);
 
-    expect((await migrate()).warnings.join("\n")).toContain("valid UTF-8");
+    const refused = await migrate();
+    expect(refused.warningDisposition).toBe("recoverable");
+    expect(refused.warnings.join("\n")).toContain("valid UTF-8");
     expect(readCanonicalRow(env)).toBeUndefined();
     await expect(fsp.readFile(sourcePath)).resolves.toEqual(source);
     await expect(fsp.readFile(`${sourcePath}.doctor-importing`)).resolves.toEqual(claim);
