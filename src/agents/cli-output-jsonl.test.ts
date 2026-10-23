@@ -1,8 +1,14 @@
 import { readFileSync } from "node:fs";
+import { calculateUsageCost } from "@openclaw/llm-core";
 import { describe, expect, it } from "vitest";
 import { createCliJsonlStreamingParser } from "./cli-output-stream.js";
 import { parseCliOutput } from "./cli-output.js";
-import { claudeStreamEvent, claudeTextDelta, joinJsonlFrames } from "./cli-output.test-helpers.js";
+import {
+  claudeMessageStart,
+  claudeStreamEvent,
+  claudeTextDelta,
+  joinJsonlFrames,
+} from "./cli-output.test-helpers.js";
 
 type ParseCliOutputParams = Parameters<typeof parseCliOutput>[0];
 
@@ -16,26 +22,6 @@ function parseCliJsonl(
   providerId = "claude-cli",
 ) {
   return parseCliOutput({ raw, backend, providerId, outputMode: "jsonl" });
-}
-
-function claudeMessageStart(id?: string) {
-  return claudeStreamEvent({ type: "message_start", ...(id ? { message: { id } } : {}) });
-}
-
-function normalizedUsage(values: {
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  total?: number;
-}) {
-  return {
-    input: values.input,
-    output: values.output,
-    cacheRead: values.cacheRead,
-    cacheWrite: values.cacheWrite,
-    total: values.total,
-  };
 }
 
 describe("parseCliJsonl", () => {
@@ -61,7 +47,7 @@ describe("parseCliJsonl", () => {
     expect(result).toEqual({
       text: "dialect says hello",
       sessionId: "session-dialect",
-      usage: normalizedUsage({ input: 5, output: 2 }),
+      usage: { input: 5, output: 2 },
     });
   });
 
@@ -95,6 +81,133 @@ describe("parseCliJsonl", () => {
       sessionId: "session-reparse",
       usage: undefined,
     });
+  });
+
+  const stopHookFeedback = {
+    type: "user",
+    message: { role: "user", content: [{ type: "text", text: "Stop hook feedback:\nRewrite." }] },
+    parent_tool_use_id: null,
+  };
+  const stopHookNotification = {
+    type: "system",
+    subtype: "notification",
+    key: "stop-hook-error",
+  };
+  const toolRoundTrip = (id: string) => [
+    claudeMessageStart(`tool-message-${id}`),
+    claudeStreamEvent({
+      type: "content_block_start",
+      content_block: { type: "tool_use", id, name: "Read" },
+    }),
+    claudeStreamEvent({ type: "message_stop" }),
+    {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: id, content: "ok" }],
+      },
+    },
+  ];
+
+  it.each([
+    {
+      name: "Stop-hook rejection before a tool",
+      feedback: [stopHookFeedback, stopHookNotification],
+      rewrite: "B",
+      expected: "B",
+    },
+    {
+      name: "rewrite without a tool",
+      feedback: [stopHookFeedback, stopHookNotification],
+      rewrite: "B",
+      expected: "B",
+      tool: false,
+    },
+    { name: "notification", feedback: [stopHookNotification], rewrite: "B", expected: "B" },
+    {
+      name: "silent rewrite with both feedback records",
+      feedback: [stopHookFeedback, stopHookNotification],
+      rewrite: "NO_REPLY",
+      expected: "NO_REPLY",
+    },
+    {
+      name: "ordinary tool split",
+      feedback: [],
+      rewrite: "B",
+      expected: "A\n\nB",
+    },
+    {
+      name: "replayed user steering",
+      feedback: [
+        {
+          type: "user",
+          isReplay: true,
+          parent_tool_use_id: null,
+          message: { role: "user", content: [{ type: "text", text: "Check README.md too." }] },
+        },
+      ],
+      rewrite: "B",
+      expected: "A\n\nB",
+    },
+    {
+      name: "user text without a rejection notification",
+      feedback: [stopHookFeedback],
+      rewrite: "B",
+      expected: "A\n\nB",
+    },
+    {
+      name: "subagent feedback and unrelated notification",
+      feedback: [
+        { ...stopHookFeedback, parent_tool_use_id: "subagent-1" },
+        { ...stopHookNotification, parent_tool_use_id: "subagent-1" },
+        { ...stopHookNotification, key: "tool-progress" },
+      ],
+      rewrite: "B",
+      expected: "A\n\nB",
+    },
+  ])(
+    "selects the final reply across Claude stream boundaries ($name)",
+    ({ feedback, rewrite, expected, tool = true }) => {
+      const result = parseCliJsonl(
+        joinJsonlFrames(
+          claudeMessageStart("draft"),
+          claudeTextDelta("A"),
+          claudeStreamEvent({ type: "message_stop" }),
+          ...feedback,
+          ...(tool ? toolRoundTrip("read-1") : []),
+          claudeMessageStart("rewrite"),
+          claudeTextDelta(rewrite),
+          claudeStreamEvent({ type: "message_stop" }),
+          { type: "result", result: rewrite },
+        ),
+      );
+
+      expect(result.text).toBe(expected);
+    },
+  );
+
+  it("discards each rejected segment across repeated Stop-hook bounces", () => {
+    const result = parseCliJsonl(
+      joinJsonlFrames(
+        claudeMessageStart("first-draft"),
+        claudeTextDelta("A"),
+        claudeStreamEvent({ type: "message_stop" }),
+        stopHookFeedback,
+        stopHookNotification,
+        ...toolRoundTrip("read-1"),
+        claudeMessageStart("second-draft"),
+        claudeTextDelta("B"),
+        claudeStreamEvent({ type: "message_stop" }),
+        stopHookFeedback,
+        stopHookNotification,
+        ...toolRoundTrip("read-2"),
+        claudeMessageStart("rewrite"),
+        claudeTextDelta("C"),
+        { type: "result", result: "C" },
+      ),
+    );
+
+    expect(result.text).toBe("C");
   });
 
   it("continues transcript reparses past an interim result", () => {
@@ -168,7 +281,7 @@ describe("parseCliJsonl", () => {
       expected: {
         text: "Gemini says hello",
         sessionId: "gemini-session-123",
-        usage: normalizedUsage({ input: 5, output: 5, cacheRead: 8, total: 21 }),
+        usage: { input: 5, output: 5, cacheRead: 8, total: 21 },
       },
     },
     {
@@ -205,7 +318,7 @@ describe("parseCliJsonl", () => {
       expected: {
         text: "",
         sessionId: "gemini-session-123",
-        usage: normalizedUsage({ input: 1, output: 1, total: 2 }),
+        usage: { input: 1, output: 1, total: 2 },
       },
     },
     {
@@ -253,7 +366,7 @@ describe("parseCliJsonl", () => {
       expected: {
         text: "",
         sessionId: undefined,
-        usage: normalizedUsage({ total: 1 }),
+        usage: { total: 1 },
         errorText: "Invalid stream payload",
       },
     },
@@ -424,7 +537,7 @@ describe("parseCliJsonl", () => {
       expected: {
         text: "",
         sessionId: "session-456",
-        usage: normalizedUsage({ input: 18 }),
+        usage: { input: 18 },
       },
     },
     {
@@ -443,7 +556,7 @@ describe("parseCliJsonl", () => {
       expected: {
         text: "Hello world",
         sessionId: "session-456",
-        usage: normalizedUsage({ input: 18, output: 4 }),
+        usage: { input: 18, output: 4 },
       },
     },
     {
@@ -528,6 +641,7 @@ describe("parseCliJsonl", () => {
       output: 5,
       cacheRead: undefined,
       cacheWrite: 36955,
+      cacheWrite1h: 36955,
       total: undefined,
     });
     expect(output.diagnosticUsage).toEqual({
@@ -535,8 +649,12 @@ describe("parseCliJsonl", () => {
       output: 534,
       cacheRead: undefined,
       cacheWrite: 36955,
+      cacheWrite1h: 36955,
       total: undefined,
     });
+    // Every write in this turn used the 1h TTL; the CLI reports costUSD 0.40499 for it.
+    const opus48 = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
+    expect(calculateUsageCost(output.diagnosticUsage ?? {}, opus48).total).toBeCloseTo(0.40499, 8);
   });
 
   it("keeps subagent thinking, tools, and messages out of the parent lane", () => {
