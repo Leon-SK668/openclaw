@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMetricsHarness, untrusted } from "./service.test-helpers.js";
 
-// mock-isolation: Scrape as a read-authorized operator; service.http-scope.test.ts
-// covers the real route's fail-closed scope checks separately.
+// mock-isolation: Avoid Gateway initialization; denial cases live in service.http-scope.test.ts.
 vi.mock("openclaw/plugin-sdk/plugin-runtime", () => ({
   getPluginRuntimeGatewayRequestScope: () => ({
     client: { connect: { scopes: ["operator.read"] } },
