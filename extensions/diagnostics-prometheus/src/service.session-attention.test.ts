@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createMetricsHarness, untrusted } from "./service.test-helpers.js";
+
+// mock-isolation: Scrape as a read-authorized operator; service.http-scope.test.ts
+// covers the real route's fail-closed scope checks separately.
+vi.mock("openclaw/plugin-sdk/plugin-runtime", () => ({
+  getPluginRuntimeGatewayRequestScope: () => ({
+    client: { connect: { scopes: ["operator.read"] } },
+  }),
+}));
 
 describe("session attention observations", () => {
   it("counts repeated stalls and long-running observations without exposing identities", () => {
