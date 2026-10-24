@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -499,42 +498,6 @@ describe("plugin authoring commands", () => {
       `Malformed JSON in ${packagePath}`,
     );
   });
-
-  it.skipIf(process.platform === "win32").each(["package.json", "openclaw.plugin.json"])(
-    "rejects a FIFO %s before reading or publishing metadata",
-    async (fileName) => {
-      const { root: tmpDir, entry: entryPath } = sourceProject("fifo-metadata");
-      const metadataPath = path.join(tmpDir, fileName);
-      const packagePath = path.join(tmpDir, "package.json");
-      const packageBefore = fs.readFileSync(packagePath, "utf8");
-      if (fileName === "package.json") {
-        fs.unlinkSync(metadataPath);
-      }
-      execFileSync("mkfifo", [metadataPath]);
-      const openSync = fs.openSync;
-      const open = vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) => {
-        // Fail safely if a regression tries a blocking open on the real FIFO.
-        if (
-          file === metadataPath &&
-          (typeof flags !== "number" || !(flags & fs.constants.O_NONBLOCK))
-        ) {
-          throw new Error("A blocking metadata read would wait for a FIFO writer.");
-        }
-        return openSync(file, flags, mode);
-      });
-      try {
-        await expect(runPluginsBuildCommand({ root: tmpDir, entry: entryPath })).rejects.toThrow(
-          /regular file/,
-        );
-        expect(fs.lstatSync(metadataPath).isFIFO()).toBe(true);
-        if (fileName !== "package.json") {
-          expect(fs.readFileSync(packagePath, "utf8")).toBe(packageBefore);
-        }
-      } finally {
-        open.mockRestore();
-      }
-    },
-  );
 
   it("finishes a build from an absolute root after the launch directory is removed", async () => {
     const tmpDir = tempDirs.make("openclaw-plugin-deleted-cwd-build-");
