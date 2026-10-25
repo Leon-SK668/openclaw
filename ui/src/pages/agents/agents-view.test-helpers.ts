@@ -1,5 +1,6 @@
 import { githubIdentityViewFixture } from "../../features/github-connections/github-identity.test-support.ts";
 import { createInitialCronState } from "../../lib/cron/index.ts";
+import { createApplicationGatewaySnapshot } from "../../test-helpers/application-context-fixtures.ts";
 import type { AgentFiles } from "./panels-files.tsx";
 import type { Agents } from "./view.tsx";
 
@@ -25,6 +26,7 @@ export const inertAgentFileControls = {
 export function createAgentViewTestProps(
   overrides: Partial<AgentsViewProps> = {},
 ): AgentsViewProps {
+  const retired = Promise.withResolvers<void>().promise;
   const data: ReturnType<AgentsViewProps["readData"]> = {
     agentsList: {
       defaultId: "alpha",
@@ -49,7 +51,7 @@ export function createAgentViewTestProps(
     agentFileConflict: null,
     identityDraft: { name: null, emoji: null, avatar: null },
     identitySaving: false,
-    identityError: null,
+    identityOutcome: null,
     agentSkillsRead: null,
     agentSkillsReport: null,
     agentSkillsAgentId: null,
@@ -57,7 +59,7 @@ export function createAgentViewTestProps(
   };
   return {
     readData: () => data,
-    presentationRetired: () => new Promise<void>(() => {}),
+    presentationRetired: () => retired,
     readChannels: () => ({
       channelsSnapshot: null,
       channelsRead: null,
@@ -106,17 +108,10 @@ export function createAgentViewTestProps(
       decisionModels: [],
       modelCatalogRetired: false,
       modelCatalogHasSnapshot: false,
-      modelCatalogGateway: {
-        client: null,
+      modelCatalogGateway: createApplicationGatewaySnapshot({
         phase: "connected",
-        offlineStable: false,
-        hello: null,
-        canvasPluginSurfaceUrl: null,
-        assistantAgentId: null,
         sessionKey: "main",
-        lastError: null,
-        lastErrorCode: null,
-      },
+      }),
       modelSelectionPolicy: undefined,
       onModelChange: () => false,
       onDecisionModelChange: () => false,
@@ -154,8 +149,8 @@ export function createAgentViewTestProps(
     onRefresh: () => undefined,
     onCreateAgent: () => undefined,
     onSelectPanel: () => undefined,
-    onConfigReload: () => undefined,
-    onConfigSave: () => undefined,
+    onConfigReload: async () => undefined,
+    onConfigSave: async () => undefined,
     onSetDefault: async () => undefined,
     onTogglePinnedAgent: () => undefined,
     onOpenMemoryImport: () => undefined,

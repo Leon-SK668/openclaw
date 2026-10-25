@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { i18n } from "../i18n/index.ts";
+import { restorePropertyDescriptor } from "../test-helpers/property-descriptor.ts";
 import { MarkdownBlocks } from "./markdown-blocks-owner.ts";
 import {
   handleMarkdownCodeBlockClick,
@@ -8,12 +9,8 @@ import {
 } from "./markdown-code-blocks.ts";
 import { parseMarkdownJson } from "./markdown-json.ts";
 import type { MarkdownRenderOptions } from "./markdown-render-options.ts";
-import { htmlFragment } from "./markdown.test-support.ts";
-import {
-  toSanitizedJsonHtml,
-  toSanitizedMarkdownHtml,
-  toStreamingMarkdownParts,
-} from "./markdown.ts";
+import { htmlFragment, toStreamingMarkdownParts } from "./markdown.test-support.ts";
+import { toSanitizedJsonHtml, toSanitizedMarkdownHtml } from "./markdown.ts";
 
 function render(source: string, options?: MarkdownRenderOptions) {
   return interactiveHtml(toSanitizedMarkdownHtml(source, options));
@@ -30,11 +27,7 @@ const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execComma
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  if (originalExecCommand) {
-    Object.defineProperty(document, "execCommand", originalExecCommand);
-  } else {
-    Reflect.deleteProperty(document, "execCommand");
-  }
+  restorePropertyDescriptor(document, "execCommand", originalExecCommand);
   document.body.replaceChildren();
 });
 
@@ -290,10 +283,14 @@ it.each([
   ["wrap", "is-wrapped", "aria-pressed", [true, false]],
 ] as const)("handles %s through the shared click owner", (action, className, attribute, states) => {
   const fragment = interactive();
+  document.body.append(fragment);
+  const outside = document.body.appendChild(document.createElement("button"));
+  outside.focus();
   const wrapper = fragment.querySelector(".code-block-wrapper");
   const button = fragment.querySelector<HTMLButtonElement>(`.code-block-${action}`);
   for (const state of states) {
     button?.click();
+    expect(document.activeElement).toBe(outside);
     expect(wrapper?.classList.contains(className)).toBe(state);
     expect(button?.getAttribute(attribute)).toBe(String(state));
   }
