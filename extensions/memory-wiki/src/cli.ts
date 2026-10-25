@@ -315,6 +315,16 @@ async function resolveWikiApplyBody(params: { body?: string; bodyFile?: string }
     // Keep symlinked body files working while the SDK refuses special files.
     const { buffer: bytes } = await readRegularFile({
       filePath: await fs.realpath(params.bodyFile),
+    }).catch((error: unknown) => {
+      // SDK admission errors are unclassified; structured I/O errors retain
+      // their original identity and code for callers.
+      if (!(error instanceof Error) || "code" in error) {
+        throw error;
+      }
+      throw new Error(
+        `wiki apply synthesis --body-file could not be read: ${params.bodyFile}. ${error.message}. Supply a regular UTF-8 file (or use --body), then retry.`,
+        { cause: error },
+      );
     });
     // Reject before mutation: blank files would wipe an existing synthesis, and
     // replacement decoding would turn Latin-1 bytes into U+FFFD in the vault.

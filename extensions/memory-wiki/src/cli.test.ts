@@ -245,7 +245,7 @@ describe("memory-wiki cli", () => {
       });
       try {
         await expect(runWiki(config, [...args, "--body-file", input])).rejects.toThrow(
-          /regular file/,
+          `wiki apply synthesis --body-file could not be read: ${input}. path must be a regular file. Supply a regular UTF-8 file (or use --body), then retry.`,
         );
         expect(await read("syntheses/good.md")).toBe(before);
         expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
@@ -282,6 +282,26 @@ describe("memory-wiki cli", () => {
       expect((await fs.lstat(input)).isSymbolicLink()).toBe(true);
     },
   );
+
+  it("preserves structured --body-file I/O errors before changing synthesis", async () => {
+    const { config, read, write } = await createCliVault();
+    const args = ["apply", "synthesis", "Good", "--source-id", "src.manual"];
+    await runWiki(config, [...args, "--body", "Keep this summary."]);
+    const before = await read("syntheses/good.md");
+    const input = await write("body.txt", "Replacement summary.");
+    const bodyPath = await fs.realpath(input);
+    const denied = Object.assign(new Error("Body file read denied"), { code: "EACCES" });
+    const realOpen = fs.open;
+    vi.spyOn(fs, "open").mockImplementation((filePath, flags, mode) => {
+      if (filePath === bodyPath) {
+        return Promise.reject(denied);
+      }
+      return realOpen(filePath, flags, mode);
+    });
+
+    await expect(runWiki(config, [...args, "--body-file", input])).rejects.toBe(denied);
+    expect(await read("syntheses/good.md")).toBe(before);
+  });
 
   it("rejects blank and invalid UTF-8 --body-file before wiping synthesis", async () => {
     const { config, read, write } = await createCliVault();
