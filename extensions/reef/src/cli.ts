@@ -71,9 +71,12 @@ function reefCliAction<TOptions extends { json: boolean }, TArgs extends unknown
     try {
       await run(output, options, ...positional);
     } catch (error) {
+      // The host CLI owns the failure envelope and sanitization for JSON output.
+      if (output.json) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
-      const stream = output.json ? process.stdout : process.stderr;
-      stream.write(output.json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+      process.stderr.write(`${message}\n`);
       process.exitCode = 1;
     }
   };
