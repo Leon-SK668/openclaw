@@ -1,6 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import fs from "node:fs/promises";
 import type { Command } from "commander";
+import { readRegularFile } from "openclaw/plugin-sdk/file-access-runtime";
 import { callGatewayFromCli } from "openclaw/plugin-sdk/gateway-runtime";
 import { resolveDefaultAgentId } from "openclaw/plugin-sdk/memory-host-core";
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
@@ -311,7 +312,10 @@ async function resolveWikiApplyBody(params: { body?: string; bodyFile?: string }
     return params.body;
   }
   if (params.bodyFile?.trim()) {
-    const bytes = await fs.readFile(params.bodyFile);
+    // Keep symlinked body files working while the SDK refuses special files.
+    const { buffer: bytes } = await readRegularFile({
+      filePath: await fs.realpath(params.bodyFile),
+    });
     // Reject before mutation: blank files would wipe an existing synthesis, and
     // replacement decoding would turn Latin-1 bytes into U+FFFD in the vault.
     if (!isUtf8(bytes)) {
