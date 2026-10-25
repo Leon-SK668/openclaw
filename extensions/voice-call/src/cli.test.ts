@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -99,6 +100,8 @@ function gatewayCredentialsError(message: string): Error {
 }
 
 describe("voice-call CLI status fallback", () => {
+  const briefDirs: string[] = [];
+
   afterEach(() => {
     callGatewayFromCliMock.mockReset();
     findCallInStoreMock.mockReset();
@@ -109,7 +112,17 @@ describe("voice-call CLI status fallback", () => {
     sleepMock.mockReset();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    for (const dir of briefDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
+
+  function createBriefPath() {
+    // openclaw-temp-dir: allow extension tests cannot import repo-only test helpers
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-voice-call-brief-"));
+    briefDirs.push(dir);
+    return path.join(dir, "brief.json");
+  }
 
   function buildProgram(
     manager: Record<string, unknown>,
@@ -569,6 +582,78 @@ describe("voice-call CLI status fallback", () => {
     const result = await runCustomLogTailShortRead(appended, firstReadBytes, initial, replacement);
 
     expect(result).toEqual({ shortened: true, output: replacement });
+  });
+
+  it.skipIf(process.platform === "win32").each(["call", "start"])(
+    "rejects a FIFO brief before initiating %s",
+    async (subcommand) => {
+      const file = createBriefPath();
+      execFileSync("mkfifo", [file]);
+      const writer = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+      fs.writeFileSync(writer, '{"task":"Do not initiate this call"}');
+      let writerOpen = true;
+      const closeWriter = () => {
+        if (writerOpen) {
+          writerOpen = false;
+          fs.closeSync(writer);
+        }
+      };
+      // Let a regressed read reach EOF so rejection fails without hanging the worker.
+      const release = setTimeout(closeWriter, 1000);
+      callGatewayFromCliMock.mockResolvedValue({ callId: "call-1" });
+      const ensureRuntime = vi.fn();
+      try {
+        await expect(
+          captureCli(buildProgram({}, {}, ensureRuntime), [
+            subcommand,
+            "--message",
+            "Hello",
+            "--to",
+            "+15550001111",
+            "--brief-file",
+            file,
+          ]),
+        ).rejects.toThrow("must be a regular file");
+        expect(callGatewayFromCliMock).not.toHaveBeenCalled();
+        expect(ensureRuntime).not.toHaveBeenCalled();
+      } finally {
+        clearTimeout(release);
+        closeWriter();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32").each(["regular", "symlink"])(
+    "accepts a 16000-character Unicode %s brief",
+    async (kind) => {
+      const file = createBriefPath();
+      const brief = { task: "Arrange a visit", context: "é".repeat(4000) };
+      const json = JSON.stringify(brief);
+      fs.writeFileSync(file, " ".repeat(16000 - json.length) + json);
+      const input = kind === "regular" ? file : `${file}.link`;
+      if (kind === "symlink") {
+        fs.symlinkSync(file, input);
+      }
+      callGatewayFromCliMock.mockResolvedValue({ callId: "call-1" });
+      const output = await captureCli(buildProgram({}, { ringTimeoutMs: 1000 }), [
+        "start",
+        "--to",
+        "+15550001111",
+        "--brief-file",
+        input,
+      ]);
+      expect(JSON.parse(output)).toEqual({ callId: "call-1" });
+      expect(callGatewayFromCliMock.mock.calls[0]?.[2]).toMatchObject({ brief });
+    },
+  );
+
+  it("retains the character limit for brief files", async () => {
+    const file = createBriefPath();
+    fs.writeFileSync(file, " ".repeat(16001));
+    await expect(
+      runCli(buildProgram({}), ["start", "--to", "+15550001111", "--brief-file", file]),
+    ).rejects.toThrow("Brief input is too large");
+    expect(callGatewayFromCliMock).not.toHaveBeenCalled();
   });
 
   it("passes a structured brief and routes steering through the Gateway", async () => {

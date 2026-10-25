@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Command } from "commander";
 import { createDeferred } from "openclaw/plugin-sdk/concurrency-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { readRegularFile } from "openclaw/plugin-sdk/file-access-runtime";
 import { MAX_TCP_PORT } from "openclaw/plugin-sdk/number-runtime";
 import {
   isRecord,
@@ -45,9 +46,14 @@ async function readCliBrief(options: {
   if (options.brief && options.briefFile) {
     throw new Error("Use either --brief or --brief-file");
   }
-  const raw = options.briefFile
-    ? await readFile(resolveUserPath(options.briefFile), "utf8")
-    : options.brief;
+  let raw = options.brief;
+  if (options.briefFile) {
+    // Preserve symlinked inputs while the regular-file reader rejects FIFOs without blocking.
+    const { buffer } = await readRegularFile({
+      filePath: await realpath(resolveUserPath(options.briefFile)),
+    });
+    raw = buffer.toString("utf8");
+  }
   if (raw === undefined) {
     return undefined;
   }
