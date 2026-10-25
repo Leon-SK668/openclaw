@@ -85,7 +85,9 @@ it.each([
 });
 
 it.each([false, true])("reports Gateway recovery instructions (json=%s)", async (json) => {
-  mocks.callGatewayFromCli.mockRejectedValue(new Error("Gateway offline."));
+  mocks.callGatewayFromCli.mockRejectedValue(
+    new Error("Gateway offline.", { cause: new Error("Private transport diagnostics.") }),
+  );
   const result = runCli(["pair", ...(json ? ["--json"] : [])]);
   const message =
     "Gateway offline.\nCheck that the Gateway is running and mcp-relay is enabled with openclaw plugins enable mcp-relay, then retry.";
