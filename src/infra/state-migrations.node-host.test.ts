@@ -158,6 +158,7 @@ describe("legacy node-host Doctor migration", () => {
       expect(refused.changes).toEqual([]);
       expect(refused.warningDisposition).toBe("recoverable");
       expect(refused.warnings.join("\n")).toContain("must be valid UTF-8");
+      expect(refused.warnings.join("\n")).toMatch(/Back up .+, replace it .*retry Doctor/);
       expect(readCanonicalRow(env)).toBeUndefined();
       for (const [file, bytes] of originals) {
         expect(await fsp.readFile(file)).toEqual(bytes);

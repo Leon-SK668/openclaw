@@ -282,7 +282,10 @@ export async function readLegacyMigrationSourceSnapshot(params: {
   );
   // Recovery compares text fingerprints before domain parsing can validate the bytes.
   const raw = params.hashDecodedText
-    ? decodeUtf8Input(opened.buffer, `Legacy ${params.label} source ${params.sourcePath}`)
+    ? decodeUtf8Input(
+        opened.buffer,
+        `Back up legacy ${params.label} source ${params.sourcePath}, replace it with a corrected copy, and retry Doctor; the input`,
+      )
     : opened.buffer.toString("utf8");
   return {
     buffer: opened.buffer,
