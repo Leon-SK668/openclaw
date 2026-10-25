@@ -1,5 +1,50 @@
 # Team-shaped synthetic state
 
+## System prompt report retention
+
+`node --expose-gc --import ./scripts/tsx.mjs scripts/perf/system-prompt-report-retention.ts`
+retains 200 real reports from distinct synthetic 80-skill catalogs after dropping
+the inputs, then releases the reports as a control. It reports forced-GC heap
+deltas and a digest of every report. `--expect-detached` fails if compact reports
+retain their large input catalogs; `--snapshot <path>` captures synthetic heap
+parents for independent inspection. Compare at least five alternating baseline
+and candidate samples. This owner proof does not predict production savings when
+another owner still retains the same catalog.
+
+Use `--mode timing --operations 100000` for untraced construction CPU and GC;
+`--mode allocation` separately samples allocation including collected objects.
+`--owner <path>` selects a saved report module (or its bundle). Paired runs use
+separate `--ready-file` paths and a common `--start-file` containing a future epoch
+in milliseconds after both warmups finish. Apply the shared quiet-slot guard,
+counterbalanced launch order and swapped interleaved CPU sets. Acceptance:
+unchanged report digest, discarded catalog backing storage released, and no
+material construction regression under the campaign's paired rules. Timing in
+allocation and forced-GC modes is not acceptance evidence.
+
+## Replay history preparation
+
+`replay-history-measure.ts` publishes synthetic user/assistant messages through an
+in-memory `SessionManager`, then repeatedly prepares the retained history with a
+new user tail. One tenth of assistant messages require metadata cleanup.
+
+```sh
+node --expose-gc --import ./scripts/tsx.mjs scripts/perf/replay-history-measure.ts \
+  --stage history --messages 1000 --attempts 5000
+```
+
+Use `--stage normalize` or `--stage images` for attribution. Run `--allocations`
+separately; sampled allocation includes collected objects, and its timing is not
+acceptance evidence. The report includes input/output hashes, content and message
+reuse, CPU, latency, event-loop samples, and per-kind GC totals and maxima.
+Presented-message counts describe the input size, not internal content scans.
+This measures replay preparation, not complete Gateway turn latency.
+
+Require matching hashes and fewer allocations or CPU per attempt, with no
+material regression under the campaign's absolute-delta and sample-count rules.
+For concurrent pairs, use distinct `--ready-file` paths and a shared
+`--start-file` containing a future epoch in milliseconds. Swap CPU placement for
+the second pair; run matched A/A controls before interpreting adverse GC results.
+
 ## Device pairing publication
 
 `device-pairing-publication-measure.ts` seeds 64 synthetic paired nodes, then
@@ -161,6 +206,29 @@ Source bytes and V8 code statistics are not dominator-retained bytes: use the
 heap snapshot analyzer for retained-size attribution. All fixtures and mock
 provider responses are synthetic; this workload does not reproduce a private
 production plugin configuration or measure provider-network latency.
+
+### Summary identity strings
+
+`session-summary-id-retention.ts` prepares 10,000 synthetic sessions with observer
+digests and restart-recovery sources, 8,000 settled runs, 2,000 archived sessions,
+and 40 synthetic plugins. Capture pages through the real roster, completes ten
+mock-provider turns across five dashboards, applies label churn, then requests a
+main-isolate heap snapshot from the built Gateway. Use fresh state for each side:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/session-summary-id-retention.ts \
+  --prepare --state-dir /path/to/new-summary-fixture
+node --import ./scripts/tsx.mjs scripts/perf/session-summary-id-retention.ts \
+  --capture --state-dir /path/to/new-summary-fixture --output /path/to/new-capture
+```
+
+Build the selected revision first. Both commands accept matching `--port` and
+`--mock-port` values (defaults 41697 and 41698, loopback only); capture accepts
+`--entry` for its built JavaScript entry. Analyze the path in `capture.json` with
+`scripts/heap-snapshot-diff.mjs --summary`. Compare physical duplicate-string
+nodes/bytes and family populations under identical churn; JavaScript equality
+does not prove string sharing. Forced-GC snapshots establish retention, not CPU,
+GC-throughput, or production-wide savings. Keep snapshots local and synthetic.
 
 ## Released session authority
 
