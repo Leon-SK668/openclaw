@@ -48,10 +48,10 @@ async function runCommand(
     );
     const message = `${detail}\nCheck that the Gateway is running and mcp-relay is enabled with openclaw plugins enable mcp-relay, then retry.`;
     if (opts.json) {
-      defaultRuntime.writeJson({ error: message });
-    } else {
-      defaultRuntime.error(message);
+      // oxlint-disable-next-line preserve-caught-error -- The host renderer must not expose an unredacted cause.
+      throw new Error(message);
     }
+    defaultRuntime.error(message);
     defaultRuntime.exit(1);
   }
 }
