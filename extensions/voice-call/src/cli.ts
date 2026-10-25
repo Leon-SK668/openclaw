@@ -46,14 +46,11 @@ async function readCliBrief(options: {
   if (options.brief && options.briefFile) {
     throw new Error("Use either --brief or --brief-file");
   }
-  let raw = options.brief;
-  if (options.briefFile) {
-    // Preserve symlinked inputs while the regular-file reader rejects FIFOs without blocking.
-    const { buffer } = await readRegularFile({
-      filePath: await realpath(resolveUserPath(options.briefFile)),
-    });
-    raw = buffer.toString("utf8");
-  }
+  const raw = options.briefFile
+    ? (
+        await readRegularFile({ filePath: await realpath(resolveUserPath(options.briefFile)) })
+      ).buffer.toString("utf8")
+    : options.brief;
   if (raw === undefined) {
     return undefined;
   }
