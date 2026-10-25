@@ -499,7 +499,9 @@ describe("voice-call CLI status fallback", () => {
           ],
           { stdio: "ignore" },
         );
-        const writerClosed = new Promise((resolve) => writer.once("close", resolve));
+        const writerClosed = new Promise((resolve) => {
+          writer.once("close", resolve);
+        });
         callGatewayFromCliMock.mockResolvedValue({ callId: "call-1" });
         const ensureRuntime = vi.fn();
         try {
