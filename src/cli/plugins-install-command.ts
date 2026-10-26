@@ -7,6 +7,7 @@ import type {
   PluginsInstallParams,
   PluginsInstallResult,
 } from "../../packages/gateway-protocol/src/schema/plugins.js";
+import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
 import { theme } from "../../packages/terminal-core/src/theme.js";
 import { assertConfigWriteAllowedInCurrentMode, replaceConfigFile } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -471,7 +472,7 @@ async function installHookPackLocal(
       runtime.log(
         linked
           ? `Linked hook pack path: ${shortenHomePath(source.path)}`
-          : `Installed hook pack: ${result.hookPackId}`,
+          : `Installed hook pack: ${sanitizeTerminalText(result.hookPackId)}`,
       );
       runtime.log(
         "Hook install/link config can activate immediately in hybrid mode; code-only updates and reload mode off need a Gateway restart.",
@@ -558,7 +559,7 @@ async function installPluginWithHookFallback(params: InstallParams): Promise<Ins
       runtime.log(
         installRequest.source === "local" && installRequest.link
           ? `Linked plugin path: ${shortenHomePath(installRequest.path)}`
-          : `Installed plugin: ${result.plugin.id}`,
+          : `Installed plugin: ${sanitizeTerminalText(result.plugin.id)}`,
       );
       runtime.log(
         result.application
