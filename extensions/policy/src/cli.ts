@@ -15,6 +15,7 @@ import { MAX_TIMER_TIMEOUT_MS } from "openclaw/plugin-sdk/number-runtime";
 import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import { defaultRuntime as cliRuntime } from "openclaw/plugin-sdk/runtime";
 import { formatCliCommand } from "openclaw/plugin-sdk/setup-tools";
+import { sanitizeTerminalText } from "openclaw/plugin-sdk/terminal-safe-text";
 import { POLICY_CHECK_IDS } from "./doctor/check-ids.js";
 import { evaluatePolicy, toAttestedFinding } from "./doctor/evaluation.js";
 import { POLICY_FIX_METADATA_BY_CHECK_ID } from "./doctor/fix-metadata.js";
@@ -124,7 +125,7 @@ async function runPolicyCommand(
       // Watch may have emitted reports already; keep its terminal error on one NDJSON line.
       cliRuntime.writeJson({ ok: false, error: { type: "cli_error", message } }, 0);
     }
-    cliRuntime.error(message);
+    cliRuntime.error(sanitizeTerminalText(message));
     return 2;
   }
 }
@@ -168,10 +169,10 @@ async function buildPolicyCheckReport(
     mode: "lint",
     runtime: {
       log(value) {
-        process.stdout.write(`${String(value)}\n`);
+        writePolicyLine(String(value));
       },
       error(value) {
-        cliRuntime.error(String(value));
+        cliRuntime.error(sanitizeTerminalText(String(value)));
       },
       exit(code) {
         process.exitCode = code;
@@ -280,6 +281,11 @@ async function policyCompareCandidatePath(options: PolicyCompareOptions): Promis
   return resolve(cwd, policyPath);
 }
 
+function writePolicyLine(line: string): void {
+  // Escape data before adding the report separator so paths cannot forge extra lines.
+  process.stdout.write(sanitizeTerminalText(line) + "\n");
+}
+
 function writePolicyCheckReport(report: PolicyCheckReport, options: PolicyCheckOptions): void {
   if (options.json === true || !process.stdout.isTTY) {
     process.stdout.write(
@@ -295,16 +301,14 @@ function writePolicyCheckReport(report: PolicyCheckReport, options: PolicyCheckO
   } else if (report.findings.length === 0) {
     const policyHash = report.attestation?.policy?.hash ?? "missing";
     const evidenceHash = report.attestation?.workspace.hash ?? "unavailable";
-    process.stdout.write(
-      `policy check: no findings (policy ${policyHash}, evidence ${evidenceHash})\n`,
-    );
+    writePolicyLine(`policy check: no findings (policy ${policyHash}, evidence ${evidenceHash})`);
   } else {
-    process.stdout.write(`policy check: ${report.findings.length} finding(s)\n`);
+    writePolicyLine(`policy check: ${report.findings.length} finding(s)`);
     for (const finding of report.findings) {
       const where = finding.path !== undefined ? ` ${finding.path}` : "";
       const line = finding.line !== undefined ? `:${finding.line}` : "";
-      process.stdout.write(
-        `  [${finding.severity}] ${finding.checkId}${where}${line} - ${finding.message}\n`,
+      writePolicyLine(
+        `  [${finding.severity}] ${finding.checkId}${where}${line} - ${finding.message}`,
       );
     }
   }
@@ -319,16 +323,16 @@ function writePolicyConformanceReport(
     return;
   }
   if (report.findings.length === 0) {
-    process.stdout.write(
-      `policy compare: no findings (${report.policyPath} is at least as strict as ${report.baselinePath}; ${report.rulesChecked} rule(s) checked)\n`,
+    writePolicyLine(
+      `policy compare: no findings (${report.policyPath} is at least as strict as ${report.baselinePath}; ${report.rulesChecked} rule(s) checked)`,
     );
     return;
   }
-  process.stdout.write(
-    `policy compare: ${report.findings.length} finding(s) (${report.rulesChecked} rule(s) checked)\n`,
+  writePolicyLine(
+    `policy compare: ${report.findings.length} finding(s) (${report.rulesChecked} rule(s) checked)`,
   );
   for (const finding of report.findings) {
-    process.stdout.write(`  [${finding.severity}] ${finding.checkId} - ${finding.message}\n`);
+    writePolicyLine(`  [${finding.severity}] ${finding.checkId} - ${finding.message}`);
   }
 }
 
@@ -350,19 +354,19 @@ function writePolicyWatchReport(
     return;
   }
   if (status === "stale") {
-    process.stdout.write(
-      `policy watch: accepted attestation is stale (current ${report.attestation?.attestationHash}, expected ${report.expectedAttestationHash}). Review policy check output, then update the supervisor/gateway accepted attestation.\n`,
+    writePolicyLine(
+      `policy watch: accepted attestation is stale (current ${report.attestation?.attestationHash}, expected ${report.expectedAttestationHash}). Review policy check output, then update the supervisor/gateway accepted attestation.`,
     );
     return;
   }
   if (status === "findings") {
-    process.stdout.write(
-      `policy watch: ${report.findings.length} finding(s); accepted attestation cannot be updated until policy check is clean.\n`,
+    writePolicyLine(
+      `policy watch: ${report.findings.length} finding(s); accepted attestation cannot be updated until policy check is clean.`,
     );
     return;
   }
-  process.stdout.write(
-    `policy watch: clean (attestation ${report.attestation?.attestationHash}, evidence ${report.attestation?.workspace.hash})\n`,
+  writePolicyLine(
+    `policy watch: clean (attestation ${report.attestation?.attestationHash}, evidence ${report.attestation?.workspace.hash})`,
   );
 }
 

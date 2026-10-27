@@ -33,7 +33,7 @@ async function runPolicyCli(args: readonly string[]) {
     registerPolicyCli(program);
     await program.parseAsync(["policy", ...args], { from: "user" });
     const lastOutput = stdout.at(-1) ?? "";
-    const parsed = /^[{[]/.test(lastOutput.trimStart()) ? JSON.parse(lastOutput) : {};
+    const parsed = lastOutput.trimStart().startsWith("{") ? JSON.parse(lastOutput) : {};
     return {
       exitCode: process.exitCode ?? 0,
       parsed,
@@ -414,6 +414,39 @@ describe("policy commands", () => {
     expect(parsed.rulesChecked).toBeGreaterThan(10);
   });
 
+  it.each([false, true])(
+    "escapes terminal controls in compare reports while preserving JSON (weaker=%s)",
+    async (weaker) => {
+      const filename = "café\u0085FORGED🦀.jsonc";
+      const baselinePath = join(workspaceDir, "baseline.jsonc");
+      const policyPath = join(workspaceDir, filename);
+      await writeFixture(baselinePath, execHosts("sandbox"));
+      await writeFixture(
+        policyPath,
+        weaker ? execHosts("sandbox", "gateway") : execHosts("sandbox"),
+      );
+      const before = await fs.readFile(policyPath, "utf8");
+      const args = ["compare", "--baseline", baselinePath, "--policy", policyPath];
+
+      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+      const human = await runPolicyCli(args);
+      expect(human.exitCode).toBe(weaker ? 1 : 0);
+      expect(human.stdout).toContain("caféFORGED🦀.jsonc");
+      expect(human.stdout.replaceAll("\n", "")).not.toMatch(/\p{Cc}/u);
+      expect(human.stderr).toBe("");
+
+      const machine = await runPolicyCli([...args, "--json"]);
+      expect(machine.exitCode).toBe(human.exitCode);
+      expect(machine.parsed).toMatchObject({
+        ok: !weaker,
+        policyPath: filename,
+        rulesChecked: 1,
+      });
+      expect(machine.parsed.findings).toHaveLength(weaker ? 1 : 0);
+      expect(await fs.readFile(policyPath, "utf8")).toBe(before);
+    },
+  );
+
   it("accepts exec approval allowlist conformance entries with argPattern", async () => {
     const policy = approvalAllowlist(
       ["status", { pattern: "calendar-cli", argPattern: "^sync\\b" }],
@@ -676,15 +709,19 @@ describe("policy commands", () => {
     expect(stderr).toContain("Pass --agent <id>.");
   });
 
-  it("rejects an unknown explicit owner with profile-aware guidance", async () => {
+  it.each([
+    { id: "ghost", display: "ghost" },
+    { id: "ghost\u0007\u0085\nFORGED", display: "ghost\\nFORGED" },
+  ])("rejects unknown owner $display with safe profile-aware guidance", async ({ id, display }) => {
     await writeExplicitFleetConfig();
     vi.stubEnv("OPENCLAW_PROFILE", "testprof");
     vi.stubEnv("OPENCLAW_CONTAINER_HINT", "");
 
-    const { exitCode, stderr } = await runPolicyCli(["check", "--agent", "ghost", "--json"]);
+    const { exitCode, parsed, stderr } = await runPolicyCli(["check", "--agent", id, "--json"]);
     expect(exitCode).toBe(2);
     expect(stderr).toContain(
-      'Unknown agent id "ghost". Run openclaw --profile testprof agents list to see configured agents.',
+      `Unknown agent id "${display}". Run openclaw --profile testprof agents list to see configured agents.`,
     );
+    expect(parsed.error.message).toContain(`Unknown agent id "${id}".`);
   });
 });
