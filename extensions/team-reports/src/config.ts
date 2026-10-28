@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { extractErrorCode } from "openclaw/plugin-sdk/error-runtime";
@@ -155,9 +156,13 @@ async function readPeopleFile(filePath: string) {
     if (!stat.isFile()) {
       throw new Error(invalidFileMessage);
     }
-    const data: unknown = JSON.parse(
-      (await readFileHandleBounded(handle, MAX_PEOPLE_FILE_BYTES)).toString("utf8"),
-    );
+    const bytes = await readFileHandleBounded(handle, MAX_PEOPLE_FILE_BYTES);
+    if (!isUtf8(bytes)) {
+      throw new Error(
+        "team-reports.peopleFile must be valid UTF-8. Correct the file encoding and reload the plugin.",
+      );
+    }
+    const data: unknown = JSON.parse(bytes.toString("utf8"));
     return peopleFileSchema.parse(data).people;
   } catch (error) {
     throw extractErrorCode(error) === "too-large" ? new Error(invalidFileMessage) : error;
