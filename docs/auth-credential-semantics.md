@@ -127,6 +127,12 @@ writing.
 OAuth upserts recheck the current local or inherited credential after admission,
 before applying the existing generation-replacement rules.
 
+Cooldown, blocked, and disabled windows update the current availability view
+without replacing prepared plugin generations. Selection reads the committed
+windows immediately; bursts of availability changes coalesce metadata notifications
+without announcing a model catalog change. Credential, profile membership, order,
+and ownership changes still invalidate the prepared runtime before its next use.
+
 Runtime auth-store updates keep their read, merge, encode, and commit in the
 existing SQLite worker. Update callbacks execute at most once against the
 transaction's current rows; live owner admission is checked again before commit.
@@ -278,6 +284,11 @@ its marker and inherits the shared credential only after verifying that the
 shared credential belongs to the same account. If that identity cannot be
 verified, the peer remains terminally fenced instead of inheriting another
 account.
+
+Concurrent requests serialize first-use authorization capture when their local
+or shared credential stores overlap. Each request retains its own live authority;
+closing one does not close another. Credential replacement, revocation, pending
+writes, and uncertain settlement still refuse stale authorization.
 
 Catalog discovery fences and settles historical peers through the same
 request-owned native writer as the refreshing credential. Each peer update
