@@ -45,3 +45,27 @@ it("drops serialized image parts and decodes serialized text parts", async () =>
   expect(page).toContain(text);
   expect(page).toContain("Active-branch messages: 1");
 });
+
+it.each([
+  ["export.json", true],
+  ["BACKUP.JSON", false],
+  ["backup", false],
+])("imports %s according to its file type", async (name, directory) => {
+  const { rootDir, config, read } = await createVault({ initialize: true });
+  const exportPath = path.join(rootDir, name);
+  if (directory) {
+    await fs.mkdir(exportPath);
+  }
+  const file = directory ? path.join(exportPath, "conversations.json") : exportPath;
+  const text = "Imported café 日本語\n\n    indented";
+  const bytes = JSON.stringify([createChatGptConversation(text, "Received.")]);
+  await fs.writeFile(file, bytes);
+
+  const imported = await importChatGptConversations({ config, exportPath });
+  expect(imported.createdCount).toBe(1);
+  expect(imported.sourcePath).toBe(file);
+  expect(await read(imported.actions[0]!.pagePath)).toContain(text);
+  const repeated = await importChatGptConversations({ config, exportPath });
+  expect(repeated.skippedCount).toBe(1);
+  expect(await fs.readFile(file, "utf8")).toBe(bytes);
+});
