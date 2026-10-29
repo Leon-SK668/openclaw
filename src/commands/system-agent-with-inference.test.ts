@@ -23,8 +23,10 @@ vi.mock("./onboard-guided.js", () => ({
   runGuidedOnboarding: inferenceMocks.runGuidedOnboarding,
 }));
 
-const requestExitAfterOneShotOutput = vi.hoisted(() => vi.fn());
-vi.mock("../cli/one-shot-exit.js", () => ({ requestExitAfterOneShotOutput }));
+const exitMocks = vi.hoisted(() => ({ requestExitAfterOneShotOutput: vi.fn() }));
+vi.mock("../cli/one-shot-exit.js", () => ({
+  requestExitAfterOneShotOutput: exitMocks.requestExitAfterOneShotOutput,
+}));
 
 const tty = { isTTY: true } as unknown as NodeJS.ReadableStream & NodeJS.WritableStream;
 const pipe = { isTTY: false } as unknown as NodeJS.ReadableStream & NodeJS.WritableStream;
@@ -37,6 +39,7 @@ const verifiedResult = {
 };
 const expiredAuth = { ok: false, status: "auth", error: "login expired" };
 const { runSystemAgent, verifySetupInference } = inferenceMocks;
+const { requestExitAfterOneShotOutput } = exitMocks;
 
 function expectFailureOutput(runtime: RuntimeEnv, json: boolean, expected: unknown) {
   const calls = vi.mocked(json ? runtime.log : runtime.error).mock.calls;
@@ -78,10 +81,8 @@ describe("runSystemAgentWithInference", () => {
     await runSystemAgentWithInference({ interactive: false }, runtime);
     expect(runtime.error).not.toHaveBeenCalled();
     expect(getRuntimeConfig().plugins?.enabled).toBe(false);
-    expect(runSystemAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ verifiedInference }),
-      runtime,
-    );
+    const verifiedOptions = expect.objectContaining({ verifiedInference });
+    expect(runSystemAgent).toHaveBeenCalledWith(verifiedOptions, runtime);
     expect(requestExitAfterOneShotOutput).toHaveBeenCalledExactlyOnceWith(runtime);
   });
 
@@ -98,10 +99,10 @@ describe("runSystemAgentWithInference", () => {
   });
 
   it("lets interactive OpenClaw execution errors propagate", async () => {
-    inferenceMocks.runSystemAgent.mockRejectedValue(new Error("interactive operation failed"));
-    await expect(runSystemAgentWithInference({ input: tty, output: tty }, runtime)).rejects.toThrow(
-      "interactive operation failed",
-    );
+    const message = "interactive operation failed";
+    runSystemAgent.mockRejectedValue(new Error(message));
+    const execution = runSystemAgentWithInference({ input: tty, output: tty }, runtime);
+    await expect(execution).rejects.toThrow(message);
     expect(runtime.error).not.toHaveBeenCalled();
     expect(requestExitAfterOneShotOutput).not.toHaveBeenCalled();
   });
