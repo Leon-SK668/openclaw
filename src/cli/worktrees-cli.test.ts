@@ -1,4 +1,7 @@
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
 import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
@@ -73,6 +76,31 @@ describe("worktrees cli", () => {
       ...admission,
       allowSnapshotLoss: true,
     });
+  });
+  it.skipIf(process.platform === "win32").each([
+    ["remove", "--exact-state"],
+    ["restore", "--recover-exact-state"],
+  ])("rejects a FIFO %s request before worktree mutation", async (command, flag) => {
+    const file = path.join(tempDirs.make("openclaw-worktree-request-"), "request.pipe");
+    execFileSync("mkfifo", [file]);
+    // Release the old blocking reader so a regression cannot strand the test worker.
+    const writer = promisify(execFile)(process.execPath, [
+      "-e",
+      "require('node:fs').writeFileSync(process.argv[1], '{}')",
+      file,
+    ]);
+    const settled = writer.catch(() => undefined);
+    const remove = vi.spyOn(owner, "remove");
+    const restore = vi.spyOn(owner, "restore");
+    try {
+      await expect(run([command, "worktree-id", flag, file])).rejects.toThrow(/regular.*file/);
+    } finally {
+      writer.child.kill();
+      await settled;
+    }
+    expect(remove).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+    expect((await fs.lstat(file)).isFIFO()).toBe(true);
   });
   it.each([
     ["--exact-state", "/missing-request", "--force"],
