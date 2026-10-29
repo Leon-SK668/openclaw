@@ -1,4 +1,3 @@
-import { isUtf8 } from "node:buffer";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Command } from "commander";
@@ -39,6 +38,7 @@ import {
   getTailscaleSelfInfo,
   setupTailscaleExposureRoutes,
 } from "./webhook/tailscale.js";
+const briefFileDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 async function readCliBrief(options: {
   brief?: string;
@@ -53,12 +53,14 @@ async function readCliBrief(options: {
       filePath: await realpath(resolveUserPath(options.briefFile)),
     });
     // Replacement decoding would silently change the task sent to the call owner.
-    if (!isUtf8(buffer)) {
+    try {
+      raw = briefFileDecoder.decode(buffer);
+    } catch (error) {
       throw new Error(
         `Brief file must be valid UTF-8: ${options.briefFile}. Re-save it as UTF-8 and retry.`,
+        { cause: error },
       );
     }
-    raw = buffer.toString("utf8");
   }
   if (raw === undefined) {
     return undefined;
