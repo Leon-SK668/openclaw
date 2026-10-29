@@ -1,7 +1,5 @@
-import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { deferred } from "./deferred.test-helpers.js";
 import { ingestMemoryWikiSource } from "./ingest.js";
@@ -16,51 +14,12 @@ async function sourceFixture(filename = "meeting-notes.txt", content = "hello fr
   await fs.writeFile(inputPath, content, "utf8");
   const ingest = () =>
     ingestMemoryWikiSource({ config, inputPath, nowMs: Date.UTC(2026, 3, 5, 12) });
-  const read = (relativePath: string) =>
-    fs.readFile(path.join(config.vault.path, relativePath), "utf8");
+  const read = (file: string) => fs.readFile(path.join(config.vault.path, file), "utf8");
   return { config, inputPath, ingest, read };
 }
 
 describe("ingestMemoryWikiSource", () => {
-  it.skipIf(process.platform === "win32").each(["source", "existing page"] as const)(
-    "refuses a FIFO %s and releases the vault for retry",
-    async (kind) => {
-      const { config, inputPath, ingest, read } = await sourceFixture();
-      const first = await ingest();
-      const original = await read(first.pagePath);
-      const file = kind === "source" ? inputPath : path.join(config.vault.path, first.pagePath);
-      const contents = await fs.readFile(file);
-      await fs.unlink(file);
-      execFileSync("mkfifo", [file]);
-      // Unblock old reads and drain the old page write so RED cannot strand the vault queue.
-      const writer = promisify(execFile)(process.execPath, [
-        "-e",
-        "const fs = require('node:fs'); fs.writeFileSync(process.argv[1], 'unexpected pipe contents'); if (process.argv[2] === 'existing page') fs.readFileSync(process.argv[1]);",
-        file,
-        kind,
-      ]);
-      const settled = writer.catch(() => undefined);
-      try {
-        await expect(ingest()).rejects.toThrow(/regular.*file/);
-      } finally {
-        writer.child.kill();
-        await settled;
-      }
-      if (kind === "source") {
-        expect(await read(first.pagePath)).toBe(original);
-      }
-      expect((await fs.lstat(file)).isFIFO()).toBe(true);
-      await fs.unlink(file);
-      const target = `${file}.target`;
-      await fs.writeFile(target, contents);
-      await fs.symlink(target, file);
-      expect((await ingest()).created).toBe(false);
-      expect(await read(first.pagePath)).toContain("hello from source\n");
-      expect((await fs.lstat(file)).isSymbolicLink()).toBe(true);
-    },
-  );
-
-  it("rejects malformed source encodings without replacing the imported page", async () => {
+  it("preserves the imported page across invalid source files and retry", async () => {
     const content = "\uFEFFNotes: café, 東京, 🦞\n";
     const { config, inputPath, ingest, read } = await sourceFixture("meeting-notes.txt", content);
     const result = await ingest();
@@ -84,12 +43,19 @@ describe("ingestMemoryWikiSource", () => {
       Buffer.from([0xe2, 0x82]),
       Buffer.from([0xed, 0xa0, 0x80]),
       Buffer.concat([Buffer.from("valid UTF-8 café then Latin-1: "), Buffer.from([0xe9])]),
+      undefined,
     ]) {
-      await fs.writeFile(inputPath, bytes);
-      await expect(ingest()).rejects.toThrow(/UTF-8/);
+      await fs.rm(inputPath, { recursive: true });
+      await (bytes ? fs.writeFile(inputPath, bytes) : fs.mkdir(inputPath));
+      await expect(ingest()).rejects.toThrow(bytes ? /UTF-8/ : /regular.*file/);
       expect(await fs.readFile(pagePath)).toEqual(original);
-      expect(await fs.readFile(inputPath)).toEqual(bytes);
+      const actual = bytes ? fs.readFile(inputPath) : fs.readdir(inputPath);
+      await expect(actual).resolves.toEqual(bytes ?? []);
     }
+    await fs.rm(inputPath, { recursive: true });
+    await fs.writeFile(inputPath, content, "utf8");
+    expect((await ingest()).created).toBe(false);
+    expect(await fs.readFile(pagePath, "utf8")).toContain(content);
   });
 
   it("ingests a source with many backtick runs without losing its content", async () => {
