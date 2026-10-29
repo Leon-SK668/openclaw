@@ -91,6 +91,12 @@ describe("runSystemAgentWithInference", () => {
       json ? expect.stringContaining(message) : message,
     );
     expect(json ? currentRuntime.error : currentRuntime.log).not.toHaveBeenCalled();
+    if (json) {
+      expect(JSON.parse(String(vi.mocked(currentRuntime.log).mock.calls[0]?.[0]))).toEqual({
+        ok: false,
+        error: { type: "cli_error", message },
+      });
+    }
     expect(requestExitAfterOneShotOutput).toHaveBeenCalledExactlyOnceWith(currentRuntime, 1);
     expect(runSystemAgent).toHaveBeenCalledTimes(json ? 0 : 1);
     expect(vi.mocked(currentRuntime.exit).mock.calls).toEqual(json ? [] : [[1]]);
@@ -136,9 +142,13 @@ describe("runSystemAgentWithInference", () => {
   it("returns one structured error for --json --yes without a message", async () => {
     await runSystemAgentWithInference({ json: true, yes: true }, currentRuntime);
 
-    expect(currentRuntime.log).toHaveBeenCalledWith(
-      expect.stringContaining('"error": "OpenClaw --yes requires --message'),
-    );
+    expect(JSON.parse(String(vi.mocked(currentRuntime.log).mock.calls[0]?.[0]))).toEqual({
+      ok: false,
+      error: {
+        type: "cli_error",
+        message: "OpenClaw --yes requires --message so approval is limited to one request.",
+      },
+    });
     expect(currentRuntime.error).not.toHaveBeenCalled();
     expect(requestExitAfterOneShotOutput).toHaveBeenCalledWith(currentRuntime, 1);
     expect(currentRuntime.exit).toHaveBeenCalledWith(1);
@@ -154,7 +164,12 @@ describe("runSystemAgentWithInference", () => {
       expect.stringContaining("Run `openclaw onboard`"),
     );
     if (json) {
-      expect(currentRuntime.log).toHaveBeenCalledWith(expect.stringContaining('"status": "auth"'));
+      expect(JSON.parse(String(vi.mocked(currentRuntime.log).mock.calls[0]?.[0]))).toEqual({
+        ok: false,
+        status: "auth",
+        error: { type: "cli_error", message: "OpenClaw requires working inference: login expired" },
+        guidance: "Run `openclaw onboard` to connect and live-test AI first.",
+      });
       expect(currentRuntime.error).not.toHaveBeenCalled();
     }
     expect(requestExitAfterOneShotOutput).toHaveBeenCalledWith(currentRuntime, 1);
