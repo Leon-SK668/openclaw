@@ -429,11 +429,31 @@ describe("voice-call CLI status fallback", () => {
     },
   );
 
+  it.each(["call", "start"])("rejects a malformed UTF-8 brief before %s", async (subcommand) => {
+    await withBriefPath(async (file) => {
+      fs.writeFileSync(
+        file,
+        Buffer.concat([Buffer.from('{"task":"caf'), Buffer.from([0xff]), Buffer.from('"}')]),
+      );
+      callGatewayFromCliMock.mockResolvedValue({ callId: "call-1" });
+      const ensureRuntime = vi.fn();
+      await expect(
+        captureCli(buildProgram({}, ensureRuntime), [
+          ...briefArgs(file, subcommand),
+          "--message",
+          "Hello",
+        ]),
+      ).rejects.toThrow(/Brief file.*UTF-8/);
+      expect(callGatewayFromCliMock).not.toHaveBeenCalled();
+      expect(ensureRuntime).not.toHaveBeenCalled();
+    });
+  });
+
   it.skipIf(process.platform === "win32").each(["regular", "symlink"])(
     "accepts a 16000-character Unicode %s brief",
     async (kind) => {
       await withBriefPath(async (file) => {
-        const brief = { task: "Arrange a visit", context: "é".repeat(4000) };
+        const brief = { task: "Arrange a visit 日本語 �", context: "é".repeat(4000) };
         const json = JSON.stringify(brief);
         fs.writeFileSync(file, " ".repeat(16000 - json.length) + json);
         const input = kind === "regular" ? file : `${file}.link`;
