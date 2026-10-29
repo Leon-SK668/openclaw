@@ -1,7 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
-import path from "node:path";
-import { promisify } from "node:util";
 import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
@@ -17,15 +14,12 @@ afterEach(() => {
   resetConfigRuntimeState();
 });
 
-function createProgram() {
+async function run(args: string[]) {
   const program = new Command().name("openclaw").exitOverride();
   program.configureOutput({ writeErr: () => undefined });
   registerWorktreesCli(program);
-  return program;
+  return program.parseAsync(["worktrees", ...args], { from: "user" });
 }
-
-const run = (args: string[]) =>
-  createProgram().parseAsync(["worktrees", ...args], { from: "user" });
 const admission = { signal: expect.any(AbortSignal), commitGuard: expect.any(Function) };
 const owner = ManagedWorktreeService.prototype;
 const muteOutput = (json = true) =>
@@ -77,43 +71,19 @@ describe("worktrees cli", () => {
       allowSnapshotLoss: true,
     });
   });
-  it.skipIf(process.platform === "win32").each([
-    ["remove", "--exact-state"],
-    ["restore", "--recover-exact-state"],
-  ])("rejects a FIFO %s request before worktree mutation", async (command, flag) => {
-    const file = path.join(tempDirs.make("openclaw-worktree-request-"), "request.pipe");
-    execFileSync("mkfifo", [file]);
-    // Release the old blocking reader so a regression cannot strand the test worker.
-    const writer = promisify(execFile)(process.execPath, [
-      "-e",
-      "require('node:fs').writeFileSync(process.argv[1], '{}')",
-      file,
-    ]);
-    const settled = writer.catch(() => undefined);
-    const remove = vi.spyOn(owner, "remove");
-    const restore = vi.spyOn(owner, "restore");
-    try {
-      await expect(run([command, "worktree-id", flag, file])).rejects.toThrow(/regular.*file/);
-    } finally {
-      writer.child.kill();
-      await settled;
-    }
-    expect(remove).not.toHaveBeenCalled();
-    expect(restore).not.toHaveBeenCalled();
-    expect((await fs.lstat(file)).isFIFO()).toBe(true);
-  });
   it.each([
-    ["--exact-state", "/missing-request", "--force"],
-    ["--exact-state", "/missing-request", "--if-lossless"],
-    ["--if-lossless", "--force"],
-  ])("rejects conflicting removal policies %j before reading or mutating", async (...flags) => {
+    ["remove", "--exact-state", "/missing-request", "--force"],
+    ["remove", "--exact-state", "/missing-request", "--if-lossless"],
+    ["remove", "--if-lossless", "--force"],
+    ["remove", "--exact-state", "."],
+    ["restore", "--recover-exact-state", "."],
+  ])("rejects invalid %s requests before mutation", async (command, ...flags) => {
     const remove = vi.spyOn(owner, "remove");
     const lossless = vi.spyOn(owner, "removeIfLossless");
-    await expect(run(["remove", "worktree-id", ...flags])).rejects.toThrow(
-      "cannot be used with option",
-    );
-    expect(remove).not.toHaveBeenCalled();
-    expect(lossless).not.toHaveBeenCalled();
+    const restore = vi.spyOn(owner, "restore");
+    const error = flags.includes(".") ? /regular.*file/ : "cannot be used with option";
+    await expect(run([command, "worktree-id", ...flags])).rejects.toThrow(error);
+    expect([remove, lossless, restore].map((spy) => spy.mock.calls.length)).toEqual([0, 0, 0]);
   });
 
   it("leaves missing source profile values to Commander and performs no creation", async () => {
