@@ -10,6 +10,7 @@ const dirs = useAutoCleanupTempDirTracker(afterEach);
 const overTail = "x".repeat(256 * 1024 + 1);
 const blocked = "gateway start blocked";
 const bindError = "failed to bind gateway socket";
+const startupFailure = "Gateway failed to start: current failure";
 const FIFO = Symbol("writerless FIFO");
 type PositionalRead = (
   ...args: [buffer: Buffer, offset: number, length: number, position: number]
@@ -21,7 +22,7 @@ for (const [name, platform, stdout, stderr, expected] of [
   ["outside tail", "linux", `${blocked}\n${"filler\n".repeat(50_000)}current\n`, undefined, null],
   ["partial boundary", "linux", `${overTail} ${blocked}\ncurrent\n`, undefined, null],
   ["ENOSPC over generic stderr", "linux", "ENOSPC", "generic stderr", "ENOSPC"],
-  ["launchd supervisor log", "darwin", blocked, undefined, blocked],
+  ["launchd supervisor log", "darwin", startupFailure, undefined, startupFailure],
   [
     "ownership refusal",
     "darwin",
